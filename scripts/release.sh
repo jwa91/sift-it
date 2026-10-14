@@ -7,8 +7,8 @@
 #   scripts/release.sh X.Y.Z        a release (through `make release`)
 #   scripts/release.sh --snapshot   build, archive, and render the cask into dist/, unsigned; publish nothing
 #
-# It needs no secrets of its own: signing and notarizing use this Mac's keychain (scripts/codesign.sh,
-# docs/releasing.md), and the GitHub release and the cask use your gh login.
+# It needs no secrets of its own: signing and notarizing use this Mac's keychain (scripts/codesign.sh), and the GitHub
+# release and the cask use your gh login.
 set -euo pipefail
 
 OWNER=jwa91

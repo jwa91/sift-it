@@ -3,7 +3,7 @@ name: Release
 # Manual-only, and it doesn't publish: a cask must be signed and notarized,
 # and the Developer ID certificate and notarytool login live in the
 # releasing Mac's keychain, not in CI. Local releases via
-# `make release VERSION=X.Y.Z` are the canonical path (docs/releasing.md).
+# `make release VERSION=X.Y.Z` are the canonical path.
 # This builds what a release would and checks it.
 on:
   workflow_dispatch:

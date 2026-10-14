@@ -183,8 +183,6 @@ For a demo, `scripts/make-demo.sh` fills `~/sift-it-demo` with about 370 MB of p
 music, videos, PDFs, books and notes. The files have camera-roll and Downloads-folder names, and `CREDITS.csv` says
 where each one came from.
 
-Releases: `make release VERSION=x.y.z`; [docs/releasing.md](docs/releasing.md) sets a Mac up for it.
-
 ## Credits
 
 [EmbeddingGemma 2](https://huggingface.co/google/embeddinggemma-2) by Google DeepMind (Apache 2.0), in

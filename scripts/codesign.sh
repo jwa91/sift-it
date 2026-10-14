@@ -3,7 +3,7 @@
 #   - a "Developer ID Application" certificate with its private key. With exactly one, that's the one; with several,
 #     SIFT_IT_SIGN_IDENTITY names it (its name or SHA-1).
 #   - a notarytool keychain profile: "notarytool", or the one SIFT_IT_NOTARY_PROFILE names.
-# Each Mac is set up once (docs/releasing.md). The repo holds no credentials and no references to any.
+# A Mac you release from needs both, once. The repo holds no credentials and no references to any.
 #
 #   scripts/codesign.sh <binary>    sign and notarize it
 #   scripts/codesign.sh --check     check that this Mac can (make release runs it before building)
@@ -25,7 +25,7 @@ identity() {
   count="$(printf '%s' "$found" | grep -c . || true)"
   case "$count" in
     0)
-      echo "codesign: no Developer ID Application certificate in this Mac's keychain (see docs/releasing.md)" >&2
+      echo "codesign: no Developer ID Application certificate (with its private key) in this Mac's keychain" >&2
       return 1
       ;;
     1) printf '%s\n' "$found" | awk '{print $2}' ;;
@@ -44,7 +44,8 @@ check() {
   }
   identity > /dev/null
   xcrun notarytool history --keychain-profile "$profile" > /dev/null 2>&1 || {
-    echo "codesign: no working notarytool keychain profile \"$profile\" (see docs/releasing.md)" >&2
+    echo "codesign: no working notarytool keychain profile \"$profile\"" \
+      "(xcrun notarytool store-credentials $profile)" >&2
     return 1
   }
 }

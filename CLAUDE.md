@@ -24,7 +24,7 @@ follows its conventions except where noted under "Exceptions".
 ### Release Process
 - Locally: `make release VERSION=x.y.z` runs the preflight checks (VERSION set and equal to Cargo.toml's, gh auth'd,
   this Mac can sign and notarize (`scripts/codesign.sh --check`), tag at HEAD), then `scripts/release.sh x.y.z`.
-  Setting a Mac up for it: docs/releasing.md
+  What a Mac needs for it: the header of `scripts/codesign.sh`.
 - `make snapshot`: everything a release makes, in `dist/`, without publishing
 - `workflow_dispatch` release workflow: verify → snapshot → smoke (it builds and checks; publishing stays local until
   CI has signing creds)
@@ -48,8 +48,9 @@ These family rules are Go-specific and don't apply here:
 - **A native build step.** `scripts/build-llama.sh` builds llama.cpp at a pinned release before cargo (a `make`
   prerequisite). CI runs on `macos-15`, not `ubuntu-latest`.
 - **No `.env.template`, no 1Password references.** The release needs no secrets of its own: the Developer ID
-  certificate and a notarytool profile live in the releasing Mac's keychain (set up once, docs/releasing.md), and the
-  GitHub release and the cask commit use the gh login. The repo holds no credentials and no references to any.
+  certificate and a notarytool profile live in the releasing Mac's keychain (set up once per Mac; see
+  `scripts/codesign.sh`), and the GitHub release and the cask commit use the gh login. The repo holds no credentials
+  and no references to any.
 - **No separate notarize script.** `scripts/codesign.sh` signs and notarizes in one post-build hook; there is only one
   darwin binary.
 
