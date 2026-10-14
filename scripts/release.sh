@@ -14,7 +14,7 @@ set -euo pipefail
 OWNER=jwa91
 REPO=sift-it
 TAP=homebrew-tap
-DESCRIPTION="Search your files by what's in them, on-device with EmbeddingGemma 2"
+DESCRIPTION="Local file search for the terminal and Raycast, written in Rust"
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"

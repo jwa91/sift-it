@@ -7,6 +7,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com); versions follow
 
 ## [Unreleased]
 
+## [0.1.3] — 2026-10-14
+
+### Changed
+
+- Explain the DigUp relationship, ranking changes, terminal interface, and Raycast integration in the README.
+- Preserve Abdur Rahim's MIT notice with the reference test files and in the project license.
+- Describe terminal and Raycast use in the generated Homebrew cask.
+
 ## [0.1.2] — 2026-10-14
 
 ### Fixed
