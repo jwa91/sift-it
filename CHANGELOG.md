@@ -7,6 +7,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com); versions follow
 
 ## [Unreleased]
 
+## [0.1.1] — 2026-10-14
+
 ### Changed
 
 - Ranking on a real mix of files: a long file's lift is lowered by about what its length alone explains, so a book's
