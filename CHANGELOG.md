@@ -1,0 +1,23 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+Format follows [Keep a Changelog](https://keepachangelog.com); versions follow
+[SemVer](https://semver.org).
+
+## [Unreleased]
+
+## [0.1.0] — 2026-10-14
+
+### Added
+
+- Search files by what's in them with EmbeddingGemma 2 (Q8_0) on llama.cpp b11461 with Metal: one vector space for
+  text, pictures and sound.
+- Readers for text and Markdown, rich documents (textutil), PDFs (PDFKit, with OCR for scanned pages), pictures in
+  every format macOS opens (ImageIO), screenshots (picture + Vision OCR), recordings (30 s windows) and video (one
+  frame per shot, plus its sound), and source code and notebooks (optional).
+- Hybrid ranking: cosine similarity gated on its lift above the query's median, plus exact words (SQLite FTS5);
+  results open at their page, moment or line.
+- `sift daemon`: background indexing with FSEvents, new files first; `sift service` installs it as a LaunchAgent.
+- `sift serve`: JSON-lines search server for the Raycast extension.
+- `sift selftest` (built-in reference vectors), `sift eval`, `sift estimate`, `sift read`.

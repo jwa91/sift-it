@@ -1,0 +1,3 @@
+[env]
+# llama.cpp is built for macOS 14 (scripts/build-llama.sh); link the engine for the same.
+MACOSX_DEPLOYMENT_TARGET = "14.0"

@@ -1,0 +1,28 @@
+[package]
+name = "sift"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.104"
+clap = { version = "4.6.7", features = ["derive"] }
+fast_image_resize = "6.1.0"
+libc = "0.2"
+notify = "8"
+objc2 = "0.6.5"
+objc2-av-foundation = { version = "0.3.2", features = ["objc2-core-media", "objc2-core-graphics", "objc2-core-foundation"] }
+objc2-core-foundation = "0.3.2"
+objc2-core-graphics = "0.3.2"
+objc2-core-media = "0.3.2"
+objc2-foundation = "0.3.2"
+objc2-image-io = "0.3.2"
+objc2-pdf-kit = "0.3.2"
+objc2-vision = "0.3.2"
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+sha2 = "0.11.1"
+ureq = "3.4.2"
+
+[build-dependencies]
+bindgen = "0.73.2"

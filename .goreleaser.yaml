@@ -1,0 +1,95 @@
+version: 2
+
+project_name: sift
+
+before:
+  hooks:
+    # llama.cpp, linked statically into sift (idempotent: rebuilds only what changed).
+    - scripts/build-llama.sh
+
+builds:
+  # Rust, and macOS on Apple Silicon only: sift runs EmbeddingGemma 2 on Metal and reads files through Apple's
+  # frameworks (PDFKit, ImageIO, Vision, AVFoundation), so there is no Linux or Intel build.
+  - id: sift
+    builder: rust
+    binary: sift
+    tool: cargo
+    command: build
+    flags:
+      - --release
+    targets:
+      - aarch64-apple-darwin
+    hooks:
+      # Codesign with Developer ID + hardened runtime, then notarize.
+      # No-op when MACOS_SIGN_IDENTITY is unset (CI).
+      post:
+        - cmd: 'scripts/codesign.sh "{{ .Target }}" "{{ .Path }}"'
+
+archives:
+  - id: default
+    ids: [sift]
+    formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  sort: asc
+  use: github
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "Merge pull request"
+  groups:
+    - title: Features
+      regexp: "^.*feat(\\(.+\\))??!?:.+$"
+      order: 0
+    - title: Bug fixes
+      regexp: "^.*fix(\\(.+\\))??!?:.+$"
+      order: 1
+    - title: Other
+      order: 999
+
+release:
+  github:
+    owner: jwa91
+    name: sift
+  draft: false
+  prerelease: auto
+
+# Modern Homebrew distribution for pre-compiled binaries (ADR 0008 in
+# jwa91/homebrew-tap). Publishes Casks/sift.rb back to the tap.
+homebrew_casks:
+  - name: sift
+    ids: [default]
+    repository:
+      owner: jwa91
+      name: homebrew-tap
+      branch: main
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    directory: Casks
+    homepage: "https://github.com/jwa91/sift"
+    description: "Search your files by what's in them, on-device with EmbeddingGemma 2"
+    license: MIT
+    binaries: [sift]
+    custom_block: |
+      depends_on macos: ">= :sonoma"
+      depends_on arch: :arm64
+    caveats: |
+      Sift needs its model once (865 MB): sift model download
+      Choose folders: sift folders add ~/Documents
+      Index in the background, from login on: sift service install
+    uninstall:
+      launchctl:
+        - local.sift.indexer
+    zap:
+      trash:
+        - "~/Library/Application Support/Sift"
+        - "~/Library/LaunchAgents/local.sift.indexer.plist"
+    commit_author:
+      name: goreleaserbot
+      email: bot@goreleaser.com
+    commit_msg_template: "feat(sift): cask update to {{ .Tag }}"

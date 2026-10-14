@@ -1,0 +1,79 @@
+name: Release
+
+# Manual-only until CI has signing credentials (Developer ID .p12 +
+# App Store Connect API key). Local releases via `make release
+# VERSION=X.Y.Z` are the canonical path for now — see Makefile.
+on:
+  workflow_dispatch:
+  # push:
+  #   tags:
+  #     - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+
+      - name: Set up Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          rustup default stable
+
+      - name: Run checks
+        run: make check
+
+  release:
+    name: Publish
+    runs-on: macos-15
+    timeout-minutes: 30
+    needs: verify
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+        with:
+          fetch-depth: 0
+
+      - name: Set up Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@e435ccd777264be153ace6237001ef4d979d3a7a # v6.4.0
+        with:
+          distribution: goreleaser
+          version: v2.18.3
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+
+  smoke:
+    name: Smoke
+    runs-on: macos-15
+    timeout-minutes: 5
+    needs: release
+    steps:
+      - name: Smoke release artifact
+        env:
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -eu
+          asset="sift_${TAG#v}_darwin_arm64.tar.gz"
+          base="https://github.com/${GH_REPO}/releases/download/${TAG}"
+          curl -fsSLO "${base}/${asset}"
+          curl -fsSLO "${base}/checksums.txt"
+          grep "  ${asset}$" checksums.txt > "${asset}.sha256"
+          shasum -a 256 -c "${asset}.sha256"
+          tar -xzf "${asset}"
+          ./sift --version | grep "${TAG#v}"
