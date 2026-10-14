@@ -7,6 +7,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com); versions follow
 
 ## [Unreleased]
 
+## [0.1.2] — 2026-10-14
+
 ### Fixed
 
 - The finder starts each new search at its first result. It kept the file that was selected, wherever that landed in
