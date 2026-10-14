@@ -118,9 +118,12 @@ pub fn passages_sized(text: &str, target: usize) -> Vec<Passage> {
     let mut passages: Vec<Passage> = Vec::new();
     let mut open: Option<Passage> = None;
     for paragraph in paragraphs.into_iter().flat_map(split_long) {
+        // Paragraphs are joined by as many line breaks as are between them in the file: a match's line is the
+        // passage's first line plus its line within the passage.
+        let gap = |passage: &Passage| paragraph.first_line.saturating_sub(passage.last_line).max(1);
         match open.as_mut() {
-            Some(passage) if passage.text.len() + paragraph.text.len() + 2 <= target => {
-                passage.text.push_str("\n\n");
+            Some(passage) if passage.text.len() + gap(passage) + paragraph.text.len() <= target => {
+                passage.text.push_str(&"\n".repeat(gap(passage)));
                 passage.text.push_str(&paragraph.text);
                 passage.last_line = paragraph.last_line;
             }
@@ -198,6 +201,16 @@ mod tests {
         assert_eq!(passages.len(), 1);
         assert_eq!(passages[0].first_line, 1);
         assert_eq!(passages[0].last_line, 4);
+    }
+
+    #[test]
+    fn a_line_in_a_passage_is_its_line_in_the_file() {
+        // Search finds a match's line as the passage's first line plus the line within it.
+        let text = format!("Introduction.{}needle is here.\n", "\n".repeat(11));
+        let passage = &passages(&text)[0];
+        let within = passage.text.lines().position(|line| line.contains("needle")).unwrap();
+        assert_eq!(passage.first_line + within, 12);
+        assert_eq!(passage.last_line, 12);
     }
 
     #[test]

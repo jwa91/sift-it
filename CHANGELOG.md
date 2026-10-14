@@ -11,6 +11,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com); versions follow
 
 - The finder starts each new search at its first result. It kept the file that was selected, wherever that landed in
   the new list (often a file it had kept from a half-typed word).
+- A match in a text or code file opens at its line when paragraphs in the file are more than one blank line apart
+  (it opened that many lines too early). Text and code files are read again once, to fix what's indexed.
+- A file renamed while it was being read is no longer marked unreadable under its new name.
+- Searches that leave kinds out, and words-only searches, no longer miss files when a long file or files of another
+  kind hold the words many times.
+- A chosen folder that can't be read for a moment (an unplugged drive) keeps its files in the index, also when a
+  change inside it comes in.
+- A folder replaced by a symlink is not followed when a change in it comes in, as a full crawl doesn't.
 
 ## [0.1.1] — 2026-10-14
 

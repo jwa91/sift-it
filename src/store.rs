@@ -478,6 +478,20 @@ impl Store {
         Ok(requeued)
     }
 
+    /// Queues text and code files again when they're cut into passages differently since (see readers::PASSAGES).
+    /// They stay searchable as they were until they're read again. Returns how many.
+    pub fn adopt_passages_version(&self, version: u32) -> Result<usize> {
+        let stored: Option<u32> = self.meta("passages")?.and_then(|v| v.parse().ok());
+        let mut requeued = 0;
+        if stored.is_none_or(|stored| stored < version) {
+            requeued = self
+                .conn
+                .execute("UPDATE files SET state = 'pending' WHERE state = 'done' AND kind IN ('text', 'code')", [])?;
+            self.set_meta("passages", &version.to_string())?;
+        }
+        Ok(requeued)
+    }
+
     /// Queues again the files where some piece couldn't be embedded (a passing failure, perhaps), once they've had
     /// `hours` to settle. Returns how many.
     pub fn requeue_unembedded(&self, hours: f64) -> Result<usize> {
@@ -542,5 +556,21 @@ mod tests {
         assert!(!store.0.fail_file(&job, "no such file").unwrap());
         assert!(!store.0.finish_file(&job, &[], &serde_json::json!({})).unwrap());
         assert_eq!(store.0.pending(10).unwrap()[0].path, PathBuf::from("/folder/new.txt"));
+    }
+
+    #[test]
+    fn text_and_code_are_read_again_once_when_passages_change() {
+        let mut store = TempStore::new("passages");
+        for (path, kind) in [("/a/note.txt", Kind::Text), ("/a/main.rs", Kind::Code), ("/a/photo.jpg", Kind::Image)] {
+            store.0.queue(&Found { kind, ..found(path) }, None).unwrap();
+        }
+        for job in store.0.pending(10).unwrap() {
+            assert!(store.0.finish_file(&job, &[], &serde_json::json!({})).unwrap());
+        }
+        assert_eq!(store.0.adopt_passages_version(2).unwrap(), 2);
+        let mut again: Vec<PathBuf> = store.0.pending(10).unwrap().into_iter().map(|row| row.path).collect();
+        again.sort();
+        assert_eq!(again, vec![PathBuf::from("/a/main.rs"), PathBuf::from("/a/note.txt")]);
+        assert_eq!(store.0.adopt_passages_version(2).unwrap(), 0);
     }
 }

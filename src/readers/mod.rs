@@ -38,6 +38,11 @@ pub type Sink<'a> = &'a mut dyn FnMut(Piece) -> Result<()>;
 /// 2: recordings AVFoundation gave up on partway are read past the spot.
 pub const VERSION: u32 = 2;
 
+/// Goes up when text and code are cut into passages differently, in a way that matters for what's indexed: their
+/// files are read again (the index keeps what it has meanwhile).
+/// 2: paragraphs keep the line breaks between them, so a match opens at its line.
+pub const PASSAGES: u32 = 2;
+
 /// Reads a file into pieces; returns what was learned about it (pages, duration, size) for the index.
 pub fn read(path: &Path, kind: Kind, sink: Sink) -> Result<serde_json::Value> {
     match kind {

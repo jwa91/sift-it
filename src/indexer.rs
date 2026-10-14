@@ -97,6 +97,10 @@ impl Indexer {
         if retried > 0 {
             eprintln!("{retried} files that couldn't be read get another try with the improved readers");
         }
+        let reread = store.adopt_passages_version(readers::PASSAGES)?;
+        if reread > 0 {
+            eprintln!("{reread} text and code files are read again: their passages are cut differently now");
+        }
         Ok(Self { store, models, embedder: None })
     }
 
