@@ -338,11 +338,18 @@ impl Store {
         error: Option<&str>,
     ) -> Result<bool> {
         let tx = self.conn.transaction()?;
-        let current: Option<(i64, f64)> = tx
-            .query_row("SELECT size, modified FROM files WHERE id = ?1", [row.id], |r| Ok((r.get(0)?, r.get(1)?)))
+        // The same file as handed out: its id, and its path too. A file renamed meanwhile leaves its row, and the new
+        // path's row can get the same id (SQLite reuses the highest one) with the same size and time.
+        let current: Option<(String, i64, f64)> = tx
+            .query_row("SELECT path, size, modified FROM files WHERE id = ?1", [row.id], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })
             .optional()?;
         match current {
-            Some((size, modified)) if size as u64 == row.size && (modified - row.modified).abs() < 0.001 => {}
+            Some((path, size, modified))
+                if Path::new(&path) == row.path
+                    && size as u64 == row.size
+                    && (modified - row.modified).abs() < 0.001 => {}
             _ => return Ok(false),
         }
         let name = name_words(&row.path);
@@ -493,4 +500,47 @@ impl Store {
 
 pub fn now() -> f64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A store in a file of its own, removed when the test ends.
+    struct TempStore(Store, PathBuf);
+    impl TempStore {
+        fn new(name: &str) -> Self {
+            let path = std::env::temp_dir().join(format!("sift-it-test-{name}-{}.sqlite", std::process::id()));
+            Self::remove(&path);
+            Self(Store::open(&path).unwrap(), path)
+        }
+        fn remove(path: &Path) {
+            for suffix in ["", "-wal", "-shm"] {
+                let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+            }
+        }
+    }
+    impl Drop for TempStore {
+        fn drop(&mut self) {
+            Self::remove(&self.1);
+        }
+    }
+
+    fn found(path: &str) -> Found {
+        Found { path: PathBuf::from(path), kind: Kind::Text, size: 10, modified: 100.0 }
+    }
+
+    #[test]
+    fn a_job_for_a_renamed_file_is_not_written_to_its_new_row() {
+        let mut store = TempStore::new("rename");
+        store.0.queue(&found("/folder/old.txt"), None).unwrap();
+        let job = store.0.pending(10).unwrap().remove(0);
+        // Renamed while it was being read: its row goes, and the new path's row may get the same id.
+        store.0.remove_file(job.id).unwrap();
+        let renamed = store.0.queue(&found("/folder/new.txt"), None).unwrap();
+        assert_eq!(renamed, job.id);
+        assert!(!store.0.fail_file(&job, "no such file").unwrap());
+        assert!(!store.0.finish_file(&job, &[], &serde_json::json!({})).unwrap());
+        assert_eq!(store.0.pending(10).unwrap()[0].path, PathBuf::from("/folder/new.txt"));
+    }
 }
