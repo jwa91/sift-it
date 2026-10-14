@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Builds a folder to show sift-it with: a few hundred photos, sounds, recordings, music, videos, PDFs, books and notes
-# (about 400 MB), from public collections: Wikimedia Commons, COCO, ESC-50, NASA, the Prelinger Archives, Wikipedia
+# (about 370 MB), from public collections: Wikimedia Commons, COCO, ESC-50, NASA, the Prelinger Archives, Wikipedia
 # and Project Gutenberg. Files get the names a phone or a Downloads folder gives them (IMG_1042.jpg,
 # New Recording 7.m4a, download (3).pdf), so whatever sift-it finds, it found by what's in them. CREDITS.csv (which
 # sift-it doesn't index) says where each file came from, who made it, and its licence: they're for showing sift-it,
@@ -8,7 +8,8 @@
 #
 #   scripts/make-demo.sh [folder]      (default: ~/sift-it-demo)
 #
-# Running it again fetches only what's missing. Needs curl, jq and ffmpeg.
+# Running it again fetches only what's missing or changed: each file keeps the url it came from (in an extended
+# attribute). Needs curl, jq and ffmpeg.
 set -euo pipefail
 
 OUT="${1:-$HOME/sift-it-demo}"
@@ -26,6 +27,12 @@ CREDITS="$TMP/credits.csv"
 echo 'file,collection,title,author,licence,source' > "$CREDITS"
 
 get() { curl -fsSL --retry 3 --retry-delay 2 -A "$UA" "$@"; }
+
+# A list that can't be had stops the run: going on without it would shift the names of the files after it.
+fail() {
+  echo "make-demo: $*; nothing was named or fetched from this list, run it again" >&2
+  exit 1
+}
 
 # A manifest row: url, extension, collection, title, author, licence, page; tab-separated, never empty (read with
 # IFS=tab would merge the tabs around an empty field).
@@ -46,36 +53,50 @@ credit() {
   printf '%s\n' "${out%,}" >> "$CREDITS"
 }
 
-# fetch <url> <file>: downloads it unless it's there. A url starting with trim: is a video kept to its first 3 minutes.
+SOURCE=dev.sift-it.demo.source
+
+# fetch <url> <file>: downloads it unless it's there from the same url. With trim: in front of the url, a video is kept
+# to its first 3 minutes; with remux:, it's put in a proper MP4 container (some of NASA's .m4a files are bare AAC).
 fetch() {
   local url="$1" file="$2" failed=false
-  [[ -s "$file" ]] && return 0
+  [[ -s "$file" && "$(xattr -p "$SOURCE" "$file" 2> /dev/null)" == "$url" ]] && return 0
   case "$url" in
-    trim:*) ffmpeg -loglevel error -y -t 180 -i "${url#trim:}" -c copy -movflags +faststart "$TMP/part.mp4" \
+    trim:*) ffmpeg -nostdin -loglevel error -y -t 180 -i "${url#trim:}" -c copy -movflags +faststart "$TMP/part.mp4" \
       && mv "$TMP/part.mp4" "$file" || failed=true ;;
+    remux:*) ffmpeg -nostdin -loglevel error -y -i "${url#remux:}" -c copy -movflags +faststart -f mp4 "$TMP/part" \
+      && mv "$TMP/part" "$file" || failed=true ;;
     *) get -o "$TMP/part" "$url" && mv "$TMP/part" "$file" || failed=true ;;
   esac
   if $failed; then
     echo "  couldn't fetch $url" >&2
     return 1
   fi
+  xattr -w "$SOURCE" "$url" "$file"
 }
 
 # place <manifest> <folder> <name format> <first number>: names the manifest's files in an order that mixes the
-# collections (the same order each run, so names stay put), fetches what's missing, and credits each.
+# collections (the same order each run, so names stay put), fetches what's missing, and credits each. Files an earlier
+# run put in the folder that this one didn't name go.
 place() {
-  local manifest="$1" folder="$2" format="$3" n="$4" name
+  local manifest="$1" folder="$2" format="$3" n="$4" name key file
   local url ext collection title author licence page
+  : > "$TMP/named"
   while IFS=$'\t' read -r _ url ext collection title author licence page; do
     # shellcheck disable=SC2059
     name="$(printf "$format" "$n").$ext"
     n=$((n + 1))
+    echo "$name" >> "$TMP/named"
     if fetch "$url" "$OUT/$folder/$name"; then
       credit "$folder/$name" "$collection" "$title" "$author" "$licence" "$page"
     fi
   done < <(while IFS= read -r line; do
-    printf '%s\t%s\n' "$(printf '%s' "${line%%$'\t'*}" | md5)" "$line"
+    key="${line%%$'\t'*}" key="${key#trim:}" key="${key#remux:}"
+    printf '%s\t%s\n' "$(printf '%s' "$key" | md5)" "$line"
   done < "$manifest" | sort)
+  for file in "$OUT/$folder"/*; do
+    [[ -f "$file" ]] && xattr -p "$SOURCE" "$file" > /dev/null 2>&1 && ! grep -qxF "${file##*/}" "$TMP/named" \
+      && rm "$file"
+  done
   echo "  $folder: $(find "$OUT/$folder" -type f | wc -l | tr -d ' ') files"
 }
 
@@ -107,14 +128,15 @@ for entry in "${commons[@]}"; do
         | .[range(0; $take) | . * $len / $take | floor]
         | [.url, "jpg", "Wikimedia Commons, featured picture", .title, .author, .licence, .page]
         | map(if . == "" then "–" else gsub("\t"; " ") end) | @tsv' \
-    >> "$TMP/photos.raw" || echo "  couldn't list $category" >&2
+    > "$TMP/category.tsv" && [[ -s "$TMP/category.tsv" ]] || fail "couldn't list $category"
+  cat "$TMP/category.tsv" >> "$TMP/photos.raw"
 done
 get "http://images.cocodataset.org/?list-type=2&prefix=val2017/&max-keys=1000" \
   | grep -o '<Key>[^<]*</Key>' | sed 's/<[^>]*>//g' | awk 'NR % 10 == 1' \
   | while read -r key; do
     row "http://images.cocodataset.org/$key" jpg "COCO 2017 (photos from Flickr)" "${key##*/}" "" \
       "Creative Commons, per photo (see cocodataset.org)" "https://cocodataset.org"
-  done >> "$TMP/photos.raw"
+  done >> "$TMP/photos.raw" || fail "couldn't list COCO's photos"
 awk -F'\t' '!seen[$1]++' "$TMP/photos.raw" > "$TMP/photos.tsv"
 place "$TMP/photos.tsv" Photos "IMG_%04d" 1001
 
@@ -131,20 +153,19 @@ get "$esc/meta/esc50.csv" \
   | while IFS=$'\t' read -r file sound; do
     row "$esc/audio/$file" wav "ESC-50 (clips from freesound.org)" "${sound//_/ }" "" "CC BY-NC 3.0" \
       "https://github.com/karolpiczak/ESC-50"
-  done > "$TMP/recordings.tsv"
+  done > "$TMP/recordings.tsv" || fail "couldn't list ESC-50's sounds"
 
 # nasa <video|audio> <id> <derivative>: a manifest row for a file in NASA's image and video library.
 nasa() {
   local kind="$1" id="$2" derivative="$3" encoded url title
   encoded="$(jq -rn --arg id "$id" '$id | @uri')"
   url="$(get "https://images-assets.nasa.gov/$kind/$encoded/collection.json" \
-    | jq -r --arg d "~$derivative" '.[] | select(endswith($d))' | head -1 | sed 's/ /%20/g; s/^http:/https:/' || true)"
+    | jq -r --arg d "~$derivative" '.[] | select(endswith($d))' | head -1 | sed 's/ /%20/g; s/^http:/https:/')" \
+    || fail "couldn't list NASA's files for $id"
   title="$(get "https://images-api.nasa.gov/search?nasa_id=$encoded" \
-    | jq -r '.collection.items[0].data[0].title // ""' || true)"
-  [[ -n "$url" ]] || {
-    echo "  no $derivative for NASA $id" >&2
-    return 0
-  }
+    | jq -r '.collection.items[0].data[0].title // ""')" || fail "couldn't look up NASA's $id"
+  [[ -n "$url" ]] || fail "NASA has no $derivative for $id"
+  [[ "$kind" == audio ]] && url="remux:$url"
   row "$url" "${derivative##*.}" "NASA Image and Video Library" "$title" "NASA" "Public domain (NASA)" \
     "https://images.nasa.gov/details/$encoded"
 }
@@ -173,7 +194,8 @@ for file in "${music[@]}"; do
            $title, ($v.extmetadata.Artist.value // "" | gsub("<[^>]*>"; "") | gsub("\\s+"; " ")),
            ($v.extmetadata.LicenseShortName.value // ""), $v.descriptionurl]
         | select(.[0] != null) | map(if . == "" then "–" else gsub("\t"; " ") end) | @tsv' \
-    || echo "  couldn't find $file" >&2
+    > "$TMP/track.tsv" && [[ -s "$TMP/track.tsv" ]] || fail "couldn't find an MP3 of $file"
+  cat "$TMP/track.tsv"
 done > "$TMP/music.tsv"
 place "$TMP/music.tsv" Music "Track %02d" 1
 
@@ -191,7 +213,7 @@ for id in HMChildren98343 HMChristmas97328 HMCanadianRockies97417; do
       [("trim:https://archive.org/download/" + $id + "/" + ([.files[] | select(.name | endswith(".mp4")) | .name][0])),
        "mp4", "Prelinger Archives (archive.org), first 3 minutes", (.metadata.title // $id),
        "Prelinger Archives", "Public domain", ("https://archive.org/details/" + $id)] | @tsv' \
-    || echo "  couldn't find $id on archive.org" >&2
+    || fail "couldn't find $id on archive.org"
 done >> "$TMP/videos.tsv"
 place "$TMP/videos.tsv" Videos "VID_%04d" 3001
 
@@ -252,16 +274,12 @@ echo "  Documents: $(find "$OUT/Documents" -type f | wc -l | tr -d ' ') files"
 
 # --- Books: Project Gutenberg, as plain text -------------------------------------------------------------------------
 
+# Two, not a shelf: a whole book has thousands of passages, and with many of them one fits nearly any query a little
+# (try "piano music" with A Christmas Carol in the index).
 echo "Books"
 books=(
   "1661|The Adventures of Sherlock Holmes|Arthur Conan Doyle"
-  "11|Alice's Adventures in Wonderland|Lewis Carroll"
-  "84|Frankenstein|Mary Shelley"
-  "46|A Christmas Carol|Charles Dickens"
-  "132|The Art of War|Sun Tzu"
-  "21|Three Hundred Aesop's Fables|Aesop"
   "65061|The Boston Cooking-School Cook Book|Fannie Merritt Farmer"
-  "11024|Max Havelaar|Multatuli"
 )
 for book in "${books[@]}"; do
   IFS='|' read -r id title author <<< "$book"
