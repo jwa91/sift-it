@@ -7,7 +7,9 @@ edition = "2024"
 anyhow = "1.0.104"
 base64 = "0.23.1"
 clap = { version = "4.6.7", features = ["derive"] }
+crossterm = "0.29.0"
 fast_image_resize = "6.1.0"
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
 libc = "0.2"
 notify = "8"
 objc2 = "0.6.5"
@@ -19,6 +21,8 @@ objc2-foundation = "0.3.2"
 objc2-image-io = "0.3.2"
 objc2-pdf-kit = "0.3.2"
 objc2-vision = "0.3.2"
+ratatui = "0.30.2"
+ratatui-image = { version = "11.1.0", default-features = false, features = ["crossterm"] }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"

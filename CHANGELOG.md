@@ -20,6 +20,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com); versions follow
   results open at their page, moment or line.
 - `sift-it daemon`: background indexing with FSEvents, new files first; `sift-it service` installs it as a LaunchAgent.
 - `sift-it serve`: a JSON-lines search server for front ends (search, recent files, previews).
+- `sift-it` (or `sift-it find`): search as you type, full screen, with a preview per kind of file (pictures, PDF
+  pages and video frames inline in terminals that show pictures, a recording's waveform, highlighted passages and
+  code); ↩ opens a result where it matched.
+- `sift-it search` made for the terminal: numbered results, file names as links, where each matched, and a body per
+  kind (marked passages, numbered code, a waveform in block characters, pictures inline); paths only when piped.
+- `sift-it open <n>`: the last search's nth result, where it matched (QuickTime at the moment, Preview at the page,
+  `$EDITOR` at the line).
 - Quoted exact phrases: `"INV-2024-0113" invoice` only finds files with that exact text, ranked by the rest.
 - `sift-it serve` previews for every kind of result: a picture, a PDF page, a video frame, a recording's waveform with
   the matched stretch highlighted, and a passage's whole text.

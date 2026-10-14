@@ -199,12 +199,7 @@ fn waveform(terminal: &Terminal, hit: &Hit, width: usize) -> Option<String> {
     let path = Path::new(&hit.path);
     let columns = width.saturating_sub(34).clamp(16, 60);
     let levels = preview::levels(path, columns, &config::previews_dir()).ok()?;
-    // Eight block heights flatten speech, which is loud nearly throughout: stretch from the quietest tenth up.
-    let mut sorted = levels.clone();
-    sorted.sort_by(f32::total_cmp);
-    let floor = sorted[sorted.len() / 10];
-    let top = sorted.last().copied().unwrap_or(1.0);
-    let levels: Vec<f32> = levels.iter().map(|l| ((l - floor) / (top - floor).max(1e-3)).clamp(0.0, 1.0)).collect();
+    let levels = term::stretch(&levels);
     let start = hit.loc.unwrap_or(0.0);
     let highlight = preview::span(path, columns, start, hit.loc_end.unwrap_or(start + 30.0));
     let length = hit.info.get("duration").and_then(|d| d.as_f64()).map(|d| format!(" of {}", timestamp(d)));

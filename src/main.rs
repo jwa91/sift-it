@@ -5,6 +5,7 @@ mod daemon;
 mod embedder;
 mod estimate;
 mod eval;
+mod finder;
 mod imaging;
 mod indexer;
 mod llama;
@@ -32,8 +33,9 @@ use std::path::PathBuf;
 #[derive(Parser)]
 #[command(name = "sift-it", version)]
 struct Cli {
+    /// Without one, sift-it opens the finder: search as you type
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Subcommand)]
@@ -73,6 +75,11 @@ enum Command {
         words_only: bool,
         #[arg(long)]
         json: bool,
+    },
+    /// Search as you type, full screen, with a preview of each result
+    Find {
+        /// Start with these words
+        words: Vec<String>,
     },
     /// Open a result where it matched: a recording at its moment, a PDF at its page, code at its line
     Open {
@@ -180,7 +187,16 @@ fn main() {
 }
 
 fn run(cli: Cli) -> Result<()> {
-    match cli.command {
+    use std::io::IsTerminal;
+    let Some(command) = cli.command else {
+        if std::io::stdout().is_terminal() && std::io::stdin().is_terminal() {
+            return finder::run("");
+        }
+        <Cli as clap::CommandFactory>::command().print_help()?;
+        return Ok(());
+    };
+    match command {
+        Command::Find { words } => finder::run(&words.join(" ")),
         Command::Folders { action } => folders(action),
         Command::Config { key, value } => set_option(key, value),
         Command::Estimate { folders, json } => {

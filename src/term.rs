@@ -187,6 +187,16 @@ pub fn mark_words(terminal: &Terminal, line: &str, words: &[String]) -> String {
     out
 }
 
+/// Levels stretched from their quietest tenth to their loudest: eight block heights would flatten speech, which is loud
+/// nearly throughout.
+pub fn stretch(levels: &[f32]) -> Vec<f32> {
+    let mut sorted = levels.to_vec();
+    sorted.sort_by(f32::total_cmp);
+    let floor = sorted.get(sorted.len() / 10).copied().unwrap_or(0.0);
+    let top = sorted.last().copied().unwrap_or(1.0);
+    levels.iter().map(|l| ((l - floor) / (top - floor).max(1e-3)).clamp(0.0, 1.0)).collect()
+}
+
 /// A waveform in block characters, one per level; the columns from `first` to `last` in the accent colour.
 pub fn sparkline(terminal: &Terminal, levels: &[f32], highlight: Option<(usize, usize)>) -> String {
     const BLOCKS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];

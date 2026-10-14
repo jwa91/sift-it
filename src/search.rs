@@ -363,31 +363,12 @@ impl Searcher {
 
     /// A segment's whole text.
     pub fn segment_text(&self, segment_id: i64) -> Result<Option<String>> {
-        Ok(self
-            .store
-            .conn
-            .query_row("SELECT text FROM segments WHERE id = ?1", [segment_id], |row| row.get(0))
-            .optional()?
-            .flatten())
+        self.store.segment_text(segment_id)
     }
 
-    /// A file's text: its text segments in order, at most about 8,000 characters.
+    /// A file's text: its text segments in order (see Store::file_text).
     pub fn file_text(&self, path: &str) -> Result<Option<String>> {
-        let mut statement = self.store.conn.prepare(
-            "SELECT s.text FROM segments s JOIN files f ON f.id = s.file_id
-             WHERE f.path = ?1 AND s.text IS NOT NULL AND s.text != '' ORDER BY s.loc, s.id",
-        )?;
-        let mut text = String::new();
-        for part in statement.query_map([path], |row| row.get::<_, String>(0))? {
-            if !text.is_empty() {
-                text.push_str("\n\n");
-            }
-            text.push_str(&part?);
-            if text.len() > 8000 {
-                break;
-            }
-        }
-        Ok((!text.is_empty()).then_some(text))
+        self.store.file_text(path)
     }
 
     /// Of a file's segments that score about the same, the one with the most of the query's words.

@@ -26,8 +26,26 @@ System Settings → Privacy & Security). `sift-it selftest` checks that the inst
 
 ## Using it
 
-Describe what you're looking for, or type the words. In a terminal, each result says where it matched and shows what
-fits its kind:
+Run `sift-it` on its own to search as you type, full screen: results on the left, and on the right a preview of the
+selected one that fits its kind. Pictures, PDF pages and video frames show inline (in Ghostty, kitty, iTerm2 and
+WezTerm), recordings as a waveform with the stretch that matched lit up, and passages and code with your words
+highlighted. ↩ opens it where it matched, ^R shows it in Finder, ^Y copies its path, Tab narrows to documents,
+pictures, recordings, videos or code, and Esc leaves.
+
+```
+sift-it ❯ the clause about pets                                                       everything
+┌ 1 match ──────────────────────┐┌ agreement.pdf · p. 3 ──────────────────────────────────────┐
+│▶ agreement.pdf           p. 3 ││ [page 3, rendered]                                          │
+│                               ││                                                            │
+│                               ││ 7. Animals. The tenant may keep one cat or one small dog   │
+│                               ││ only with the landlord's written consent. A pet deposit of │
+│                               ││ EUR 300 applies…                                           │
+│                               ││ ~/Documents/Housing · 4 pages · 23 KB                       │
+└───────────────────────────────┘└────────────────────────────────────────────────────────────┘
+ ↩ open at page 3   ^R show in Finder   ^Y copy path   tab kind   esc quit
+```
+
+Or search in one go: each result says where it matched and shows what fits its kind:
 
 ```
 $ sift-it search "where they talk about sleep"
@@ -53,6 +71,7 @@ Piped, it prints paths, one per line: `sift-it search "invoices from March" | xa
 Cursor, Zed and Sublime Text at the line).
 
 ```
+sift-it [find [<words>]]               search as you type, full screen
 sift-it search <words> [--kind pdf,image] [-n 10] [--json]
 sift-it search "code: retry a failed call with backoff"    code only (needs `sift-it config include-code true`)
 sift-it search '"INV-2024-0113" invoice'                   quoted words must be there exactly
