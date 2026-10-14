@@ -348,7 +348,8 @@ fn run(cli: Cli) -> Result<()> {
             let files = embedder::ModelFiles::in_folder(&config::models_dir())?;
             let mut encoder = embedder::Embedder::load(&files, true)?;
             for query in queries {
-                println!("{}", serde_json::to_string(&encoder.embed_text(&embedder::prompts::query(&query))?)?);
+                let prompt = search::Request { q: query, ..Default::default() }.prompt();
+                println!("{}", serde_json::to_string(&encoder.embed_text(&prompt)?)?);
             }
             Ok(())
         }

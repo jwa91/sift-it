@@ -7,6 +7,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com); versions follow
 
 ## [Unreleased]
 
+### Changed
+
+- Ranking on a real mix of files: a long file's lift is lowered by about what its length alone explains, so a book's
+  best passage no longer outranks the recording, photo or video a query is about (on the demo folder with eight books,
+  a book came first for 21 of 95 queries about something else, now 1). Ordinary words get a small bonus instead of
+  the full one, which stays for numbers, codes, quoted words and `code:` searches. See docs/ranking.md.
+
 ### Fixed
 
 - `sift-it service install` over a running indexer: it now waits for the old one to stop before starting the new one,

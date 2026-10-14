@@ -130,9 +130,13 @@ your words   ─► the same model's text part ─► every vector scored (one A
 
 **Ranking.** A segment's cosine similarity with the query ranks it. Whether it's shown depends on its *lift*, how far
 it stands above the median segment for this query (in a small index, a median pulled toward a typical one): queries
-differ in how close they land to everything, and the lift takes that out. A strong match lifts at least 0.13, a weaker
-one 0.09, and below that nothing is shown, so a search with no answer says so. A segment with all of the query's words
-gets a bonus, because no vector holds an invoice number exactly.
+differ in how close they land to everything, and the lift takes that out. A file counts by its best segment, and the
+best of a book's hundreds of passages fits nearly any query a little, so a long file's lift is lowered by about what
+its length alone explains. A strong match lifts at least 0.13, a weaker one 0.09, and below that nothing is shown, so a
+search with no answer says so. A segment with all of the query's words gets a bonus: a large one when one of them is a
+number or a code, because no vector holds an invoice number exactly, and a small one for ordinary words, which the
+model has read already (a note that mentions steam and a train doesn't outrank a photo of a steam train). See
+[docs/ranking.md](docs/ranking.md).
 
 **Indexing.** Readers run on a few worker threads and stream their pieces to the one thread that owns the model. Each
 worker has its own small channel and the model thread takes from them in turn, so a long video can't hold up a short
@@ -159,7 +163,8 @@ On an M5 with 24 GB:
 
 On the testbed (`make testbed`: 39 files of every kind, with names that give nothing away), all 43 queries in
 `evals/evals.json` put the right file first, and all 9 that check the place land on the right page, moment, line or
-cell.
+cell. On the demo folder with eight books (`docs/demo-queries.json`), 82 of 107 queries put the right file first, and
+a book comes first for 1 of the 95 that aren't about a book.
 
 ## Build from source
 

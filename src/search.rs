@@ -7,9 +7,15 @@
 //! of the others'), so one median serves all of them. A segment that lifts little isn't shown, which gives an honest
 //! "nothing found".
 //!
-//! Words: a segment with every word of the query (the last one as a prefix, while typing) gets a bonus, since no vector
-//! holds an invoice number or a name exactly. Words also pick which of a file's segments a result opens at, between
-//! segments the meaning scores about the same.
+//! A file counts by its best segment, and the best of many segments fits nearly any query a little: a book has a
+//! passage about church bells, a crying baby and Christmas presents. So a long file's lift is lowered by about what
+//! its length alone explains, and a book no longer outranks the recording of church bells.
+//!
+//! Words: a segment with every word of the query (the last one as a prefix, while typing) gets a bonus. For words the
+//! model can't read, a number or a code (INV-2024-0113), the bonus is large: no vector holds them exactly. The model
+//! does read ordinary words, so for those the meaning has already counted them, and the bonus only breaks near-ties: a
+//! note that mentions steam and a train doesn't outrank a photo of a steam train. Words also pick which of a file's
+//! segments a result opens at, between segments the meaning scores about the same.
 
 use crate::crawl::Kind;
 use crate::embedder::DIM;
@@ -21,12 +27,25 @@ use std::collections::HashMap;
 use std::path::Path;
 
 /// Lift (cosine above the query's median) a meaning match needs to be shown at all, and to count as a strong match.
-/// On the testbed (scripts/evals.json), answers lift 0.12–0.30 (nearly all above 0.135); the best results for queries
+/// On the testbed (evals/evals.json), answers lift 0.12–0.30 (nearly all above 0.135); the best results for queries
 /// without an answer lift 0.05–0.10, except a near miss at 0.144.
 const SHOWN_LIFT: f32 = 0.09;
 const STRONG_LIFT: f32 = 0.13;
-/// The bonus for containing all of the query's words, in the same units.
+/// The bonus for containing all of the query's words, in the same units, when one of them is a number or the search
+/// is of code or quoted words: the words decide.
 const WORD_BONUS: f32 = 0.10;
+/// The bonus for containing all of them otherwise: the words only choose between matches the meaning scores about the
+/// same. Any larger, and a passage that only mentions them outranks a better picture or recording of what they
+/// describe.
+const PLAIN_WORD_BONUS: f32 = 0.03;
+/// A file of n segments has its lifts lowered by LENGTH_PENALTY × ln(n / LENGTH_FREE), and one of up to LENGTH_FREE
+/// segments (a photo, a few pages, a minute and a half of sound) not at all. That is about how far the best of n
+/// segments stands above a typical one by chance alone: the expected maximum of n draws, at the usual spread of a
+/// query's scores (0.03), less that of LENGTH_FREE. A 3-minute video loses 0.03, a novel 0.05–0.07. On a folder of 520
+/// mixed files and eight books (docs/ranking.md), a book had come first for 21 of 95 queries about something else;
+/// now 1.
+const LENGTH_PENALTY: f32 = 0.0125;
+const LENGTH_FREE: f32 = 4.0;
 /// Segments of one file within this much of its best are close enough for words to choose between them.
 const CLOSE: f32 = 0.04;
 /// Above this many vectors, the median is taken from a sample (it's the same median, faster).
@@ -85,6 +104,8 @@ pub struct Hit {
     pub segment_id: i64,
     pub loc: Option<f64>,
     pub loc_end: Option<f64>,
+    /// What it's ranked by: its best segment's lift, less what the length of the file explains, plus any bonus for
+    /// the query's words.
     pub score: f32,
     /// How far the segment's meaning stands above the query's median (None without a query vector, or for a segment
     /// without one).
@@ -114,6 +135,8 @@ pub struct Searcher {
     ids: Vec<i64>,
     rows: HashMap<i64, usize>,
     files: Vec<i64>,
+    /// What each vector's lift is lowered by for the length of its file (LENGTH_PENALTY).
+    penalties: Vec<f32>,
     matrix: Vec<f32>,
     file_kinds: HashMap<i64, Kind>,
     data_version: i64,
@@ -147,6 +170,15 @@ impl Request {
         text.split('"').skip(1).step_by(2).map(words_of).filter(|words| !words.is_empty()).collect()
     }
 
+    /// The query's words decide where they're found: it has words the model can't read (a number or a code such as
+    /// INV-2024-0113), it's a search of code, or words are in quotes. Other words the model reads, so where they're
+    /// found only breaks near-ties.
+    pub fn words_decide(&self) -> bool {
+        self.is_code()
+            || !self.phrases().is_empty()
+            || words_of(self.text()).iter().any(|word| word.chars().any(char::is_numeric))
+    }
+
     /// The prompt the query is embedded with (quotes don't mean anything to the model).
     pub fn prompt(&self) -> String {
         let text = self.text().replace(['"', '“', '”', '„'], "");
@@ -174,6 +206,7 @@ impl Searcher {
             ids: Vec::new(),
             rows: HashMap::new(),
             files: Vec::new(),
+            penalties: Vec::new(),
             matrix: Vec::new(),
             file_kinds: HashMap::new(),
             data_version: -1,
@@ -235,6 +268,7 @@ impl Searcher {
             .filter_map(|row| row.ok())
             .filter_map(|(id, kind)| Kind::parse(&kind).map(|kind| (id, kind)))
             .collect();
+        self.penalties = length_penalties(&self.files);
         Ok(true)
     }
 
@@ -285,24 +319,29 @@ impl Searcher {
             _ => (Vec::new(), 0.0),
         };
         let lift_of = |segment: i64| self.rows.get(&segment).and_then(|&row| cosines.get(row)).map(|c| c - median);
+        // The lift less what the length of the segment's file explains: what results are ranked and shown by.
+        let fit_at = |row: usize| cosines[row] - median - self.penalties.get(row).copied().unwrap_or(0.0);
+        let fit_of = |segment: i64| self.rows.get(&segment).filter(|&&row| row < cosines.len()).map(|&row| fit_at(row));
 
         let mut candidates: HashMap<i64, Candidate> = HashMap::new();
         let words = words_of(request.text());
         let phrases = request.phrases();
+        let exact = request.words_decide();
+        let bonus = if exact { WORD_BONUS } else { PLAIN_WORD_BONUS };
         if !phrases.is_empty() {
             // Quoted words must be there exactly: only segments with them, ranked by meaning among themselves.
             let matches = self.phrase_matches(&phrases, 5000)?;
             let count = matches.len().max(1) as f32;
             for (rank, segment) in matches.into_iter().enumerate() {
-                let score = WORD_BONUS + lift_of(segment).unwrap_or(0.0).max(0.0) + 0.02 * (1.0 - rank as f32 / count);
+                let score = WORD_BONUS + fit_of(segment).unwrap_or(0.0).max(0.0) + 0.02 * (1.0 - rank as f32 / count);
                 candidates.insert(segment, Candidate { segment, score, words: true });
             }
         } else if !cosines.is_empty() {
-            let mut shown: Vec<usize> = (0..cosines.len()).filter(|&i| cosines[i] - median >= SHOWN_LIFT).collect();
-            shown.sort_by(|&a, &b| cosines[b].total_cmp(&cosines[a]));
-            for i in shown.into_iter().take(5000) {
-                candidates
-                    .insert(self.ids[i], Candidate { segment: self.ids[i], score: cosines[i] - median, words: false });
+            let mut shown: Vec<(usize, f32)> =
+                (0..cosines.len()).map(|i| (i, fit_at(i))).filter(|&(_, fit)| fit >= SHOWN_LIFT).collect();
+            shown.sort_by(|a, b| b.1.total_cmp(&a.1));
+            for (i, fit) in shown.into_iter().take(5000) {
+                candidates.insert(self.ids[i], Candidate { segment: self.ids[i], score: fit, words: false });
             }
         }
         if phrases.is_empty() && !words.is_empty() {
@@ -310,7 +349,7 @@ impl Searcher {
             let count = matches.len().max(1) as f32;
             for (rank, segment) in matches.into_iter().enumerate() {
                 // Earlier in the full-text ranking breaks ties between files that only match by words.
-                let score = WORD_BONUS + lift_of(segment).unwrap_or(0.0).max(0.0) + 0.02 * (1.0 - rank as f32 / count);
+                let score = bonus + fit_of(segment).unwrap_or(0.0).max(0.0) + 0.02 * (1.0 - rank as f32 / count);
                 candidates.insert(segment, Candidate { segment, score, words: true });
             }
         }
@@ -339,6 +378,14 @@ impl Searcher {
             })
             .collect();
         ranked.sort_by(|a, b| b.0.total_cmp(&a.0));
+        // Ordinary words make a match strong only when it scores well, or better than anything found by meaning alone
+        // (a note that mentions a name, with nothing else to show). Else a passage that happens to hold "glass" and
+        // "breaking" would come before the recording of breaking glass.
+        let meaning_best = ranked
+            .iter()
+            .filter(|(_, segments)| !segments.iter().any(|c| c.words))
+            .map(|&(score, _)| score)
+            .fold(f32::MIN, f32::max);
         ranked.truncate(request.limit);
 
         let mut hits = Vec::with_capacity(ranked.len());
@@ -347,13 +394,14 @@ impl Searcher {
             let chosen = self.choose(&segments, &words)?;
             let Some(mut hit) = self.hit(chosen, &words)? else { continue };
             let lift = lift_of(chosen);
-            let best_lift = segments.iter().filter_map(|c| lift_of(c.segment)).fold(f32::MIN, f32::max);
+            let best_fit = segments.iter().filter_map(|c| fit_of(c.segment)).fold(f32::MIN, f32::max);
             hit.score = score;
             hit.lift = lift;
             hit.cosine = lift.map(|l| l + median);
-            hit.meaning = best_lift >= SHOWN_LIFT;
+            hit.meaning = best_fit >= SHOWN_LIFT;
             hit.words = has_words;
-            hit.strong = has_words || best_lift >= STRONG_LIFT;
+            hit.strong =
+                best_fit >= STRONG_LIFT || (has_words && (exact || score >= STRONG_LIFT || score >= meaning_best));
             hits.push(hit);
         }
         // Strong matches first, then the weaker ones, each by score.
@@ -556,6 +604,16 @@ impl Searcher {
     }
 }
 
+/// For each vector, what its lift is lowered by for the length of its file: LENGTH_PENALTY × ln(n / LENGTH_FREE) for a
+/// file of n vectors, nothing for a short one.
+fn length_penalties(files: &[i64]) -> Vec<f32> {
+    let mut lengths: HashMap<i64, usize> = HashMap::new();
+    for &file in files {
+        *lengths.entry(file).or_default() += 1;
+    }
+    files.iter().map(|file| LENGTH_PENALTY * (lengths[file] as f32 / LENGTH_FREE).ln().max(0.0)).collect()
+}
+
 /// The median of the scores (of a sample of them, for a large index).
 fn median(scores: &[f32]) -> f32 {
     let mut sample: Vec<f32> = if scores.len() > MEDIAN_SAMPLE {
@@ -631,6 +689,28 @@ mod tests {
         assert!(!request.prompt().contains('"'));
         let plain = Request { q: "no quotes here".into(), ..Default::default() };
         assert!(plain.phrases().is_empty());
+    }
+
+    #[test]
+    fn numbers_codes_and_quotes_decide() {
+        let decides = |q: &str| Request { q: q.into(), ..Default::default() }.words_decide();
+        assert!(decides("INV-2024-0113"));
+        assert!(decides("tax return 2023"));
+        assert!(decides(r#"the "Altink Design" invoice"#));
+        assert!(decides("code: refreshAccessToken"));
+        assert!(!decides("a steam train"));
+        assert!(!decides("Bram"));
+    }
+
+    #[test]
+    fn long_files_are_lowered_short_ones_not() {
+        let files: Vec<i64> = [vec![1; 4], vec![2; 40], vec![3; 400], vec![4]].concat();
+        let penalties = length_penalties(&files);
+        assert_eq!(penalties[0], 0.0);
+        assert_eq!(penalties[files.len() - 1], 0.0);
+        let (forty, four_hundred) = (penalties[4], penalties[44]);
+        assert!((forty - LENGTH_PENALTY * 10f32.ln()).abs() < 1e-6);
+        assert!(four_hundred > forty && four_hundred < 0.06);
     }
 
     #[test]
