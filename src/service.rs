@@ -1,4 +1,4 @@
-//! `sift service install|uninstall|status`: the background indexer as a LaunchAgent, so it starts when you log in and
+//! `sift-it service install|uninstall|status`: the background indexer as a LaunchAgent, so it starts when you log in and
 //! comes back if it crashes.
 
 use crate::config;
@@ -6,7 +6,7 @@ use anyhow::{Context, Result, bail};
 use std::path::PathBuf;
 use std::process::Command;
 
-pub const LABEL: &str = "local.sift.indexer";
+pub const LABEL: &str = "local.sift-it.indexer";
 
 fn plist_path() -> PathBuf {
     config::dirs_home().join(format!("Library/LaunchAgents/{LABEL}.plist"))
@@ -23,12 +23,12 @@ fn escape(text: &str) -> String {
 /// The path the LaunchAgent runs: this binary, or for a Homebrew install its link in Homebrew's bin, which stays put
 /// when an upgrade replaces the versioned folder the binary itself is in.
 fn stable_binary() -> Result<PathBuf> {
-    let binary = std::env::current_exe().context("can't tell where sift is")?;
+    let binary = std::env::current_exe().context("can't tell where sift-it is")?;
     let resolved = binary.canonicalize().unwrap_or_else(|_| binary.clone());
     let text = resolved.to_string_lossy();
     for marker in ["/Caskroom/", "/Cellar/"] {
         if let Some(position) = text.find(marker) {
-            let link = PathBuf::from(&text[..position]).join("bin/sift");
+            let link = PathBuf::from(&text[..position]).join("bin/sift-it");
             if link.exists() {
                 return Ok(link);
             }
@@ -37,12 +37,12 @@ fn stable_binary() -> Result<PathBuf> {
     Ok(resolved)
 }
 
-/// The LaunchAgent for this binary: runs `sift daemon` at login, again if it crashes, at a lower priority.
+/// The LaunchAgent for this binary: runs `sift-it daemon` at login, again if it crashes, at a lower priority.
 pub fn plist() -> Result<String> {
     let binary = stable_binary()?;
     let log = config::home().join("indexer.log");
     let mut environment = String::new();
-    for name in ["SIFT_HOME", "SIFT_MODELS"] {
+    for name in ["SIFT_IT_HOME", "SIFT_IT_MODELS"] {
         if let Ok(value) = std::env::var(name) {
             environment.push_str(&format!("\n        <key>{name}</key>\n        <string>{}</string>", escape(&value)));
         }

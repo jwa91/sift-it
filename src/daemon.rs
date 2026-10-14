@@ -1,4 +1,4 @@
-//! `sift daemon`: the background indexer. It keeps the index in step with the chosen folders: a full sync when it
+//! `sift-it daemon`: the background indexer. It keeps the index in step with the chosen folders: a full sync when it
 //! starts (and every half hour, in case an event was missed), then the paths macOS reports as changed (FSEvents), a
 //! moment after they go quiet. It reads what's new, newest and cheapest first, and lets the model go after a minute
 //! with nothing to do.
@@ -159,7 +159,7 @@ fn lock() -> Result<Lock> {
     std::fs::create_dir_all(config::home())?;
     let file = File::options().create(true).truncate(false).write(true).open(lock_path())?;
     if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-        bail!("another sift daemon is running (pid {})", running_pid().map(|p| p.to_string()).unwrap_or("?".into()));
+        bail!("another sift-it daemon is running (pid {})", running_pid().map(|p| p.to_string()).unwrap_or("?".into()));
     }
     std::fs::write(lock_path(), std::process::id().to_string())?;
     Ok(Lock(file))
@@ -282,7 +282,7 @@ pub fn run() -> Result<()> {
     let _lock = lock()?;
     install_signal_handlers();
     trim_log();
-    log(&format!("sift daemon started (pid {})", std::process::id()));
+    log(&format!("sift-it daemon started (pid {})", std::process::id()));
     let mut reporter = Reporter {
         status: Status { pid: std::process::id(), state: "starting", ..Default::default() },
         last_write: Instant::now(),
@@ -408,7 +408,7 @@ pub fn run() -> Result<()> {
         }
     }
     reporter.set("stopped", None);
-    log("sift daemon stopped");
+    log("sift-it daemon stopped");
     drop(watcher);
     Ok(())
 }

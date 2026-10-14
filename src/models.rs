@@ -1,5 +1,5 @@
 //! The model files: ggml-org's Q8_0 GGUF conversion of EmbeddingGemma 2, at one pinned revision (the files
-//! `sift selftest` checks against). Downloaded once, with resume, and checked against their SHA-256 before they get
+//! `sift-it selftest` checks against). Downloaded once, with resume, and checked against their SHA-256 before they get
 //! their final name, so a file that's there is a whole one.
 
 use crate::embedder::{MEDIA_FILE, TEXT_FILE};

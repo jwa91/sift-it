@@ -89,6 +89,14 @@ impl Indexer {
         if store.adopt_vector_source(&crate::embedder::vector_source())? {
             eprintln!("the index was made by another model or pipeline: everything is indexed again");
         }
+        // An index from before the readers had a version: its failures get a try with these.
+        if store.meta("readers")?.is_none() {
+            store.set_meta("readers", "1")?;
+        }
+        let retried = store.adopt_readers_version(readers::VERSION)?;
+        if retried > 0 {
+            eprintln!("{retried} files that couldn't be read get another try with the improved readers");
+        }
         Ok(Self { store, models, embedder: None })
     }
 

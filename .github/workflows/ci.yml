@@ -16,7 +16,7 @@ concurrency:
 jobs:
   check:
     name: Check
-    # Apple Silicon: sift builds llama.cpp with Metal and links Apple's frameworks.
+    # Apple Silicon: sift-it builds llama.cpp with Metal and links Apple's frameworks.
     runs-on: macos-15
     timeout-minutes: 30
     steps:

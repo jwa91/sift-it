@@ -428,6 +428,21 @@ impl Store {
         Ok(stale)
     }
 
+    /// Queues the unreadable files again when the readers changed since they failed (see readers::VERSION). Returns
+    /// how many.
+    pub fn adopt_readers_version(&self, version: u32) -> Result<usize> {
+        let stored: Option<u32> = self.meta("readers")?.and_then(|v| v.parse().ok());
+        let mut requeued = 0;
+        if stored.is_some_and(|stored| stored < version) {
+            requeued =
+                self.conn.execute("UPDATE files SET state = 'pending', error = NULL WHERE state = 'failed'", [])?;
+        }
+        if stored != Some(version) {
+            self.set_meta("readers", &version.to_string())?;
+        }
+        Ok(requeued)
+    }
+
     /// Queues again the files where some piece couldn't be embedded (a passing failure, perhaps), once they've had
     /// `hours` to settle. Returns how many.
     pub fn requeue_unembedded(&self, hours: f64) -> Result<usize> {

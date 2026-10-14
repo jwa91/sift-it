@@ -1,4 +1,4 @@
-//! `sift eval <queries.json>`: how well search finds known answers (evals/evals.json, against the testbed).
+//! `sift-it eval <queries.json>`: how well search finds known answers (evals/evals.json, against the testbed).
 //!
 //! Each query names the files that count as the answer (by file name) and, optionally, where in the file the match
 //! must be (a page or a range of seconds). Queries marked "none" have no answer: anything shown among the strong

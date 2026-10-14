@@ -18,6 +18,6 @@ Format follows [Keep a Changelog](https://keepachangelog.com); versions follow
   frame per shot, plus its sound), and source code and notebooks (optional).
 - Hybrid ranking: cosine similarity gated on its lift above the query's median, plus exact words (SQLite FTS5);
   results open at their page, moment or line.
-- `sift daemon`: background indexing with FSEvents, new files first; `sift service` installs it as a LaunchAgent.
-- `sift serve`: JSON-lines search server for the Raycast extension.
-- `sift selftest` (built-in reference vectors), `sift eval`, `sift estimate`, `sift read`.
+- `sift-it daemon`: background indexing with FSEvents, new files first; `sift-it service` installs it as a LaunchAgent.
+- `sift-it serve`: JSON-lines search server for the Raycast extension.
+- `sift-it selftest` (built-in reference vectors), `sift-it eval`, `sift-it estimate`, `sift-it read`.

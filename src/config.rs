@@ -1,6 +1,6 @@
-//! Where Sift keeps its files: ~/Library/Application Support/Sift (or $SIFT_HOME).
+//! Where Sift It keeps its files: ~/Library/Application Support/Sift It (or $SIFT_IT_HOME).
 //!
-//!   config.json     the folders to index and what to skip (written by the Raycast extension or `sift folders`)
+//!   config.json     the folders to index and what to skip (written by the Raycast extension or `sift-it folders`)
 //!   index.sqlite    the index
 //!   status.json     what the indexer is doing (read by the Raycast menu bar command)
 //!   models/         the model files
@@ -11,10 +11,10 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 pub fn home() -> PathBuf {
-    if let Some(home) = std::env::var_os("SIFT_HOME") {
+    if let Some(home) = std::env::var_os("SIFT_IT_HOME") {
         return PathBuf::from(home);
     }
-    dirs_home().join("Library/Application Support/Sift")
+    dirs_home().join("Library/Application Support/Sift It")
 }
 
 pub fn dirs_home() -> PathBuf {
@@ -22,7 +22,7 @@ pub fn dirs_home() -> PathBuf {
 }
 
 pub fn models_dir() -> PathBuf {
-    std::env::var_os("SIFT_MODELS").map(PathBuf::from).unwrap_or_else(|| home().join("models"))
+    std::env::var_os("SIFT_IT_MODELS").map(PathBuf::from).unwrap_or_else(|| home().join("models"))
 }
 
 pub fn index_path() -> PathBuf {

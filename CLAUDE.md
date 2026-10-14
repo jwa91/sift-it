@@ -1,8 +1,8 @@
-# sift
+# sift-it
 
 Search the files on a Mac by what's in them: a Rust CLI around EmbeddingGemma 2 (llama.cpp with Metal, statically
 linked), Apple's frameworks for reading files, and SQLite. The Raycast extension (a separate repo) is a thin front end
-over `sift serve`.
+over `sift-it serve`.
 
 ## CLI Family Conventions
 
@@ -20,7 +20,7 @@ follows its conventions except where noted under "Exceptions".
 - Archive naming: `{name}_{version}_{os}_{arch}.tar.gz`, with `checksums.txt`
 
 ### Distribution (ADR 0008)
-- Ships as a Homebrew Cask into `jwa91/homebrew-tap/Casks/` (`brew install jwa91/tap/sift`)
+- Ships as a Homebrew Cask into `jwa91/homebrew-tap/Casks/` (`brew install jwa91/tap/sift-it`)
 
 ### Release Process
 - Locally: `make release VERSION=x.y.z` runs the preflight checks (VERSION set and equal to Cargo.toml's, 1Password
@@ -41,10 +41,10 @@ These family rules are Go-specific and don't apply here:
   `cargo fmt --check`, `cargo clippy -D warnings` and `cargo test`.
 - **No GoReleaser.** Its Rust builder always runs `rustup target add`, which this machine's toolchain policy reserves for
   mise (dotfiles toolchain-shim), and its prebuilt builder is GoReleaser Pro. `scripts/release.sh` does the same
-  steps: build, codesign + notarize, `sift_{version}_darwin_arm64.tar.gz` + `checksums.txt`, a GitHub release, and
-  `Casks/sift.rb` committed to the tap through the API with the tap-writer token (commit message
-  `feat(sift): cask update to vX.Y.Z`).
-- **darwin/arm64 only**, not `darwin+linux × amd64+arm64`. sift needs Metal (llama.cpp) and Apple's frameworks
+  steps: build, codesign + notarize, `sift-it_{version}_darwin_arm64.tar.gz` + `checksums.txt`, a GitHub release, and
+  `Casks/sift-it.rb` committed to the tap through the API with the tap-writer token (commit message
+  `feat(sift-it): cask update to vX.Y.Z`).
+- **darwin/arm64 only**, not `darwin+linux × amd64+arm64`. sift-it needs Metal (llama.cpp) and Apple's frameworks
   (PDFKit, ImageIO, Vision, AVFoundation). The cask says `depends_on macos: :sonoma` (and later) and `depends_on arch: :arm64`.
 - **A native build step.** `scripts/build-llama.sh` builds llama.cpp at a pinned release before cargo (a `make`
   prerequisite). CI runs on `macos-15`, not `ubuntu-latest`.

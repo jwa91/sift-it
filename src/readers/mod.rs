@@ -34,6 +34,10 @@ pub struct Piece {
 
 pub type Sink<'a> = &'a mut dyn FnMut(Piece) -> Result<()>;
 
+/// Goes up when the readers learn to read files they couldn't before: files that failed get another try.
+/// 2: recordings AVFoundation gave up on partway are read past the spot.
+pub const VERSION: u32 = 2;
+
 /// Reads a file into pieces; returns what was learned about it (pages, duration, size) for the index.
 pub fn read(path: &Path, kind: Kind, sink: Sink) -> Result<serde_json::Value> {
     match kind {

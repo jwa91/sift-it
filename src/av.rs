@@ -14,13 +14,13 @@ use anyhow::{Result, anyhow, bail};
 use objc2::rc::{Retained, autoreleasepool};
 use objc2::runtime::AnyObject;
 use objc2_av_foundation::{
-    AVAssetImageGenerator, AVAssetReader, AVAssetReaderAudioMixOutput, AVAssetReaderStatus, AVMediaTypeAudio,
-    AVMediaTypeVideo, AVURLAsset,
+    AVAssetImageGenerator, AVAssetReader, AVAssetReaderAudioMixOutput, AVAssetReaderOutput, AVAssetReaderStatus,
+    AVAssetReaderTrackOutput, AVAssetTrack, AVMediaTypeAudio, AVMediaTypeVideo, AVURLAsset,
 };
 use objc2_core_foundation::{CGFloat, CGSize};
 use objc2_core_graphics::CGImage;
-use objc2_core_media::CMTime;
-use objc2_foundation::{NSDictionary, NSNumber, NSString, NSURL};
+use objc2_core_media::{CMTime, CMTimeRange, kCMTimePositiveInfinity};
+use objc2_foundation::{NSArray, NSDictionary, NSNumber, NSString, NSURL};
 use std::path::Path;
 use std::ptr::NonNull;
 
@@ -53,17 +53,8 @@ pub fn has_audio(path: &Path) -> bool {
     unsafe { asset(path).tracksWithMediaType(audio).count() > 0 }
 }
 
-/// Decodes the sound and hands over its windows: (start in seconds, samples). Returns the seconds of sound read.
-pub fn read_audio(path: &Path, on_window: &mut dyn FnMut(f64, &[f32]) -> Result<()>) -> Result<f64> {
-    let asset = asset(path);
-    let audio = unsafe { AVMediaTypeAudio }.ok_or_else(|| anyhow!("no audio media type"))?;
-    let tracks = unsafe { asset.tracksWithMediaType(audio) };
-    if tracks.count() == 0 {
-        bail!("no sound in it");
-    }
-    let reader = unsafe { AVAssetReader::assetReaderWithAsset_error(&asset) }
-        .map_err(|error| anyhow!("AVFoundation: {}", error.localizedDescription()))?;
-    // Linear PCM, 32-bit float, mono, 16 kHz: AVFoundation mixes the tracks down and resamples.
+/// Linear PCM, 32-bit float, mono, 16 kHz: AVFoundation decodes, mixes the channels down and resamples.
+fn pcm_settings() -> Retained<NSDictionary<NSString, AnyObject>> {
     let keys = [
         "AVFormatIDKey",
         "AVSampleRateKey",
@@ -85,9 +76,41 @@ pub fn read_audio(path: &Path, on_window: &mut dyn FnMut(f64, &[f32]) -> Result<
     ];
     let key_refs: Vec<&NSString> = keys.iter().map(|k| &**k).collect();
     let value_refs: Vec<&AnyObject> = values.iter().map(|v| v.as_ref()).collect();
-    let settings = NSDictionary::from_slices(&key_refs, &value_refs);
-    let output = unsafe {
-        AVAssetReaderAudioMixOutput::assetReaderAudioMixOutputWithAudioTracks_audioSettings(&tracks, Some(&settings))
+    NSDictionary::from_slices(&key_refs, &value_refs)
+}
+
+/// How a pass of the reader ended.
+enum Pass {
+    Finished,
+    /// AVFoundation gave up partway (seen on long voice memos: its converter fails with -50 at one packet, though the
+    /// file plays and ffmpeg decodes it whole).
+    Failed(String),
+}
+
+/// One pass of the reader from `start_seconds` on, handing over the decoded samples.
+fn read_pass(
+    asset: &AVURLAsset,
+    tracks: &NSArray<AVAssetTrack>,
+    start_seconds: f64,
+    on_samples: &mut dyn FnMut(&[f32]) -> Result<()>,
+) -> Result<Pass> {
+    let reader = unsafe { AVAssetReader::assetReaderWithAsset_error(asset) }
+        .map_err(|error| anyhow!("AVFoundation: {}", describe(&error)))?;
+    if start_seconds > 0.0 {
+        let start = unsafe { CMTime::with_seconds(start_seconds, AUDIO_RATE as i32) };
+        unsafe { reader.setTimeRange(CMTimeRange { start, duration: kCMTimePositiveInfinity }) };
+    }
+    let settings = pcm_settings();
+    // One track is read as it is; several are mixed down.
+    let output: Retained<AVAssetReaderOutput> = if tracks.count() == 1 {
+        let track = tracks.objectAtIndex(0);
+        Retained::into_super(unsafe {
+            AVAssetReaderTrackOutput::assetReaderTrackOutputWithTrack_outputSettings(&track, Some(&settings))
+        })
+    } else {
+        Retained::into_super(unsafe {
+            AVAssetReaderAudioMixOutput::assetReaderAudioMixOutputWithAudioTracks_audioSettings(tracks, Some(&settings))
+        })
     };
     unsafe {
         output.setAlwaysCopiesSampleData(false);
@@ -96,13 +119,56 @@ pub fn read_audio(path: &Path, on_window: &mut dyn FnMut(f64, &[f32]) -> Result<
         }
         reader.addOutput(&output);
         if !reader.startReading() {
-            bail!("AVFoundation can't read it");
+            let reason = reader.error().map(|e| describe(&e)).unwrap_or_default();
+            bail!("AVFoundation can't read it: {reason}");
         }
+    }
+    let mut samples: Vec<f32> = Vec::new();
+    loop {
+        let more = autoreleasepool(|_| -> Result<bool> {
+            let Some(sample) = (unsafe { output.copyNextSampleBuffer() }) else { return Ok(false) };
+            let Some(block) = (unsafe { sample.data_buffer() }) else { return Ok(true) };
+            let count = unsafe { block.data_length() } / 4;
+            samples.resize(count, 0.0);
+            let destination = NonNull::new(samples.as_mut_ptr()).unwrap().cast();
+            let status = unsafe { block.copy_data_bytes(0, count * 4, destination) };
+            if status != 0 {
+                bail!("couldn't copy decoded sound ({status})");
+            }
+            Ok(true)
+        })?;
+        if !samples.is_empty() {
+            on_samples(&samples)?;
+            samples.clear();
+        }
+        if !more {
+            break;
+        }
+    }
+    if unsafe { reader.status() } == AVAssetReaderStatus::Failed {
+        let reason = unsafe { reader.error() }.map(|e| describe(&e)).unwrap_or_default();
+        return Ok(Pass::Failed(reason));
+    }
+    Ok(Pass::Finished)
+}
+
+/// Decodes the sound and hands over its windows: (start in seconds, samples). Returns the seconds of sound read.
+///
+/// When AVFoundation gives up partway, reading starts again a second past where it stopped (the lost second is
+/// silence in the windows, so every window keeps its true time); only a file it can't get past fails.
+pub fn read_audio(path: &Path, on_window: &mut dyn FnMut(f64, &[f32]) -> Result<()>) -> Result<f64> {
+    const SKIP: usize = AUDIO_RATE;
+    const MAX_RESUMES: usize = 50;
+    let asset = asset(path);
+    let audio = unsafe { AVMediaTypeAudio }.ok_or_else(|| anyhow!("no audio media type"))?;
+    let tracks = unsafe { asset.tracksWithMediaType(audio) };
+    if tracks.count() == 0 {
+        bail!("no sound in it");
     }
 
     let mut buffer: Vec<f32> = Vec::with_capacity(AUDIO_WINDOW * 2);
     let mut buffer_start = 0usize; // the sample number of buffer[0]
-    let mut total = 0usize;
+    let mut total = 0usize; // samples read (and silence put in for skipped stretches)
     let mut emitted = false;
     let mut emit = |start: usize, samples: &[f32], emitted: &mut bool| -> Result<()> {
         *emitted = true;
@@ -111,35 +177,40 @@ pub fn read_audio(path: &Path, on_window: &mut dyn FnMut(f64, &[f32]) -> Result<
         }
         on_window(start as f64 / AUDIO_RATE as f64, samples)
     };
-    loop {
-        let more = autoreleasepool(|_| -> Result<bool> {
-            let Some(sample) = (unsafe { output.copyNextSampleBuffer() }) else { return Ok(false) };
-            let Some(block) = (unsafe { sample.data_buffer() }) else { return Ok(true) };
-            let bytes = unsafe { block.data_length() };
-            let count = bytes / 4;
-            let old = buffer.len();
-            buffer.resize(old + count, 0.0);
-            let destination = NonNull::new(buffer[old..].as_mut_ptr()).unwrap().cast();
-            let status = unsafe { block.copy_data_bytes(0, count * 4, destination) };
-            if status != 0 {
-                buffer.truncate(old);
-                bail!("couldn't copy decoded sound ({status})");
-            }
-            total += count;
-            Ok(true)
-        })?;
+    let mut add = |samples: &[f32],
+                   buffer: &mut Vec<f32>,
+                   buffer_start: &mut usize,
+                   total: &mut usize,
+                   emitted: &mut bool|
+     -> Result<()> {
+        buffer.extend_from_slice(samples);
+        *total += samples.len();
         while buffer.len() >= AUDIO_WINDOW {
-            emit(buffer_start, &buffer[..AUDIO_WINDOW], &mut emitted)?;
+            emit(*buffer_start, &buffer[..AUDIO_WINDOW], emitted)?;
             buffer.drain(..AUDIO_HOP);
-            buffer_start += AUDIO_HOP;
+            *buffer_start += AUDIO_HOP;
         }
-        if !more {
-            break;
+        Ok(())
+    };
+
+    let mut resumes = 0;
+    loop {
+        let start = total;
+        let pass = read_pass(&asset, &tracks, start as f64 / AUDIO_RATE as f64, &mut |samples| {
+            add(samples, &mut buffer, &mut buffer_start, &mut total, &mut emitted)
+        })?;
+        match pass {
+            Pass::Finished => break,
+            Pass::Failed(reason) => {
+                resumes += 1;
+                if resumes > MAX_RESUMES {
+                    bail!("AVFoundation stopped reading it {MAX_RESUMES} times; the last: {reason}");
+                }
+                // Past the spot it stumbled on, keeping the timeline: a second of silence stands in for it.
+                let silence = vec![0.0f32; SKIP];
+                add(&silence, &mut buffer, &mut buffer_start, &mut total, &mut emitted)?;
+            }
         }
-    }
-    if unsafe { reader.status() } == AVAssetReaderStatus::Failed {
-        let reason = unsafe { reader.error() }.map(|e| e.localizedDescription().to_string()).unwrap_or_default();
-        bail!("AVFoundation stopped reading it: {reason}");
     }
     // The rest: on its own if nothing came before; else only when it holds a few seconds the last window didn't.
     let uncovered = buffer.len().saturating_sub(AUDIO_WINDOW - AUDIO_HOP);
@@ -147,6 +218,15 @@ pub fn read_audio(path: &Path, on_window: &mut dyn FnMut(f64, &[f32]) -> Result<
         emit(buffer_start, &buffer, &mut emitted)?;
     }
     Ok(total as f64 / AUDIO_RATE as f64)
+}
+
+/// An NSError with what "The operation could not be completed" leaves out: its domain, code, and underlying errors.
+fn describe(error: &objc2_foundation::NSError) -> String {
+    let mut text = format!("{} ({} {})", error.localizedDescription(), error.domain(), error.code());
+    for underlying in error.underlyingErrors().iter() {
+        text.push_str(&format!("; {}", describe(&underlying)));
+    }
+    text
 }
 
 fn rms(samples: &[f32]) -> f32 {

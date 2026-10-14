@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Sign + notarize the sift binary. Called by goreleaser as a `builds.hooks.post` step with the build target
+# Sign + notarize the sift-it binary. Called by goreleaser as a `builds.hooks.post` step with the build target
 # (a Rust triple: aarch64-apple-darwin) and the binary path.
 #
 # Requires, for a signed build:
@@ -36,11 +36,11 @@ case "$target" in
     xcrun notarytool history --keychain-profile "$profile" >/dev/null
 
     codesign --force --options runtime --timestamp \
-      --identifier dev.jwa91.sift \
+      --identifier dev.jwa91.sift-it \
       --sign "$MACOS_SIGN_IDENTITY" "$binary"
     echo "codesign: signed $binary"
 
-    zip="$(mktemp -t sift-notarize.XXXXXX).zip"
+    zip="$(mktemp -t sift-it-notarize.XXXXXX).zip"
     ditto -c -k --sequesterRsrc "$binary" "$zip"
     echo "notarytool: submitting $binary via $zip (profile: $profile)"
     xcrun notarytool submit "$zip" --keychain-profile "$profile" --wait

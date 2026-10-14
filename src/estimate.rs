@@ -1,5 +1,5 @@
-//! `sift estimate <folder>...`: what indexing a folder means, before it starts: how many files of each kind, and about
-//! how long the first pass takes. The costs are measured ones (an M5; `sift bench-embed` measures yours): text at about
+//! `sift-it estimate <folder>...`: what indexing a folder means, before it starts: how many files of each kind, and about
+//! how long the first pass takes. The costs are measured ones (an M5; `sift-it bench-embed` measures yours): text at about
 //! 10,000 tokens a second, a photo in 0.15 s, a screenshot (picture, text and OCR) in 0.5 s, 30 s of sound in 0.25 s.
 
 use crate::config::Config;

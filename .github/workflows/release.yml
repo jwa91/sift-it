@@ -54,6 +54,6 @@ jobs:
           set -eu
           cd dist
           shasum -a 256 -c checksums.txt
-          mkdir smoke && tar -xzf sift_*_darwin_arm64.tar.gz -C smoke
-          smoke/sift --version
-          smoke/sift estimate . > /dev/null
+          mkdir smoke && tar -xzf sift-it_*_darwin_arm64.tar.gz -C smoke
+          smoke/sift-it --version
+          smoke/sift-it estimate . > /dev/null

@@ -1,4 +1,4 @@
-//! `sift selftest`: the vectors this build makes for fixed inputs, against reference vectors made by a known-good
+//! `sift-it selftest`: the vectors this build makes for fixed inputs, against reference vectors made by a known-good
 //! pipeline (tests/reference). Any change to llama.cpp, the model files, the image sizing or the prompts must still
 //! pass this, or an existing index would no longer agree with new queries.
 
@@ -8,7 +8,7 @@ use anyhow::{Context, Result, bail};
 use std::collections::BTreeMap;
 use std::path::Path;
 
-/// The reference inputs and vectors (tests/reference), built in, so an installed sift can check itself.
+/// The reference inputs and vectors (tests/reference), built in, so an installed sift-it can check itself.
 const BUILT_IN: [(&str, &[u8]); 4] = [
     ("vectors.json", include_bytes!("../tests/reference/vectors.json")),
     ("photo.jpg", include_bytes!("../tests/reference/photo.jpg")),
@@ -18,7 +18,7 @@ const BUILT_IN: [(&str, &[u8]); 4] = [
 
 /// Runs against the built-in reference (written to a temporary folder: mtmd's decoders read files).
 pub fn run_built_in(models: &ModelFiles) -> Result<()> {
-    let folder = std::env::temp_dir().join(format!("sift-selftest-{}", std::process::id()));
+    let folder = std::env::temp_dir().join(format!("sift-it-selftest-{}", std::process::id()));
     std::fs::create_dir_all(&folder)?;
     for (name, bytes) in BUILT_IN {
         std::fs::write(folder.join(name), bytes)?;

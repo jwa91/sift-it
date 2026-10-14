@@ -38,7 +38,7 @@ impl ModelFiles {
     pub fn in_folder(folder: &Path) -> Result<Self> {
         let text = folder.join(TEXT_FILE);
         if !text.exists() {
-            bail!("the model isn't downloaded: no {} (run `sift model download`)", text.display());
+            bail!("the model isn't downloaded: no {} (run `sift-it model download`)", text.display());
         }
         let media = folder.join(MEDIA_FILE);
         Ok(Self { text, media: media.exists().then_some(media) })
@@ -74,7 +74,7 @@ unsafe impl Send for Embedder {}
 static VERBOSE: AtomicBool = AtomicBool::new(false);
 static LAST_LEVEL: AtomicU32 = AtomicU32::new(0);
 
-/// llama.cpp talks a lot; only errors get through, unless SIFT_VERBOSE is set.
+/// llama.cpp talks a lot; only errors get through, unless SIFT_IT_VERBOSE is set.
 unsafe extern "C" fn log_callback(level: ll::ggml_log_level, text: *const c_char, _: *mut c_void) {
     let level = if level == ll::GGML_LOG_LEVEL_CONT { LAST_LEVEL.load(Ordering::Relaxed) } else { level };
     LAST_LEVEL.store(level, Ordering::Relaxed);
@@ -88,7 +88,7 @@ unsafe extern "C" fn log_callback(level: ll::ggml_log_level, text: *const c_char
 fn init_backend() {
     static INIT: Once = Once::new();
     INIT.call_once(|| unsafe {
-        VERBOSE.store(std::env::var_os("SIFT_VERBOSE").is_some(), Ordering::Relaxed);
+        VERBOSE.store(std::env::var_os("SIFT_IT_VERBOSE").is_some(), Ordering::Relaxed);
         ll::llama_log_set(Some(log_callback), std::ptr::null_mut());
         ll::mtmd_log_set(Some(log_callback), std::ptr::null_mut());
         ll::mtmd_helper_log_set(Some(log_callback), std::ptr::null_mut());
@@ -143,7 +143,7 @@ impl Embedder {
             }
             // Each input must fit in one micro-batch. 2048 tokens holds a long passage, a 1120-token image or a 30 s
             // clip (750 tokens). Queries are short, so the query encoder reserves less.
-            let max_tokens = std::env::var("SIFT_BATCH_TOKENS")
+            let max_tokens = std::env::var("SIFT_IT_BATCH_TOKENS")
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(if text_only { 512 } else { 2048 });

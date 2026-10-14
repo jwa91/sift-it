@@ -25,9 +25,9 @@ use config::Config;
 use crawl::Kind;
 use std::path::PathBuf;
 
-/// Sift: search your files by what's in them, with EmbeddingGemma 2 on this Mac.
+/// Sift It: search your files by what's in them, with EmbeddingGemma 2 on this Mac.
 #[derive(Parser)]
-#[command(name = "sift", version)]
+#[command(name = "sift-it", version)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -97,7 +97,7 @@ enum Command {
         #[arg(short, long)]
         verbose: bool,
     },
-    /// Show what Sift reads from a file: its pieces, without the model
+    /// Show what Sift It reads from a file: its pieces, without the model
     Read {
         path: PathBuf,
         /// Also count each text piece's tokens
@@ -160,7 +160,7 @@ enum ModelAction {
 
 fn main() {
     if let Err(error) = run(Cli::parse()) {
-        eprintln!("sift: {error:#}");
+        eprintln!("sift-it: {error:#}");
         std::process::exit(1);
     }
 }
@@ -227,7 +227,7 @@ fn run(cli: Cli) -> Result<()> {
         Command::Read { path, tokens } => {
             let path = config::expand(&path.to_string_lossy());
             let kind = crawl::kind_of(&crawl::extension_of(&path), true)
-                .ok_or_else(|| anyhow::anyhow!("Sift doesn't read .{} files", crawl::extension_of(&path)))?;
+                .ok_or_else(|| anyhow::anyhow!("Sift It doesn't read .{} files", crawl::extension_of(&path)))?;
             let mut model = if tokens {
                 Some(embedder::Embedder::load(&embedder::ModelFiles::in_folder(&config::models_dir())?, true)?)
             } else {
@@ -400,7 +400,7 @@ fn set_option(key: Option<String>, value: Option<String>) -> Result<()> {
 fn index(json: bool, reindex: bool) -> Result<()> {
     let config = Config::load()?;
     if config.folders.is_empty() {
-        bail!("no folders to index: add some with `sift folders add <folder>`");
+        bail!("no folders to index: add some with `sift-it folders add <folder>`");
     }
     // Two indexers would read the same files: let the running one do it.
     if let Some(pid) = daemon::running_pid() {
@@ -528,7 +528,7 @@ fn status(json: bool) -> Result<()> {
 
 /// An index of random unit vectors (and words), then searches over it.
 fn bench_search(count: usize) -> Result<()> {
-    let folder = std::env::temp_dir().join(format!("sift-bench-{}", std::process::id()));
+    let folder = std::env::temp_dir().join(format!("sift-it-bench-{}", std::process::id()));
     std::fs::create_dir_all(&folder)?;
     let path = folder.join("index.sqlite");
     let started = std::time::Instant::now();

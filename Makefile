@@ -15,8 +15,8 @@ build: $(LLAMA)
 
 install: build
 	install -d $(BIN_DIR)
-	install -m 0755 target/release/sift $(BIN_DIR)/sift
-	@echo "installed sift to $(BIN_DIR)/sift"
+	install -m 0755 target/release/sift-it $(BIN_DIR)/sift-it
+	@echo "installed sift-it to $(BIN_DIR)/sift-it"
 	@echo "ensure $(BIN_DIR) is on your PATH"
 
 dev: install
@@ -26,18 +26,18 @@ check: $(LLAMA)
 	cargo clippy --release -- -D warnings
 	cargo test --release
 
-# The vectors this build makes, against the reference (needs the model: sift model download).
+# The vectors this build makes, against the reference (needs the model: sift-it model download).
 selftest: build
-	target/release/sift selftest
+	target/release/sift-it selftest
 
 testbed:
 	scripts/make-testbed.sh
 
 # Search quality on the testbed, in an index of its own (needs the model).
 eval: build testbed
-	SIFT_HOME=$(CURDIR)/testbed/.sift SIFT_MODELS="$(HOME)/Library/Application Support/Sift/models" \
-	  sh -c 'target/release/sift folders add testbed >/dev/null && target/release/sift config include-code true >/dev/null \
-	  && target/release/sift index >/dev/null 2>&1 && target/release/sift eval evals/evals.json'
+	SIFT_IT_HOME=$(CURDIR)/testbed/.sift SIFT_IT_MODELS="$(HOME)/Library/Application Support/Sift It/models" \
+	  sh -c 'target/release/sift-it folders add testbed >/dev/null && target/release/sift-it config include-code true >/dev/null \
+	  && target/release/sift-it index >/dev/null 2>&1 && target/release/sift-it eval evals/evals.json'
 
 # Local release, as in the rest of the jwa91 family: CI has no signing credentials, so every release runs here.
 # Requires 1Password signed in, gh authenticated, the keychain profile "notarytool"
