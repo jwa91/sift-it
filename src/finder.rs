@@ -75,6 +75,8 @@ struct App {
     requested: std::collections::HashSet<i64>,
     flash: Option<(String, Instant)>,
     searching: bool,
+    /// The query and filter whose results are in the list.
+    answered: Option<(String, usize)>,
 }
 
 impl App {
@@ -127,6 +129,7 @@ fn run_app(terminal: &mut ratatui::DefaultTerminal, picker: Picker, initial: &st
         requested: Default::default(),
         flash: None,
         searching: true,
+        answered: None,
     };
     search_tx.send(app.request())?;
 
@@ -135,7 +138,11 @@ fn run_app(terminal: &mut ratatui::DefaultTerminal, picker: Picker, initial: &st
             // Results: only the latest query's count.
             while let Ok((request, response)) = results_rx.try_recv() {
                 if request.q == app.query && request.kinds == FILTERS[app.filter].1 {
-                    let keep = app.selected().map(|h| h.path.clone());
+                    // A new query starts at its first result; the same one answered again (with meaning, once the
+                    // model is there) keeps the selection.
+                    let asked = Some((request.q.clone(), app.filter));
+                    let keep = if app.answered == asked { app.selected().map(|h| h.path.clone()) } else { None };
+                    app.answered = asked;
                     app.hits = response.hits;
                     app.meaning = response.meaning;
                     app.searching = false;

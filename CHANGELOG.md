@@ -7,6 +7,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com); versions follow
 
 ## [Unreleased]
 
+### Fixed
+
+- The finder starts each new search at its first result. It kept the file that was selected, wherever that landed in
+  the new list (often a file it had kept from a half-typed word).
+
 ## [0.1.1] — 2026-10-14
 
 ### Changed
