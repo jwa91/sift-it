@@ -2,7 +2,8 @@
 //! query encoder loaded, so a search while typing costs milliseconds, not a process start.
 //!
 //! One JSON request per line on stdin, one JSON reply per line on stdout carrying the request's `id`. Lines without an
-//! `id` are events.
+//! `id` are events. Previews are made on a thread of their own, so a search never waits behind one: their replies can
+//! come after replies to later requests.
 //!
 //!   {"id":1,"op":"search","q":"…","kinds":["pdf"],"limit":40,"prefix_last":true}
 //!       → {"id":1,"hits":[…],"meaning":true,"ms":3.1}     meaning false: words only (the encoder is still loading)
@@ -49,7 +50,7 @@ pub fn serve(index: &Path, models: &Path) -> Result<()> {
     emit(&out, &json!({"event": "ready", "vectors": searcher.vector_count(), "index": index.display().to_string()}));
 
     let encoder = Arc::new(Mutex::new(Encoder::Loading));
-    {
+    let loader = {
         let encoder = encoder.clone();
         let out = out.clone();
         let models = models.to_path_buf();
@@ -64,6 +65,21 @@ pub fn serve(index: &Path, models: &Path) -> Result<()> {
                 Err(error) => Encoder::Unavailable(format!("{error:#}")),
             };
             emit(&out, &event);
+        })
+    };
+
+    // A video frame, a PDF page or a long recording's waveform can take a while (seconds, the first time): previews
+    // are made one after another here, beside the searches.
+    let (previews, requests) = std::sync::mpsc::channel::<(Value, Value)>();
+    {
+        let out = out.clone();
+        std::thread::spawn(move || {
+            for (id, request) in requests {
+                let mut reply =
+                    preview(&request).unwrap_or_else(|error| json!({"ok": false, "error": format!("{error:#}")}));
+                reply["id"] = id;
+                emit(&out, &reply);
+            }
         });
     }
 
@@ -77,11 +93,18 @@ pub fn serve(index: &Path, models: &Path) -> Result<()> {
             emit(&out, &json!({"id": id, "ok": true}));
             break;
         }
+        if op == "preview" {
+            let _ = previews.send((id, request));
+            continue;
+        }
         let reply = handle(op, &request, &mut searcher, &encoder, &mut cache);
         let mut reply = reply.unwrap_or_else(|error| json!({"ok": false, "error": format!("{error:#}")}));
         reply["id"] = id;
         emit(&out, &reply);
     }
+    // The model goes before the process does (llama.cpp aborts if its Metal device is freed under a model): a front end
+    // that closes while the model loads waits for the load to end, then the model is freed with the last reference.
+    let _ = loader.join();
     Ok(())
 }
 
@@ -100,15 +123,6 @@ fn handle(
             }
             let vector = query_vector(&search.prompt(), encoder, cache);
             Ok(serde_json::to_value(searcher.search(&search, vector.as_deref())?)?)
-        }
-        "preview" => {
-            let path = request.get("path").and_then(Value::as_str).ok_or_else(|| anyhow!("which file?"))?;
-            let kind = request.get("kind").and_then(Value::as_str).unwrap_or("image");
-            let loc = request.get("loc").and_then(Value::as_f64);
-            let loc_end = request.get("loc_end").and_then(Value::as_f64);
-            let size = request.get("size").and_then(Value::as_u64).unwrap_or(640) as u32;
-            let image = preview::render(Path::new(path), kind, loc, loc_end, size, &config::previews_dir())?;
-            Ok(json!({"image": image.display().to_string()}))
         }
         "text" => {
             // A segment's whole text, or all of a file's (a screenshot's recognized text, say), for a preview.
@@ -133,6 +147,17 @@ fn handle(
         }
         _ => Err(anyhow!("unknown op {op:?}")),
     }
+}
+
+/// A preview's picture: a thumbnail, a PDF page, a video frame or a waveform.
+fn preview(request: &Value) -> Result<Value> {
+    let path = request.get("path").and_then(Value::as_str).ok_or_else(|| anyhow!("which file?"))?;
+    let kind = request.get("kind").and_then(Value::as_str).unwrap_or("image");
+    let loc = request.get("loc").and_then(Value::as_f64);
+    let loc_end = request.get("loc_end").and_then(Value::as_f64);
+    let size = request.get("size").and_then(Value::as_u64).unwrap_or(640) as u32;
+    let image = preview::render(Path::new(path), kind, loc, loc_end, size, &config::previews_dir())?;
+    Ok(json!({"image": image.display().to_string()}))
 }
 
 /// The query's vector (from its prompt), or None while the encoder loads (words-only results then).
