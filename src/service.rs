@@ -5,6 +5,7 @@ use crate::config;
 use anyhow::{Context, Result, bail};
 use std::path::PathBuf;
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 pub const LABEL: &str = "local.sift-it.indexer";
 
@@ -91,15 +92,34 @@ pub fn install() -> Result<()> {
     let path = plist_path();
     std::fs::create_dir_all(path.parent().unwrap())?;
     std::fs::create_dir_all(config::home())?;
-    // A running one first goes, so the new plist (a new binary path) takes.
-    let _ = Command::new("launchctl").args(["bootout", &format!("{}/{LABEL}", domain())]).output();
+    // A running one first goes, so the new plist (a new binary path) takes. bootout returns before it's gone (the
+    // indexer finishes the file it's on), and a bootstrap meanwhile fails with "5: Input/output error": wait for it.
+    let service = format!("{}/{LABEL}", domain());
+    let _ = Command::new("launchctl").args(["bootout", &service]).output();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while loaded(&service) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(200));
+    }
     std::fs::write(&path, plist()?)?;
-    let output = Command::new("launchctl").args(["bootstrap", &domain()]).arg(&path).output()?;
-    if !output.status.success() {
-        bail!("launchctl couldn't start it: {}", String::from_utf8_lossy(&output.stderr).trim());
+    let mut tries = 0;
+    loop {
+        let output = Command::new("launchctl").args(["bootstrap", &domain()]).arg(&path).output()?;
+        if output.status.success() {
+            break;
+        }
+        tries += 1;
+        if tries == 5 {
+            bail!("launchctl couldn't start it: {}", String::from_utf8_lossy(&output.stderr).trim());
+        }
+        std::thread::sleep(Duration::from_secs(1));
     }
     println!("installed {} and started the background indexer", path.display());
     Ok(())
+}
+
+/// Whether launchd still has the service (`launchctl print` knows it).
+fn loaded(service: &str) -> bool {
+    Command::new("launchctl").args(["print", service]).output().is_ok_and(|output| output.status.success())
 }
 
 pub fn uninstall() -> Result<()> {
@@ -114,8 +134,7 @@ pub fn uninstall() -> Result<()> {
 
 pub fn status() -> Result<()> {
     let installed = plist_path().exists();
-    let output = Command::new("launchctl").args(["print", &format!("{}/{LABEL}", domain())]).output()?;
-    let loaded = output.status.success();
+    let loaded = loaded(&format!("{}/{LABEL}", domain()));
     let pid = crate::daemon::running_pid();
     println!(
         "{}",

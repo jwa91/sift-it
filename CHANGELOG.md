@@ -7,6 +7,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com); versions follow
 
 ## [Unreleased]
 
+### Fixed
+
+- `sift-it service install` over a running indexer: it now waits for the old one to stop before starting the new one,
+  instead of failing with launchctl's "Bootstrap failed: 5: Input/output error".
+
 ## [0.1.0] — 2026-10-14
 
 ### Added
