@@ -21,7 +21,7 @@ use crate::crawl::Kind;
 use crate::embedder::DIM;
 use crate::store::{Segment, Store, blob_to_vector};
 use anyhow::Result;
-use rusqlite::{OptionalExtension, params};
+use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
@@ -48,6 +48,8 @@ const LENGTH_PENALTY: f32 = 0.0125;
 const LENGTH_FREE: f32 = 4.0;
 /// Segments of one file within this much of its best are close enough for words to choose between them.
 const CLOSE: f32 = 0.04;
+/// At most this many of one file's segments are candidates, so a long file can't use up what's taken.
+const PER_FILE: usize = 10;
 /// Above this many vectors, the median is taken from a sample (it's the same median, faster).
 const MEDIAN_SAMPLE: usize = 50_000;
 /// A typical median: across the testbed's queries, a query's median segment scores 0.49–0.59. A small index's own
@@ -306,6 +308,7 @@ impl Searcher {
                 kind != Kind::Code && (request.kinds.is_empty() || request.kinds.contains(&kind))
             }
         };
+        let wanted_file = |file: i64| self.file_kinds.get(&file).is_some_and(|&kind| wanted(kind));
 
         // Meaning: every vector's cosine, and the query's median.
         let query = query.filter(|_| self.compatible);
@@ -330,22 +333,31 @@ impl Searcher {
         let bonus = if exact { WORD_BONUS } else { PLAIN_WORD_BONUS };
         if !phrases.is_empty() {
             // Quoted words must be there exactly: only segments with them, ranked by meaning among themselves.
-            let matches = self.phrase_matches(&phrases, 5000)?;
+            let matches = self.phrase_matches(&phrases, &wanted_file, 5000)?;
             let count = matches.len().max(1) as f32;
             for (rank, segment) in matches.into_iter().enumerate() {
                 let score = WORD_BONUS + fit_of(segment).unwrap_or(0.0).max(0.0) + 0.02 * (1.0 - rank as f32 / count);
                 candidates.insert(segment, Candidate { segment, score, words: true });
             }
         } else if !cosines.is_empty() {
-            let mut shown: Vec<(usize, f32)> =
-                (0..cosines.len()).map(|i| (i, fit_at(i))).filter(|&(_, fit)| fit >= SHOWN_LIFT).collect();
+            // The kinds asked for, and at most PER_FILE of a file, before the 5000 are taken.
+            let mut shown: Vec<(usize, f32)> = (0..cosines.len())
+                .map(|i| (i, fit_at(i)))
+                .filter(|&(i, fit)| fit >= SHOWN_LIFT && wanted_file(self.files[i]))
+                .collect();
             shown.sort_by(|a, b| b.1.total_cmp(&a.1));
-            for (i, fit) in shown.into_iter().take(5000) {
+            let mut per_file: HashMap<i64, usize> = HashMap::new();
+            let taken = shown.into_iter().filter(|&(i, _)| {
+                let count = per_file.entry(self.files[i]).or_default();
+                *count += 1;
+                *count <= PER_FILE
+            });
+            for (i, fit) in taken.take(5000) {
                 candidates.insert(self.ids[i], Candidate { segment: self.ids[i], score: fit, words: false });
             }
         }
         if phrases.is_empty() && !words.is_empty() {
-            let matches = self.word_matches(&words, request.prefix_last, 1000)?;
+            let matches = self.word_matches(&words, request.prefix_last, &wanted_file, 1000)?;
             let count = matches.len().max(1) as f32;
             for (rank, segment) in matches.into_iter().enumerate() {
                 // Earlier in the full-text ranking breaks ties between files that only match by words.
@@ -494,7 +506,13 @@ impl Searcher {
     }
 
     /// Segments with every word, best first (FTS5's bm25).
-    fn word_matches(&self, words: &[String], prefix_last: bool, limit: usize) -> Result<Vec<i64>> {
+    fn word_matches(
+        &self,
+        words: &[String],
+        prefix_last: bool,
+        wanted: &dyn Fn(i64) -> bool,
+        limit: usize,
+    ) -> Result<Vec<i64>> {
         let query = words
             .iter()
             .enumerate()
@@ -504,26 +522,40 @@ impl Searcher {
             })
             .collect::<Vec<_>>()
             .join(" ");
-        let mut statement =
-            self.store.conn.prepare_cached("SELECT rowid FROM words WHERE words MATCH ?1 ORDER BY rank LIMIT ?2")?;
-        let ids = statement
-            .query_map(params![query, limit as i64], |row| row.get(0))?
-            .collect::<std::result::Result<Vec<i64>, _>>()?;
-        Ok(ids)
+        self.text_matches(&query, wanted, limit)
     }
 
     /// Segments with every phrase, its words together and in order (FTS5 phrase queries), best first.
-    fn phrase_matches(&self, phrases: &[Vec<String>], limit: usize) -> Result<Vec<i64>> {
+    fn phrase_matches(&self, phrases: &[Vec<String>], wanted: &dyn Fn(i64) -> bool, limit: usize) -> Result<Vec<i64>> {
         let query = phrases
             .iter()
             .map(|words| format!("\"{}\"", words.join(" ").replace('"', "\"\"")))
             .collect::<Vec<_>>()
             .join(" ");
-        let mut statement =
-            self.store.conn.prepare_cached("SELECT rowid FROM words WHERE words MATCH ?1 ORDER BY rank LIMIT ?2")?;
-        let ids = statement
-            .query_map(params![query, limit as i64], |row| row.get(0))?
-            .collect::<std::result::Result<Vec<i64>, _>>()?;
+        self.text_matches(&query, wanted, limit)
+    }
+
+    /// The segments an FTS5 query matches, best first (bm25): only of files `wanted` takes, at most PER_FILE of one,
+    /// `limit` in all. The kinds and the cap come before the limit, or a long file or files of a kind not asked for
+    /// could use it up and leave out what was asked for.
+    fn text_matches(&self, query: &str, wanted: &dyn Fn(i64) -> bool, limit: usize) -> Result<Vec<i64>> {
+        let mut statement = self.store.conn.prepare_cached(
+            "SELECT words.rowid, segments.file_id FROM words JOIN segments ON segments.id = words.rowid
+             WHERE words MATCH ?1 ORDER BY words.rank",
+        )?;
+        let mut rows = statement.query([query])?;
+        let mut per_file: HashMap<i64, usize> = HashMap::new();
+        let mut ids = Vec::new();
+        while ids.len() < limit
+            && let Some(row) = rows.next()?
+        {
+            let (segment, file): (i64, i64) = (row.get(0)?, row.get(1)?);
+            let count = per_file.entry(file).or_default();
+            if *count < PER_FILE && wanted(file) {
+                *count += 1;
+                ids.push(segment);
+            }
+        }
         Ok(ids)
     }
 
@@ -681,6 +713,62 @@ pub fn excerpt(text: &str, words: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::NewSegment;
+
+    /// An index in a file of its own, removed when the test ends.
+    struct TempIndex(std::path::PathBuf);
+    impl TempIndex {
+        fn new(name: &str) -> Self {
+            let index = Self(std::env::temp_dir().join(format!("sift-it-test-{name}-{}.sqlite", std::process::id())));
+            index.remove();
+            index
+        }
+        fn remove(&self) {
+            for suffix in ["", "-wal", "-shm"] {
+                let _ = std::fs::remove_file(format!("{}{suffix}", self.0.display()));
+            }
+        }
+    }
+    impl Drop for TempIndex {
+        fn drop(&mut self) {
+            self.remove();
+        }
+    }
+
+    /// A file of `kind` whose passages are `texts`, indexed without vectors.
+    fn add(store: &mut Store, path: &str, kind: Kind, texts: Vec<String>) {
+        let found = crate::crawl::Found { path: path.into(), kind, size: 1, modified: 1.0 };
+        store.queue(&found, None).unwrap();
+        let row = store.pending(100).unwrap().into_iter().find(|row| row.path == Path::new(path)).unwrap();
+        let segments: Vec<NewSegment> = texts
+            .into_iter()
+            .enumerate()
+            .map(|(i, text)| NewSegment {
+                segment: Segment::Passage,
+                loc: Some(i as f64 + 1.0),
+                loc_end: None,
+                text: Some(text),
+                vector: None,
+            })
+            .collect();
+        assert!(store.finish_file(&row, &segments, &serde_json::json!({})).unwrap());
+    }
+
+    #[test]
+    fn a_long_file_or_an_unwanted_kind_doesnt_use_up_the_word_matches() {
+        let index = TempIndex::new("budget");
+        let mut store = Store::open(&index.0).unwrap();
+        add(&mut store, "/docs/long.html", Kind::Doc, (0..1200).map(|i| format!("needle {i}, needle")).collect());
+        add(&mut store, "/notes/note.txt", Kind::Text, vec!["needle extra context in a note".into()]);
+        drop(store);
+        let mut searcher = Searcher::open(&index.0).unwrap();
+        let search = |searcher: &mut Searcher, kinds: Vec<Kind>| {
+            let request = Request { q: "needle".into(), kinds, limit: 10, prefix_last: false };
+            searcher.search(&request, None).unwrap().hits.into_iter().map(|hit| hit.path).collect::<Vec<_>>()
+        };
+        assert_eq!(search(&mut searcher, vec![Kind::Text]), vec!["/notes/note.txt"]);
+        assert_eq!(search(&mut searcher, vec![]).len(), 2);
+    }
 
     #[test]
     fn quoted_parts_are_phrases() {
