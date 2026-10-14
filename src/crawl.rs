@@ -251,6 +251,9 @@ pub enum Rescan {
     Outside,
     /// In a chosen folder, but somewhere never read (a hidden or skipped folder, an excluded one).
     Skipped,
+    /// In a chosen folder that can't be read now (an unplugged drive): what was indexed from it stays, as in a full
+    /// crawl.
+    Unavailable,
     /// What's there now: the file itself, everything in a folder, or nothing when it's gone.
     Found(Vec<Found>),
 }
@@ -262,17 +265,23 @@ pub fn rescan(config: &Config, path: &Path) -> Rescan {
     else {
         return Rescan::Outside;
     };
+    if std::fs::read_dir(root).is_err() {
+        return Rescan::Unavailable;
+    }
     if config.excluded.iter().any(|excluded| path.starts_with(excluded)) {
         return Rescan::Skipped;
     }
-    // The folders between the root and the path: none may be skipped, and any may make it a code project.
+    // The folders between the root and the path: none may be skipped or a symlink (a crawl doesn't follow those, and
+    // reading the path would), and any may make it a code project.
     let mut in_project = false;
     let mut folder = root.clone();
     for component in path.strip_prefix(root).unwrap_or(Path::new("")).parent().into_iter().flat_map(|p| p.components())
     {
         in_project |= is_project(&folder);
         folder.push(component);
-        if is_skipped_folder(&folder, in_project) {
+        if is_skipped_folder(&folder, in_project)
+            || std::fs::symlink_metadata(&folder).is_ok_and(|metadata| metadata.file_type().is_symlink())
+        {
             return Rescan::Skipped;
         }
     }
@@ -397,4 +406,57 @@ fn has_xattr(path: &Path, name: &str) -> bool {
         return false;
     };
     unsafe { libc::getxattr(path.as_ptr(), name.as_ptr(), std::ptr::null_mut(), 0, 0, 0) >= 0 }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A folder of its own under the temporary folder, removed when the test ends.
+    struct TempFolder(PathBuf);
+    impl TempFolder {
+        fn new(name: &str) -> Self {
+            let path = std::env::temp_dir().join(format!("sift-it-test-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+    }
+    impl Drop for TempFolder {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn config(root: &Path) -> Config {
+        Config { folders: vec![root.to_path_buf()], ..Default::default() }
+    }
+
+    #[test]
+    fn a_chosen_folder_that_cant_be_read_is_left_alone() {
+        let temp = TempFolder::new("unavailable");
+        let root = temp.0.join("drive");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("note.txt"), "a note").unwrap();
+        let config = config(&root);
+        // Deleted from a folder that's there: gone.
+        assert!(matches!(rescan(&config, &root.join("other.txt")), Rescan::Found(found) if found.is_empty()));
+        // The folder itself gone (an unplugged drive): nothing to conclude about what's in it.
+        std::fs::rename(&root, temp.0.join("unplugged")).unwrap();
+        assert!(matches!(rescan(&config, &root), Rescan::Unavailable));
+        assert!(matches!(rescan(&config, &root.join("note.txt")), Rescan::Unavailable));
+    }
+
+    #[test]
+    fn a_folder_that_became_a_symlink_isnt_followed() {
+        let temp = TempFolder::new("symlink");
+        let (root, elsewhere) = (temp.0.join("root"), temp.0.join("elsewhere"));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::fs::write(elsewhere.join("note.txt"), "not in a chosen folder").unwrap();
+        std::os::unix::fs::symlink(&elsewhere, root.join("link")).unwrap();
+        let config = config(&root);
+        assert!(crawl(&config).found.is_empty());
+        assert!(matches!(rescan(&config, &root.join("link/note.txt")), Rescan::Skipped));
+    }
 }

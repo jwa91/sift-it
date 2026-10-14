@@ -146,7 +146,7 @@ impl Indexer {
         let transaction = self.store.conn.unchecked_transaction()?;
         for path in paths {
             let found = match crawl::rescan(config, path) {
-                Rescan::Outside => continue,
+                Rescan::Outside | Rescan::Unavailable => continue,
                 Rescan::Skipped => Vec::new(),
                 Rescan::Found(found) => found,
             };
