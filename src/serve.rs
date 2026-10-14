@@ -1,4 +1,4 @@
-//! `sift-it serve`: the searcher as a process, for the Raycast extension. It keeps the index's vectors in memory and the
+//! `sift-it serve`: the searcher as a process, for front ends (the Raycast extension is one). It keeps the index's vectors in memory and the
 //! query encoder loaded, so a search while typing costs milliseconds, not a process start.
 //!
 //! One JSON request per line on stdin, one JSON reply per line on stdout carrying the request's `id`. Lines without an
@@ -17,7 +17,7 @@
 //!
 //!   events: {"event":"ready","vectors":n}   {"event":"encoder","state":"ready"|"unavailable","error":…}
 //!
-//! It ends when its stdin closes (Raycast closed the command).
+//! It ends when its stdin closes (the front end went away).
 
 use crate::config;
 use crate::embedder::{Embedder, ModelFiles};

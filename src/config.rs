@@ -1,8 +1,8 @@
 //! Where Sift It keeps its files: ~/Library/Application Support/Sift It (or $SIFT_IT_HOME).
 //!
-//!   config.json     the folders to index and what to skip (written by the Raycast extension or `sift-it folders`)
+//!   config.json     the folders to index and what to skip (written by `sift-it folders` and `sift-it config`)
 //!   index.sqlite    the index
-//!   status.json     what the indexer is doing (read by the Raycast menu bar command)
+//!   status.json     what the background indexer is doing (for front ends)
 //!   models/         the model files
 //!   previews/       thumbnails rendered for search results
 

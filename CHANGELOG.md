@@ -19,7 +19,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com); versions follow
 - Hybrid ranking: cosine similarity gated on its lift above the query's median, plus exact words (SQLite FTS5);
   results open at their page, moment or line.
 - `sift-it daemon`: background indexing with FSEvents, new files first; `sift-it service` installs it as a LaunchAgent.
-- `sift-it serve`: JSON-lines search server for the Raycast extension.
+- `sift-it serve`: a JSON-lines search server for front ends (search, recent files, previews).
 - Quoted exact phrases: `"INV-2024-0113" invoice` only finds files with that exact text, ranked by the rest.
 - `sift-it serve` previews for every kind of result: a picture, a PDF page, a video frame, a recording's waveform with
   the matched stretch highlighted, and a passage's whole text.

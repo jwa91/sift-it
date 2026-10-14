@@ -1,8 +1,8 @@
 # sift-it
 
 Search the files on a Mac by what's in them: a Rust CLI around EmbeddingGemma 2 (llama.cpp with Metal, statically
-linked), Apple's frameworks for reading files, and SQLite. The Raycast extension (a separate repo) is a thin front end
-over `sift-it serve`.
+linked), Apple's frameworks for reading files, and SQLite. The CLI is the product; front ends (such as the Raycast
+extension, a separate repo) build on `sift-it serve` and `--json`.
 
 ## CLI Family Conventions
 

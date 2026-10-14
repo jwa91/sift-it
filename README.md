@@ -6,7 +6,8 @@ error in a screenshot, a function in your code. Everything runs on your Mac, wit
 [EmbeddingGemma 2](https://huggingface.co/google/embeddinggemma-2), a model that puts text, pictures and sound in one
 shared space.
 
-sift-it is a command-line tool and a background indexer. A Raycast extension puts a search panel on top of it.
+It's one command, `sift-it`: point it at your folders, let it index in the background, and search from the terminal.
+Other programs can build on it too: `sift-it serve` answers searches as JSON, and most commands take `--json`.
 
 ## Install
 
@@ -38,7 +39,7 @@ sift-it service install|uninstall|status|plist   the daemon as a LaunchAgent
 sift-it status [--json]
 sift-it model status|download
 sift-it read <file> [--tokens]         what sift-it reads from a file
-sift-it serve                          JSON lines on stdin/stdout, for the Raycast extension (see src/serve.rs)
+sift-it serve                          a search server on stdin/stdout (JSON lines), for front ends (src/serve.rs)
 sift-it selftest                       the reference vectors
 sift-it eval evals/evals.json          search quality on the testbed
 ```

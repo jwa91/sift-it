@@ -3,7 +3,7 @@
 //! moment after they go quiet. It reads what's new, newest and cheapest first, and lets the model go after a minute
 //! with nothing to do.
 //!
-//! It tells the Raycast extension what it's doing in status.json, and listens to signals:
+//! It says what it's doing in status.json (for `sift-it status` and front ends), and listens to signals:
 //!   SIGUSR1  look for changes now (a full sync)
 //!   SIGUSR2  pause or resume
 //!   SIGTERM  stop (what isn't finished stays queued)

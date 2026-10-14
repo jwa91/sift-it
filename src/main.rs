@@ -71,7 +71,7 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Answer searches over stdin/stdout (JSON lines), for the Raycast extension
+    /// Answer searches over stdin/stdout (JSON lines), for front ends
     Serve,
     /// Keep the index up to date in the background, watching the folders for changes
     Daemon,
