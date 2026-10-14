@@ -174,6 +174,10 @@ make eval           # search quality on the testbed
 make install        # → ~/.local/bin/sift-it
 ```
 
+For a demo, `scripts/make-demo.sh` fills `~/sift-it-demo` with about 400 MB of public photos, sounds, recordings,
+music, videos, PDFs, books and notes. The files have camera-roll and Downloads-folder names, and `CREDITS.csv` says
+where each one came from.
+
 Releases: `make release VERSION=x.y.z`; [docs/releasing.md](docs/releasing.md) sets a Mac up for it.
 
 ## Credits
