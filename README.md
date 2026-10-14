@@ -174,7 +174,7 @@ make eval           # search quality on the testbed
 make install        # → ~/.local/bin/sift-it
 ```
 
-Releases: `make release VERSION=x.y.z` (see the Makefile and CLAUDE.md).
+Releases: `make release VERSION=x.y.z`; [docs/releasing.md](docs/releasing.md) sets a Mac up for it.
 
 ## Credits
 

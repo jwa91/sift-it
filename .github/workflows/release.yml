@@ -1,10 +1,10 @@
 name: Release
 
-# Manual-only, and it doesn't publish: CI has no signing credentials
-# (Developer ID .p12 + App Store Connect API key), and a cask must be
-# notarized. Local releases via `make release VERSION=X.Y.Z` are the
-# canonical path — see Makefile. This builds what a release would and
-# checks it.
+# Manual-only, and it doesn't publish: a cask must be signed and notarized,
+# and the Developer ID certificate and notarytool login live in the
+# releasing Mac's keychain, not in CI. Local releases via
+# `make release VERSION=X.Y.Z` are the canonical path (docs/releasing.md).
+# This builds what a release would and checks it.
 on:
   workflow_dispatch:
   # push:

@@ -4,8 +4,11 @@
 # because GoReleaser's Rust builder always runs `rustup target add`, which this machine's toolchain policy reserves for
 # mise (see CLAUDE.md, Exceptions). Same archive name, checksums file, cask and commit message as GoReleaser's.
 #
-#   scripts/release.sh X.Y.Z        a release (through `make release`, with secrets from .env.template)
-#   scripts/release.sh --snapshot   build, sign when it can, archive, and render the cask into dist/; publish nothing
+#   scripts/release.sh X.Y.Z        a release (through `make release`)
+#   scripts/release.sh --snapshot   build, archive, and render the cask into dist/, unsigned; publish nothing
+#
+# It needs no secrets of its own: signing and notarizing use this Mac's keychain (scripts/codesign.sh,
+# docs/releasing.md), and the GitHub release and the cask use your gh login.
 set -euo pipefail
 
 OWNER=jwa91
@@ -38,15 +41,12 @@ if [[ "$built" != "$version" ]]; then
   exit 1
 fi
 
-# Sign and notarize. A release must be; a snapshot is when it can be.
+# Sign and notarize: a release always is; a snapshot (CI's, or a dry run) isn't.
 cp target/release/sift-it "$stage/sift-it"
-if [[ -n "${MACOS_SIGN_IDENTITY:-}" ]]; then
-  scripts/codesign.sh aarch64-apple-darwin "$stage/sift-it"
-elif ! $snapshot; then
-  echo "release: MACOS_SIGN_IDENTITY unset — a release must be signed and notarized (run it through make release)" >&2
-  exit 1
+if $snapshot; then
+  echo "snapshot: not signed"
 else
-  echo "snapshot: not signed (MACOS_SIGN_IDENTITY unset)"
+  scripts/codesign.sh "$stage/sift-it"
 fi
 
 # The archive (the binary with its license and docs, as GoReleaser packs them) and its checksum.
@@ -109,19 +109,18 @@ if $snapshot; then
   exit 0
 fi
 
-# The GitHub release, with the gh token (GITHUB_TOKEN, from make release).
+# The GitHub release, with your gh login.
 gh release create "$tag" "dist/$archive" dist/checksums.txt \
   --repo "$OWNER/$REPO" --title "$tag" --notes-file dist/notes.md --verify-tag
 
-# The cask, committed to the tap through the API with the tap-writer token: tokens act through the API, people push
-# over SSH (tap ADR 0002).
-: "${HOMEBREW_TAP_GITHUB_TOKEN:?HOMEBREW_TAP_GITHUB_TOKEN unset (it comes from .env.template)}"
-existing="$(GH_TOKEN="$HOMEBREW_TAP_GITHUB_TOKEN" gh api "repos/$OWNER/$TAP/contents/Casks/sift-it.rb" --jq .sha 2>/dev/null || true)"
+# The cask, committed to the tap through the API with your gh login (tokens act through the API; people push over
+# SSH: tap ADR 0002).
+existing="$(gh api "repos/$OWNER/$TAP/contents/Casks/sift-it.rb" --jq .sha 2>/dev/null || true)"
 args=(-X PUT "repos/$OWNER/$TAP/contents/Casks/sift-it.rb"
   -f message="feat(sift-it): cask update to $tag"
   -f content="$(base64 < dist/sift-it.rb | tr -d '\n')"
   -f branch=main)
 [[ -n "$existing" ]] && args+=(-f sha="$existing")
-GH_TOKEN="$HOMEBREW_TAP_GITHUB_TOKEN" gh api "${args[@]}" --jq '.commit.html_url'
+gh api "${args[@]}" --jq '.commit.html_url'
 
 echo "released $tag: brew install $OWNER/tap/sift-it"
