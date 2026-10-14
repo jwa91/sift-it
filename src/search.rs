@@ -141,12 +141,19 @@ impl Request {
         if self.has_prefix() { self.q.trim_start()[CODE_PREFIX.len()..].trim() } else { self.q.trim() }
     }
 
-    /// The prompt the query is embedded with.
+    /// Parts in quotes ("INV-2024-0113", or curly quotes): words that must be there, in that order.
+    pub fn phrases(&self) -> Vec<Vec<String>> {
+        let text = self.text().replace(['“', '”', '„'], "\"");
+        text.split('"').skip(1).step_by(2).map(words_of).filter(|words| !words.is_empty()).collect()
+    }
+
+    /// The prompt the query is embedded with (quotes don't mean anything to the model).
     pub fn prompt(&self) -> String {
+        let text = self.text().replace(['"', '“', '”', '„'], "");
         if self.is_code() {
-            crate::embedder::prompts::code_query(self.text())
+            crate::embedder::prompts::code_query(&text)
         } else {
-            crate::embedder::prompts::query(self.text())
+            crate::embedder::prompts::query(&text)
         }
     }
 }
@@ -280,7 +287,17 @@ impl Searcher {
         let lift_of = |segment: i64| self.rows.get(&segment).and_then(|&row| cosines.get(row)).map(|c| c - median);
 
         let mut candidates: HashMap<i64, Candidate> = HashMap::new();
-        if !cosines.is_empty() {
+        let words = words_of(request.text());
+        let phrases = request.phrases();
+        if !phrases.is_empty() {
+            // Quoted words must be there exactly: only segments with them, ranked by meaning among themselves.
+            let matches = self.phrase_matches(&phrases, 5000)?;
+            let count = matches.len().max(1) as f32;
+            for (rank, segment) in matches.into_iter().enumerate() {
+                let score = WORD_BONUS + lift_of(segment).unwrap_or(0.0).max(0.0) + 0.02 * (1.0 - rank as f32 / count);
+                candidates.insert(segment, Candidate { segment, score, words: true });
+            }
+        } else if !cosines.is_empty() {
             let mut shown: Vec<usize> = (0..cosines.len()).filter(|&i| cosines[i] - median >= SHOWN_LIFT).collect();
             shown.sort_by(|&a, &b| cosines[b].total_cmp(&cosines[a]));
             for i in shown.into_iter().take(5000) {
@@ -288,8 +305,7 @@ impl Searcher {
                     .insert(self.ids[i], Candidate { segment: self.ids[i], score: cosines[i] - median, words: false });
             }
         }
-        let words = words_of(request.text());
-        if !words.is_empty() {
+        if phrases.is_empty() && !words.is_empty() {
             let matches = self.word_matches(&words, request.prefix_last, 1000)?;
             let count = matches.len().max(1) as f32;
             for (rank, segment) in matches.into_iter().enumerate() {
@@ -343,6 +359,35 @@ impl Searcher {
         // Strong matches first, then the weaker ones, each by score.
         hits.sort_by(|a, b| b.strong.cmp(&a.strong).then(b.score.total_cmp(&a.score)));
         Ok(Response { hits, meaning: query.is_some(), ms: started.elapsed().as_secs_f64() * 1000.0 })
+    }
+
+    /// A segment's whole text.
+    pub fn segment_text(&self, segment_id: i64) -> Result<Option<String>> {
+        Ok(self
+            .store
+            .conn
+            .query_row("SELECT text FROM segments WHERE id = ?1", [segment_id], |row| row.get(0))
+            .optional()?
+            .flatten())
+    }
+
+    /// A file's text: its text segments in order, at most about 8,000 characters.
+    pub fn file_text(&self, path: &str) -> Result<Option<String>> {
+        let mut statement = self.store.conn.prepare(
+            "SELECT s.text FROM segments s JOIN files f ON f.id = s.file_id
+             WHERE f.path = ?1 AND s.text IS NOT NULL AND s.text != '' ORDER BY s.loc, s.id",
+        )?;
+        let mut text = String::new();
+        for part in statement.query_map([path], |row| row.get::<_, String>(0))? {
+            if !text.is_empty() {
+                text.push_str("\n\n");
+            }
+            text.push_str(&part?);
+            if text.len() > 8000 {
+                break;
+            }
+        }
+        Ok((!text.is_empty()).then_some(text))
     }
 
     /// Of a file's segments that score about the same, the one with the most of the query's words.
@@ -428,6 +473,21 @@ impl Searcher {
                 let quoted = format!("\"{}\"", word.replace('"', "\"\""));
                 if prefix_last && i == words.len() - 1 { format!("{quoted}*") } else { quoted }
             })
+            .collect::<Vec<_>>()
+            .join(" ");
+        let mut statement =
+            self.store.conn.prepare_cached("SELECT rowid FROM words WHERE words MATCH ?1 ORDER BY rank LIMIT ?2")?;
+        let ids = statement
+            .query_map(params![query, limit as i64], |row| row.get(0))?
+            .collect::<std::result::Result<Vec<i64>, _>>()?;
+        Ok(ids)
+    }
+
+    /// Segments with every phrase, its words together and in order (FTS5 phrase queries), best first.
+    fn phrase_matches(&self, phrases: &[Vec<String>], limit: usize) -> Result<Vec<i64>> {
+        let query = phrases
+            .iter()
+            .map(|words| format!("\"{}\"", words.join(" ").replace('"', "\"\"")))
             .collect::<Vec<_>>()
             .join(" ");
         let mut statement =
@@ -582,6 +642,15 @@ pub fn excerpt(text: &str, words: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quoted_parts_are_phrases() {
+        let request = Request { q: r#"invoice "INV-2024-0113" from “Altink Design”"#.into(), ..Default::default() };
+        assert_eq!(request.phrases(), vec![vec!["inv", "2024", "0113"], vec!["altink", "design"]]);
+        assert!(!request.prompt().contains('"'));
+        let plain = Request { q: "no quotes here".into(), ..Default::default() };
+        assert!(plain.phrases().is_empty());
+    }
 
     #[test]
     fn median_of_odd_and_even() {

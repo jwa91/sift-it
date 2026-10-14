@@ -8,6 +8,10 @@
 //!       → {"id":1,"hits":[…],"meaning":true,"ms":3.1}     meaning false: words only (the encoder is still loading)
 //!   {"id":2,"op":"recent","limit":40}                    → {"id":2,"hits":[…]}: recently changed files
 //!   {"id":3,"op":"preview","path":"…","kind":"pdf","loc":3,"size":512} → {"id":3,"image":"/…/preview.jpg"}
+//!   {"id":5,"op":"preview","path":"…","kind":"waveform","loc":60,"loc_end":90,"size":720} → a recording's
+//!       waveform (PNG) with the stretch from loc to loc_end seconds highlighted
+//!   {"id":6,"op":"text","segment_id":12} or {"op":"text","path":"…"} → {"text":…}: a segment's whole text, or a
+//!       file's (all its text segments, in order), for a preview
 //!   {"id":4,"op":"status"}                               → {"id":4,"vectors":n,"encoder":"ready",…}
 //!   {"id":5,"op":"quit"}
 //!
@@ -101,9 +105,22 @@ fn handle(
             let path = request.get("path").and_then(Value::as_str).ok_or_else(|| anyhow!("which file?"))?;
             let kind = request.get("kind").and_then(Value::as_str).unwrap_or("image");
             let loc = request.get("loc").and_then(Value::as_f64);
+            let loc_end = request.get("loc_end").and_then(Value::as_f64);
             let size = request.get("size").and_then(Value::as_u64).unwrap_or(640) as u32;
-            let image = preview::render(Path::new(path), kind, loc, size, &config::previews_dir())?;
+            let image = preview::render(Path::new(path), kind, loc, loc_end, size, &config::previews_dir())?;
             Ok(json!({"image": image.display().to_string()}))
+        }
+        "text" => {
+            // A segment's whole text, or all of a file's (a screenshot's recognized text, say), for a preview.
+            let text = match (
+                request.get("segment_id").and_then(Value::as_i64),
+                request.get("path").and_then(Value::as_str),
+            ) {
+                (Some(id), _) => searcher.segment_text(id)?,
+                (None, Some(path)) => searcher.file_text(path)?,
+                _ => return Err(anyhow!("which segment or file?")),
+            };
+            Ok(json!({"text": text}))
         }
         "status" => {
             searcher.refresh()?;

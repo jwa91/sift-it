@@ -254,3 +254,50 @@ pub fn pdf_pages(path: &Path) -> Option<usize> {
     let document = CGPDFDocument::with_url(Some(&*url(path).ok()?))?;
     Some(CGPDFDocument::number_of_pages(Some(&document)))
 }
+
+/// Writes a PNG (for pictures with transparency, like the waveform).
+pub fn save_png(image: &CGImage, path: &Path) -> Result<()> {
+    let png = CFString::from_str("public.png");
+    let destination = unsafe { CGImageDestination::with_url(&*url(path)?, &png, 1, None) }
+        .ok_or_else(|| anyhow!("can't write {}", path.display()))?;
+    unsafe {
+        destination.add_image(image, None);
+        if !destination.finalize() {
+            bail!("couldn't write {}", path.display());
+        }
+    }
+    Ok(())
+}
+
+/// A recording's waveform: one bar per column (`levels`, 0–1), on a transparent background so it reads in light and
+/// dark mode, with the columns in `highlight` (the stretch that matched) in blue on a light blue band.
+pub fn waveform(levels: &[f32], height: usize, highlight: Option<(usize, usize)>) -> Result<CFRetained<CGImage>> {
+    const BAR: usize = 3; // pixels per column: a 2 px bar and a 1 px gap
+    let width = levels.len().max(1) * BAR;
+    let mut rgba = vec![0u8; width * height * 4];
+    let space = CGColorSpace::with_name(Some(unsafe { kCGColorSpaceSRGB })).ok_or_else(|| anyhow!("no sRGB"))?;
+    // kCGImageAlphaPremultipliedLast: R, G, B, A.
+    let context =
+        unsafe { CGBitmapContextCreate(rgba.as_mut_ptr().cast(), width, height, 8, width * 4, Some(&space), 1) }
+            .ok_or_else(|| anyhow!("can't make a {width}×{height} bitmap"))?;
+    let context = unsafe { CFRetained::from_raw(context) };
+    let middle = height as CGFloat / 2.0;
+    if let Some((first, last)) = highlight {
+        CGContext::set_rgb_fill_color(Some(&context), 0.04, 0.52, 1.0, 0.16);
+        let x = (first * BAR) as CGFloat;
+        let band = ((last.saturating_sub(first) + 1) * BAR) as CGFloat;
+        CGContext::fill_rect(Some(&context), CGRect::new(CGPoint::new(x, 0.0), CGSize::new(band, height as CGFloat)));
+    }
+    for (column, level) in levels.iter().enumerate() {
+        let lit = highlight.is_some_and(|(first, last)| column >= first && column <= last);
+        if lit {
+            CGContext::set_rgb_fill_color(Some(&context), 0.04, 0.52, 1.0, 1.0);
+        } else {
+            CGContext::set_rgb_fill_color(Some(&context), 0.56, 0.56, 0.58, 1.0);
+        }
+        let bar = (level.clamp(0.0, 1.0) as CGFloat * (height as CGFloat - 4.0)).max(2.0);
+        let rect = CGRect::new(CGPoint::new((column * BAR) as CGFloat, middle - bar / 2.0), CGSize::new(2.0, bar));
+        CGContext::fill_rect(Some(&context), rect);
+    }
+    objc2_core_graphics::CGBitmapContextCreateImage(Some(&context)).ok_or_else(|| anyhow!("can't make the waveform"))
+}

@@ -220,6 +220,43 @@ pub fn read_audio(path: &Path, on_window: &mut dyn FnMut(f64, &[f32]) -> Result<
     Ok(total as f64 / AUDIO_RATE as f64)
 }
 
+/// A recording's loudness in `columns` slices (peak of each, scaled so the loudest is 1), for a waveform.
+pub fn envelope(path: &Path, columns: usize) -> Result<Vec<f32>> {
+    let asset = asset(path);
+    let audio = unsafe { AVMediaTypeAudio }.ok_or_else(|| anyhow!("no audio media type"))?;
+    let tracks = unsafe { asset.tracksWithMediaType(audio) };
+    if tracks.count() == 0 {
+        bail!("no sound in it");
+    }
+    let seconds = duration(path).max(0.1);
+    let per_column = ((seconds * AUDIO_RATE as f64) / columns as f64).max(1.0);
+    let mut peaks = vec![0.0f32; columns];
+    let mut sample = 0usize;
+    let mut resumes = 0;
+    loop {
+        let start = sample;
+        let pass = read_pass(&asset, &tracks, start as f64 / AUDIO_RATE as f64, &mut |samples| {
+            for value in samples {
+                let column = ((sample as f64 / per_column) as usize).min(columns - 1);
+                peaks[column] = peaks[column].max(value.abs());
+                sample += 1;
+            }
+            Ok(())
+        })?;
+        match pass {
+            Pass::Finished => break,
+            Pass::Failed(_) if resumes < 50 => {
+                resumes += 1;
+                sample += AUDIO_RATE;
+            }
+            Pass::Failed(reason) => bail!("AVFoundation stopped reading it: {reason}"),
+        }
+    }
+    // Loudness by ear: a square root lifts quiet speech so it shows next to loud passages.
+    let loudest = peaks.iter().cloned().fold(0.0f32, f32::max).max(1e-6);
+    Ok(peaks.into_iter().map(|peak| (peak / loudest).sqrt()).collect())
+}
+
 /// An NSError with what "The operation could not be completed" leaves out: its domain, code, and underlying errors.
 fn describe(error: &objc2_foundation::NSError) -> String {
     let mut text = format!("{} ({} {})", error.localizedDescription(), error.domain(), error.code());
