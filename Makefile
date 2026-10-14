@@ -40,8 +40,9 @@ eval: build testbed
 	  && target/release/sift-it index >/dev/null 2>&1 && target/release/sift-it eval evals/evals.json'
 
 # Local release, as in the rest of the jwa91 family: CI has no signing credentials, so every release runs here.
-# Requires 1Password signed in, gh authenticated, the keychain profile "notarytool"
-# (xcrun notarytool store-credentials), Cargo.toml at $(VERSION), and the v$(VERSION) tag at HEAD and pushed.
+# Requires 1Password signed in, gh authenticated, a notarization login and a Developer ID certificate (each from
+# 1Password through .env.template, or from this Mac's keychain: see scripts/codesign.sh), Cargo.toml at $(VERSION),
+# and the v$(VERSION) tag at HEAD and pushed.
 # Secrets come from .env.template through jwa-harden (or op run, where jwa-harden isn't installed).
 # scripts/release.sh does what GoReleaser does for the family (see CLAUDE.md, Exceptions).
 HARDEN := $(shell command -v jwa-harden >/dev/null 2>&1 && echo "jwa-harden run --" || echo "op run --env-file=.env.template --")
@@ -51,8 +52,11 @@ release:
 	@test "$(VERSION)" = "$(VERSION_IN_CARGO)" || (echo "Cargo.toml says $(VERSION_IN_CARGO), not $(VERSION)" && exit 2)
 	@op whoami >/dev/null || (echo "1Password not signed in: eval \$$(op signin)" && exit 1)
 	@gh auth status >/dev/null 2>&1 || (echo "gh not authenticated: gh auth login" && exit 1)
-	@xcrun notarytool history --keychain-profile notarytool >/dev/null 2>&1 || \
-	  (echo "keychain profile 'notarytool' missing — see scripts/codesign.sh header"; exit 1)
+	@grep -q '^NOTARY_PASSWORD=' .env.template || xcrun notarytool history --keychain-profile notarytool >/dev/null 2>&1 || \
+	  (echo "no notarization login: add NOTARY_* to .env.template, or a keychain profile 'notarytool' (scripts/codesign.sh)"; exit 1)
+	@grep -q '^MACOS_CERTIFICATE_P12_BASE64=' .env.template || \
+	  security find-identity -v -p codesigning | grep -q "Developer ID Application" || \
+	  (echo "no Developer ID Application certificate in this Mac's keychain, and none in .env.template (scripts/codesign.sh)"; exit 1)
 	@existing=$$(git rev-parse -q --verify "v$(VERSION)^{commit}" 2>/dev/null); \
 	head=$$(git rev-parse HEAD); \
 	test -n "$$existing" && test "$$existing" = "$$head" || \
