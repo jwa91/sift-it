@@ -111,7 +111,7 @@ fn run_app(terminal: &mut ratatui::DefaultTerminal, picker: Picker, initial: &st
     let model = Arc::new(Mutex::new(Model::Loading));
     let (search_tx, search_rx) = channel::<Request>();
     let (results_tx, results_rx) = channel::<(Request, Response)>();
-    spawn_searcher(search_rx, results_tx, model.clone())?;
+    let searching = spawn_searcher(search_rx, results_tx, model.clone())?;
     let (preview_tx, preview_rx) = channel::<Hit>();
     let (previews_tx, previews_rx) = channel::<(i64, Preview)>();
     spawn_previewer(preview_rx, previews_tx)?;
@@ -130,59 +130,70 @@ fn run_app(terminal: &mut ratatui::DefaultTerminal, picker: Picker, initial: &st
     };
     search_tx.send(app.request())?;
 
-    loop {
-        // Results: only the latest query's count.
-        while let Ok((request, response)) = results_rx.try_recv() {
-            if request.q == app.query && request.kinds == FILTERS[app.filter].1 {
-                let keep = app.selected().map(|h| h.path.clone());
-                app.hits = response.hits;
-                app.meaning = response.meaning;
-                app.searching = false;
-                let index = keep.and_then(|path| app.hits.iter().position(|h| h.path == path)).unwrap_or(0);
-                app.list.select((!app.hits.is_empty()).then_some(index));
-            }
-        }
-        while let Ok((segment, preview)) = previews_rx.try_recv() {
-            let picture = preview.picture.map(|image| picker.new_resize_protocol(image));
-            app.previews.insert(segment, Shown { picture, levels: preview.levels, text: preview.text });
-        }
-        if let Some(hit) = app.selected().cloned()
-            && app.requested.insert(hit.segment_id)
-        {
-            preview_tx.send(hit)?;
-        }
-
-        terminal.draw(|frame| draw(frame, &mut app))?;
-
-        if !event::poll(Duration::from_millis(50))? {
-            continue;
-        }
-        let Event::Key(key) = event::read()? else { continue };
-        if key.kind != KeyEventKind::Press {
-            continue;
-        }
-        match handle(&mut app, key) {
-            Action::None => {}
-            Action::Search => {
-                app.searching = true;
-                search_tx.send(app.request())?;
-            }
-            Action::Quit => return Ok(None),
-            Action::Open => return Ok(app.selected().map(Place::of)),
-            Action::Reveal => {
-                if let Some(hit) = app.selected() {
-                    let message = open::open(&Place::of(hit), true)?;
-                    app.flash(message);
+    let outcome = (|| -> Result<Option<Place>> {
+        loop {
+            // Results: only the latest query's count.
+            while let Ok((request, response)) = results_rx.try_recv() {
+                if request.q == app.query && request.kinds == FILTERS[app.filter].1 {
+                    let keep = app.selected().map(|h| h.path.clone());
+                    app.hits = response.hits;
+                    app.meaning = response.meaning;
+                    app.searching = false;
+                    let index = keep.and_then(|path| app.hits.iter().position(|h| h.path == path)).unwrap_or(0);
+                    app.list.select((!app.hits.is_empty()).then_some(index));
                 }
             }
-            Action::CopyPath => {
-                if let Some(path) = app.selected().map(|h| h.path.clone()) {
-                    copy(&path)?;
-                    app.flash("Copied the path");
+            while let Ok((segment, preview)) = previews_rx.try_recv() {
+                let picture = preview.picture.map(|image| picker.new_resize_protocol(image));
+                app.previews.insert(segment, Shown { picture, levels: preview.levels, text: preview.text });
+            }
+            if let Some(hit) = app.selected().cloned()
+                && app.requested.insert(hit.segment_id)
+            {
+                preview_tx.send(hit)?;
+            }
+
+            terminal.draw(|frame| draw(frame, &mut app))?;
+
+            if !event::poll(Duration::from_millis(50))? {
+                continue;
+            }
+            let Event::Key(key) = event::read()? else { continue };
+            if key.kind != KeyEventKind::Press {
+                continue;
+            }
+            match handle(&mut app, key) {
+                Action::None => {}
+                Action::Search => {
+                    app.searching = true;
+                    search_tx.send(app.request())?;
+                }
+                Action::Quit => return Ok(None),
+                Action::Open => return Ok(app.selected().map(Place::of)),
+                Action::Reveal => {
+                    if let Some(hit) = app.selected() {
+                        let message = open::open(&Place::of(hit), true)?;
+                        app.flash(message);
+                    }
+                }
+                Action::CopyPath => {
+                    if let Some(path) = app.selected().map(|h| h.path.clone()) {
+                        copy(&path)?;
+                        app.flash("Copied the path");
+                    }
                 }
             }
         }
+    })();
+
+    // The model goes before the process does: llama.cpp frees its Metal device as the process exits, and aborts if a
+    // model still holds buffers on it. With no more requests the searcher stops, and the model is freed once it and the
+    // loader are done.
+    drop(search_tx);
+    for thread in searching {
+        let _ = thread.join();
     }
+    outcome
 }
 
 enum Action {
@@ -276,10 +287,10 @@ fn spawn_searcher(
     requests: Receiver<Request>,
     results: Sender<(Request, Response)>,
     model: Arc<Mutex<Model>>,
-) -> Result<()> {
+) -> Result<Vec<std::thread::JoinHandle<()>>> {
     let mut searcher = Searcher::open(&config::index_path())?;
     let encoder: Arc<Mutex<Option<Embedder>>> = Arc::new(Mutex::new(None));
-    {
+    let loader = {
         let encoder = encoder.clone();
         let model = model.clone();
         std::thread::spawn(move || {
@@ -291,9 +302,9 @@ fn spawn_searcher(
                 }
                 Err(error) => *model.lock().unwrap() = Model::Missing(format!("{error:#}")),
             }
-        });
-    }
-    std::thread::spawn(move || {
+        })
+    };
+    let searcher = std::thread::spawn(move || {
         let mut last: Option<Request> = None;
         let mut answered_with_meaning = false;
         loop {
@@ -334,7 +345,7 @@ fn spawn_searcher(
             last = Some(request);
         }
     });
-    Ok(())
+    Ok(vec![loader, searcher])
 }
 
 /// The previewer: what each kind's preview needs, made or read off the drawing thread.
