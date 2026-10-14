@@ -1,4 +1,4 @@
-.PHONY: llama build install dev check selftest testbed eval release clean
+.PHONY: llama build install dev check selftest testbed eval release snapshot clean
 
 BIN_DIR ?= $(HOME)/.local/bin
 LLAMA := vendor/llama-build/TAG
@@ -41,8 +41,9 @@ eval: build testbed
 
 # Local release, as in the rest of the jwa91 family: CI has no signing credentials, so every release runs here.
 # Requires 1Password signed in, gh authenticated, the keychain profile "notarytool"
-# (xcrun notarytool store-credentials), Cargo.toml at $(VERSION), and the v$(VERSION) tag at HEAD.
+# (xcrun notarytool store-credentials), Cargo.toml at $(VERSION), and the v$(VERSION) tag at HEAD and pushed.
 # Secrets come from .env.template through jwa-harden (or op run, where jwa-harden isn't installed).
+# scripts/release.sh does what GoReleaser does for the family (see CLAUDE.md, Exceptions).
 HARDEN := $(shell command -v jwa-harden >/dev/null 2>&1 && echo "jwa-harden run --" || echo "op run --env-file=.env.template --")
 
 release:
@@ -57,7 +58,11 @@ release:
 	test -n "$$existing" && test "$$existing" = "$$head" || \
 	  (echo "v$(VERSION) must exist and point at HEAD before release"; exit 3)
 	# Build (llama.cpp, then cargo) + codesign/notarize + archive + publish + commit the Cask to the tap.
-	GITHUB_TOKEN="$$(gh auth token)" $(HARDEN) goreleaser release --clean
+	GITHUB_TOKEN="$$(gh auth token)" $(HARDEN) scripts/release.sh $(VERSION)
+
+# What a release would make, in dist/, without publishing (signed only when MACOS_SIGN_IDENTITY is set).
+snapshot:
+	scripts/release.sh --snapshot
 
 clean:
 	cargo clean

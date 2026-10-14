@@ -14,22 +14,21 @@ follows its conventions except where noted under "Exceptions".
 - homebrew-tap is a pure distribution sink
 
 ### Repo Structure
-- `.goreleaser.yaml`, `Makefile` (with `build`/`install`/`check`/`release` targets), codesign script, CI + release
-  workflows, `.env.template`
+- `Makefile` (with `build`/`install`/`check`/`release` targets), codesign script, CI + release workflows,
+  `.env.template`
 - One binary per repo, name matches repo name
-
-### GoReleaser
-- `version: 2`, post-build codesign hook, modern `homebrew_casks:` block (never deprecated `brews:`)
-- Archive naming: `{name}_{version}_{os}_{arch}.tar.gz`
+- Archive naming: `{name}_{version}_{os}_{arch}.tar.gz`, with `checksums.txt`
 
 ### Distribution (ADR 0008)
 - Ships as a Homebrew Cask into `jwa91/homebrew-tap/Casks/` (`brew install jwa91/tap/sift`)
 
 ### Release Process
 - Locally: `make release VERSION=x.y.z` runs the preflight checks (VERSION set and equal to Cargo.toml's, 1Password
-  signed in, gh auth'd, notarytool ready, tag at HEAD), then `jwa-harden run -- goreleaser release --clean`
+  signed in, gh auth'd, notarytool ready, tag at HEAD), then `jwa-harden run -- scripts/release.sh x.y.z`
   (or `op run --env-file=.env.template --` where jwa-harden isn't installed)
-- `workflow_dispatch` release workflow: verify → release → smoke (unsigned; manual-only until CI has signing creds)
+- `make snapshot`: everything a release makes, in `dist/`, without publishing
+- `workflow_dispatch` release workflow: verify → snapshot → smoke (it builds and checks; publishing stays local until
+  CI has signing creds)
 
 ### Secrets (ADR 0005)
 - No `.env` files ever — only `.env.template` with `op://` references resolved at runtime through 1Password
@@ -38,12 +37,17 @@ follows its conventions except where noted under "Exceptions".
 
 These family rules are Go-specific and don't apply here:
 
-- **Rust, not Go.** GoReleaser's Rust builder runs `cargo build`; there is no `go.mod`, `CGO_ENABLED`, golangci-lint or
-  govulncheck. `make check` is `cargo fmt --check`, `cargo clippy -D warnings` and `cargo test`.
+- **Rust, not Go.** There is no `go.mod`, `CGO_ENABLED`, golangci-lint or govulncheck. `make check` is
+  `cargo fmt --check`, `cargo clippy -D warnings` and `cargo test`.
+- **No GoReleaser.** Its Rust builder always runs `rustup target add`, which this machine's toolchain policy reserves for
+  mise (dotfiles toolchain-shim), and its prebuilt builder is GoReleaser Pro. `scripts/release.sh` does the same
+  steps: build, codesign + notarize, `sift_{version}_darwin_arm64.tar.gz` + `checksums.txt`, a GitHub release, and
+  `Casks/sift.rb` committed to the tap through the API with the tap-writer token (commit message
+  `feat(sift): cask update to vX.Y.Z`).
 - **darwin/arm64 only**, not `darwin+linux × amd64+arm64`. sift needs Metal (llama.cpp) and Apple's frameworks
-  (PDFKit, ImageIO, Vision, AVFoundation). The cask says `depends_on macos: ">= :sonoma"` and `depends_on arch: :arm64`.
-- **A native build step.** `scripts/build-llama.sh` builds llama.cpp at a pinned release before cargo (a GoReleaser
-  `before` hook, and a `make` prerequisite). CI runs on `macos-15`, not `ubuntu-latest`.
+  (PDFKit, ImageIO, Vision, AVFoundation). The cask says `depends_on macos: :sonoma` (and later) and `depends_on arch: :arm64`.
+- **A native build step.** `scripts/build-llama.sh` builds llama.cpp at a pinned release before cargo (a `make`
+  prerequisite). CI runs on `macos-15`, not `ubuntu-latest`.
 - **No separate notarize script.** `scripts/codesign.sh` signs and notarizes in one post-build hook; there is only one
   darwin binary.
 
