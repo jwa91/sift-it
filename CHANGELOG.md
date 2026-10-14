@@ -20,4 +20,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com); versions follow
   results open at their page, moment or line.
 - `sift-it daemon`: background indexing with FSEvents, new files first; `sift-it service` installs it as a LaunchAgent.
 - `sift-it serve`: JSON-lines search server for the Raycast extension.
+- Quoted exact phrases: `"INV-2024-0113" invoice` only finds files with that exact text, ranked by the rest.
+- `sift-it serve` previews for every kind of result: a picture, a PDF page, a video frame, a recording's waveform with
+  the matched stretch highlighted, and a passage's whole text.
+- Recordings that AVFoundation gives up on partway are read past the spot; files that couldn't be read get another
+  try when the readers improve.
 - `sift-it selftest` (built-in reference vectors), `sift-it eval`, `sift-it estimate`, `sift-it read`.
