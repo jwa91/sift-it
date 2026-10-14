@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 const SCHEMA_VERSION: i64 = 2;
 
 /// What a segment is, which also says which of the model's inputs made its vector.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Segment {
     /// A stretch of a text file or document.

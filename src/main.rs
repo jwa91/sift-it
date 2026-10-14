@@ -10,7 +10,9 @@ mod indexer;
 mod llama;
 mod mac;
 mod models;
+mod open;
 mod power;
+mod present;
 mod preview;
 mod readers;
 mod search;
@@ -18,6 +20,7 @@ mod selftest;
 mod serve;
 mod service;
 mod store;
+mod term;
 
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
@@ -70,6 +73,17 @@ enum Command {
         words_only: bool,
         #[arg(long)]
         json: bool,
+    },
+    /// Open a result where it matched: a recording at its moment, a PDF at its page, code at its line
+    Open {
+        /// A result's number from the last search, or a file
+        target: String,
+        /// For a file: the place to open it at (a page, a second, or a line)
+        #[arg(long)]
+        at: Option<f64>,
+        /// Show it in Finder instead
+        #[arg(short, long)]
+        reveal: bool,
     },
     /// Answer searches over stdin/stdout (JSON lines), for front ends
     Serve,
@@ -190,6 +204,14 @@ fn run(cli: Cli) -> Result<()> {
         Command::Index { json, reindex } => index(json, reindex),
         Command::Search { words, kind, limit, words_only, json } => {
             search_once(&words.join(" "), &kind, limit, words_only, json)
+        }
+        Command::Open { target, at, reveal } => {
+            let place = match target.parse::<usize>() {
+                Ok(number) if !std::path::Path::new(&target).exists() => open::recall(number)?,
+                _ => open::Place::file(&config::expand(&target), at)?,
+            };
+            println!("{}", open::open(&place, reveal)?);
+            Ok(())
         }
         Command::Serve => serve::serve(&config::index_path(), &config::models_dir()),
         Command::Daemon => daemon::run(),
@@ -456,34 +478,20 @@ fn search_once(q: &str, kinds: &[String], limit: usize, words_only: bool, json: 
         Some(encoder.embed_text(&request.prompt())?)
     };
     let response = searcher.search(&request, vector.as_deref())?;
+    open::remember(q, &response.hits);
     if json {
         println!("{}", serde_json::to_string_pretty(&response)?);
         return Ok(());
     }
-    for hit in &response.hits {
-        let at = match (hit.segment, hit.loc) {
-            (store::Segment::Page, Some(page)) => format!(" p.{page}"),
-            (store::Segment::Passage, Some(line)) => format!(" line {line}"),
-            (store::Segment::Sound | store::Segment::Frame, Some(seconds)) => {
-                format!(" at {}:{:02}", seconds as u64 / 60, seconds as u64 % 60)
-            }
-            _ => String::new(),
-        };
-        println!(
-            "{:>5.2}{} {}{}  [{}{}]",
-            hit.score,
-            if hit.strong { " " } else { "?" },
-            hit.path,
-            at,
-            hit.segment.as_str(),
-            if hit.words { ", words" } else { "" }
-        );
-        if let Some(excerpt) = &hit.excerpt {
-            println!("        {}", excerpt.replace('\n', " ").chars().take(160).collect::<String>());
+    let terminal = term::Terminal::detect();
+    if !terminal.tty {
+        // Piped: one path per line, for xargs and friends.
+        for hit in &response.hits {
+            println!("{}", hit.path);
         }
+        return Ok(());
     }
-    eprintln!("({} results, {:.1} ms)", response.hits.len(), response.ms);
-    Ok(())
+    present::print(&terminal, &response, q, &searcher)
 }
 
 fn status(json: bool) -> Result<()> {
