@@ -26,10 +26,38 @@ System Settings → Privacy & Security). `sift-it selftest` checks that the inst
 
 ## Using it
 
+Describe what you're looking for, or type the words. In a terminal, each result says where it matched and shows what
+fits its kind:
+
+```
+$ sift-it search "where they talk about sleep"
+
+ 1  episode-12.m4a · 0:20–0:50                                         ~/Podcasts
+    ▇▇█▁▁▆▅▆▁█▅▁▃▆▄▆█▆▇▅▄▇▅▂▄▆▃▂▃▆▃▆▅▆▃▅▂▁▄▄▇▆▃▁▆▆▅▁▂▆▇▁▅   heard at 0:20–0:50 of 1:16
+
+ 2  notes-0311.md · line 3                                             ~/Documents
+    Read a long piece about sleep this week. The main points worth keeping: keep the same
+    wake-up time every day, weekends included. The body clock anchors on the morning…
+
+↳ sift-it open <n> opens a result where it matched; --reveal shows it in Finder
+
+$ sift-it open 1          # QuickTime, playing from 0:20
+```
+
+Passages show with your words highlighted, code as numbered lines, and recordings as a waveform with the stretch that
+matched lit up. In Ghostty, kitty, iTerm2 and WezTerm, pictures and video frames show inline, and file names are links.
+Piped, it prints paths, one per line: `sift-it search "invoices from March" | xargs open`.
+
+`sift-it open <n>` opens a result where it matched: a recording or video at its moment (QuickTime), a PDF at its page
+(Preview), text and code at the line in `$EDITOR` (vim, nvim, helix, emacs and nano right in the terminal; VS Code,
+Cursor, Zed and Sublime Text at the line).
+
 ```
 sift-it search <words> [--kind pdf,image] [-n 10] [--json]
 sift-it search "code: retry a failed call with backoff"    code only (needs `sift-it config include-code true`)
 sift-it search '"INV-2024-0113" invoice'                   quoted words must be there exactly
+sift-it open <n> [--reveal]                                open a result of the last search where it matched
+sift-it open <file> [--at <page|second|line>]
 sift-it folders [add|remove|exclude|include] <folder>...   the folders to search
 sift-it estimate [<folder>...]                             files, and about how long indexing them takes
 sift-it config [include-code|index-on-battery|exclude-ext] <value>
@@ -44,8 +72,8 @@ sift-it selftest                       the reference vectors
 sift-it eval evals/evals.json          search quality on the testbed
 ```
 
-A result opens where it matched: a page, a moment, a line. Exact words count too: invoice numbers, error codes and
-names are matched as written, in file names, document text and the text in screenshots.
+Exact words count too: invoice numbers, error codes and names are matched as written, in file names, document text
+and the text in screenshots. `NO_COLOR` turns colour off, `SIFT_IT_IMAGES=0` inline pictures.
 
 Its files live in `~/Library/Application Support/Sift It` (or `$SIFT_IT_HOME`): `config.json`, `index.sqlite`,
 `status.json`, `indexer.log`, `models/` and `previews/`. `brew uninstall --zap sift-it` removes all of it.
