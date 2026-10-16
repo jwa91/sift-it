@@ -170,8 +170,18 @@ make install
 `make check` runs formatting checks, Clippy, and tests. `make install` installs sift-it into `~/.local/bin`.
 
 After you download the model, `make selftest` checks output against the reference vectors from DigUp.
-`make eval` builds a test collection and measures search quality.
-The mixed-file evaluation requires a separate demo collection. [docs/ranking.md](docs/ranking.md) provides reproduction commands.
+`make eval` builds `testbed/` inside this repository and measures search quality. The engine's build and testbed
+commands work independently of the other workspace folders.
+The optional mixed-file evaluation requires a separate demo collection. [docs/ranking.md](docs/ranking.md) provides reproduction commands.
+
+In the local workspace, `../sift-it-data/make-demo.sh` fills `../sift-it-data/demo` with public photos, sounds,
+recordings, music, videos, PDFs, books, and notes. This optional script lives in the separate data folder, outside
+the engine repository. The files have camera-roll and Downloads-folder names; `CREDITS.csv` records their sources.
+
+The local workspace is organized as `sift-it/sift-it-engine` (this repository, including generated `testbed/`),
+`sift-it/sift-it-data` (the demo-generation script and demo files in `demo/`), `sift-it/sift-it-raycast` (the separate Raycast
+repository), and `sift-it/sift-it-web` (reserved for the web app). Run the engine's `make` commands from
+`sift-it-engine`. Both data-generation scripts accept an explicit output folder to override their defaults.
 
 ## Credits and license
 

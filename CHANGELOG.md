@@ -7,6 +7,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com); versions follow
 
 ## [Unreleased]
 
+### Removed
+
+- `scripts/make-demo.sh`: the demo collection and its script live outside the repository, in the workspace's
+  `sift-it-data` folder (see docs/ranking.md).
+
 ## [0.1.3] — 2026-10-14
 
 ### Changed
