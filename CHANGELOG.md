@@ -7,6 +7,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com); versions follow
 
 ## [Unreleased]
 
+### Added
+
+- What's said in recordings and videos is written down in the background, once everything else is indexed: passages
+  of a sentence or a few, with their time, found by meaning and by their words. Parakeet Ultra on transcribe.cpp, in a
+  helper process (`sift-it-transcribe`) beside `sift-it`, a few minutes of sound at a time; changes in the folders come
+  first. `sift-it status` shows how far it is, `sift-it config transcribe off` turns it off.
+- The tags of recordings and videos (title, artist, album) are found by their words.
+- `sift-it model download` also fetches the speech model (740 MB), unless Handy has the same file.
+
+### Changed
+
+- The index moves to version 3 in place: nothing indexed so far is read again. An older sift-it can't read it after.
+
 ### Removed
 
 - `scripts/make-demo.sh`: the demo collection and its script live outside the repository, in the workspace's

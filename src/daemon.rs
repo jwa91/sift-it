@@ -3,6 +3,9 @@
 //! moment after they go quiet. It reads what's new, newest and cheapest first, and lets the model go after a minute
 //! with nothing to do.
 //!
+//! Once everything is read, and only then, it writes down what's said in recordings and videos (speech.rs), a chunk
+//! at a time: anything that changes in the folders comes first, and the writing down goes on where it stopped.
+//!
 //! It says what it's doing in status.json (for `sift-it status` and front ends), and listens to signals:
 //!   SIGUSR1  look for changes now (a full sync)
 //!   SIGUSR2  pause or resume
@@ -14,6 +17,7 @@
 use crate::config::{self, Config};
 use crate::indexer::{Event, Indexer};
 use crate::power;
+use crate::speech::Transcriber;
 use crate::store::{self, Store};
 use anyhow::{Context, Result, bail};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
@@ -36,6 +40,8 @@ const RELEASE_MODEL_AFTER: Duration = Duration::from_secs(60);
 const WAIT_CHECK: Duration = Duration::from_secs(10);
 /// The log is cut in half past this size.
 const MAX_LOG: u64 = 4 << 20;
+/// A speech helper that couldn't start is tried again after this long.
+const SPEECH_RETRY: Duration = Duration::from_secs(300);
 
 static RESYNC: AtomicBool = AtomicBool::new(false);
 static TOGGLE_PAUSE: AtomicBool = AtomicBool::new(false);
@@ -66,6 +72,9 @@ struct Status {
     current: Option<String>,
     updated: f64,
     last_error: Option<String>,
+    /// Recordings and videos with what's said in them written down, and how many there are.
+    speech_done: usize,
+    speech_total: usize,
 }
 
 struct Reporter {
@@ -109,6 +118,24 @@ impl Reporter {
                     if *stopped { ", stopped early" } else { "" }
                 ));
             }
+            Event::Transcribing { path, at, duration } => {
+                self.status.current = Some(path.clone());
+                self.status.detail = Some(format!("{} of {}", clock(*at), clock(*duration)));
+            }
+            Event::Transcribed { path, passages, seconds, ms } => {
+                self.status.speech_done += 1;
+                self.status.done = self.status.speech_done;
+                log(&format!(
+                    "wrote down {}: {passages} passages, {seconds:.0} s of sound in {ms} ms",
+                    file_name(path)
+                ));
+            }
+            Event::TranscribeFailed { path, error } => {
+                self.status.speech_done += 1;
+                self.status.done = self.status.speech_done;
+                self.status.last_error = Some(format!("{}: {error}", file_name(path)));
+                log(&format!("can't write down what's said in {path}: {error}"));
+            }
         }
         self.write(false);
     }
@@ -128,6 +155,16 @@ impl Reporter {
 
 fn file_name(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
+}
+
+/// "12:34", or "1:02:03" past the hour.
+fn clock(seconds: f64) -> String {
+    let s = seconds.max(0.0) as u64;
+    if s >= 3600 {
+        format!("{}:{:02}:{:02}", s / 3600, s % 3600 / 60, s % 60)
+    } else {
+        format!("{}:{:02}", s / 60, s % 60)
+    }
 }
 
 fn log(line: &str) {
@@ -301,6 +338,11 @@ pub fn run() -> Result<()> {
     let mut idle_since = Instant::now();
     let mut paused = false;
     let mut waiting_reason: Option<(String, Instant)> = None;
+    // The speech model's helper, while there's speech to write down; why it can't run, when it can't.
+    let mut transcriber: Option<Transcriber> = None;
+    let mut speech_problem: Option<String> = None;
+    // When the helper last failed to start: it's tried again a while later, not on every pass.
+    let mut speech_failed_at: Option<Instant> = None;
 
     while !SHUTDOWN.load(Ordering::SeqCst) {
         // Folders chosen or dropped: watch the new set, and sync it all.
@@ -392,8 +434,78 @@ pub fn run() -> Result<()> {
                 }
             }
         } else {
+            // Everything is read: what's said in recordings and videos is written down meanwhile.
+            let to_write = config.transcribe
+                && !paused
+                && indexer.store.transcripts_pending(1).map(|rows| !rows.is_empty()).unwrap_or(false)
+                && reason_to_wait(&config).is_none();
+            let may_start = speech_failed_at.is_none_or(|at| at.elapsed() > SPEECH_RETRY);
+            if to_write && transcriber.is_none() && may_start {
+                match Transcriber::start() {
+                    Ok(started) => {
+                        transcriber = Some(started);
+                        speech_problem = None;
+                        speech_failed_at = None;
+                    }
+                    Err(error) => {
+                        let error = format!("{error:#}");
+                        if speech_problem.as_deref() != Some(&error) {
+                            log(&format!("can't write down speech: {error}"));
+                        }
+                        speech_problem = Some(error);
+                        speech_failed_at = Some(Instant::now());
+                    }
+                }
+            }
+            // A change that's still settling is synced and read first: the helper waits for it, loaded.
+            let settling = !changes.paths.is_empty();
+            if let (true, Some(running), false) = (to_write, transcriber.as_mut(), settling) {
+                if let Ok((done, total)) = indexer.store.transcript_counts() {
+                    reporter.status.speech_done = done;
+                    reporter.status.speech_total = total;
+                    reporter.status.done = done;
+                    reporter.status.total = total;
+                }
+                reporter.set("transcribing", reporter.status.detail.clone());
+                // Between chunks it makes way for anything that changes in the folders (synced, and read first).
+                let arrived = std::cell::RefCell::new(Vec::new());
+                let stop = || {
+                    if SHUTDOWN.load(Ordering::SeqCst)
+                        || TOGGLE_PAUSE.load(Ordering::SeqCst)
+                        || RESYNC.load(Ordering::SeqCst)
+                        || modified(&config_path) != config_time
+                    {
+                        return true;
+                    }
+                    while let Ok(event) = changes.receiver.try_recv() {
+                        arrived.borrow_mut().push(event);
+                    }
+                    arrived.borrow().iter().any(|event| match event {
+                        Ok(event) => event.need_rescan() || event.paths.iter().any(|path| changes.worth_a_look(path)),
+                        Err(_) => true,
+                    })
+                };
+                let mut events = |event: Event| reporter.event(&event);
+                if let Err(error) = indexer.transcribe_next(running, &mut events, &stop) {
+                    log(&format!("writing down speech stopped: {error:#}"));
+                    reporter.status.last_error = Some(format!("{error:#}"));
+                    // A new helper next time (one that stopped is no use), after a pause.
+                    transcriber = None;
+                    sleep_interruptibly(Duration::from_secs(30));
+                }
+                for event in arrived.into_inner() {
+                    changes.add(event);
+                }
+                idle_since = Instant::now();
+                continue;
+            }
+            if !(to_write && settling) {
+                // Nothing (more) to write down: the helper goes, and its memory with it.
+                transcriber = None;
+            }
             reporter.status.current = None;
-            reporter.set("idle", None);
+            let detail = speech_problem.clone().filter(|_| config.transcribe);
+            reporter.set("idle", detail);
         }
 
         if indexer.model_loaded() && idle_since.elapsed() > RELEASE_MODEL_AFTER {

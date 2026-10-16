@@ -41,17 +41,18 @@ if [[ "$built" != "$version" ]]; then
   exit 1
 fi
 
-# Sign and notarize: a release always is; a snapshot (CI's, or a dry run) isn't.
-cp target/release/sift-it "$stage/sift-it"
+# Sign and notarize: a release always is; a snapshot (CI's, or a dry run) isn't. sift-it-transcribe, the speech helper,
+# goes beside sift-it: transcribe.cpp brings its own ggml, so it can't share sift-it's binary.
+cp target/release/sift-it target/release/sift-it-transcribe "$stage/"
 if $snapshot; then
   echo "snapshot: not signed"
 else
-  scripts/codesign.sh "$stage/sift-it"
+  scripts/codesign.sh "$stage/sift-it" "$stage/sift-it-transcribe"
 fi
 
-# The archive (the binary with its license and docs, as GoReleaser packs them) and its checksum.
+# The archive (the binaries with the license and docs, as GoReleaser packs them) and its checksum.
 cp LICENSE README.md CHANGELOG.md "$stage/"
-tar -czf "dist/$archive" -C "$stage" sift-it LICENSE README.md CHANGELOG.md
+tar -czf "dist/$archive" -C "$stage" sift-it sift-it-transcribe LICENSE README.md CHANGELOG.md
 (cd dist && shasum -a 256 "$archive" > checksums.txt)
 sha256="$(cut -d' ' -f1 dist/checksums.txt)"
 
@@ -75,6 +76,7 @@ cask "sift-it" do
   depends_on macos: :sonoma
 
   binary "sift-it"
+  binary "sift-it-transcribe"
 
   uninstall launchctl: "local.sift-it.indexer"
 
@@ -84,7 +86,7 @@ cask "sift-it" do
   ]
 
   caveats <<~EOS
-    sift-it needs its model once (865 MB):
+    sift-it needs its models once (1.6 GB; 865 MB to search, 740 MB to write down speech):
       sift-it model download
     Then choose folders, and index in the background from login on:
       sift-it folders add ~/Documents

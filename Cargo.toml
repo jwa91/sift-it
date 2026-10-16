@@ -1,3 +1,7 @@
+[workspace]
+members = ["transcribe"]
+default-members = [".", "transcribe"]
+
 [package]
 name = "sift-it"
 version = "0.1.3"

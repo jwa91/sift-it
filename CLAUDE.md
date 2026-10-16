@@ -51,6 +51,9 @@ These family rules are Go-specific and don't apply here:
   certificate and a notarytool profile live in the releasing Mac's keychain (set up once per Mac; see
   `scripts/codesign.sh`), and the GitHub release and the cask commit use the gh login. The repo holds no credentials
   and no references to any.
+- **Two binaries.** `sift-it-transcribe` (transcribe/, the speech helper) ships beside `sift-it`: transcribe.cpp
+  brings its own ggml, which can't share a binary with llama.cpp's. The release signs and notarizes both, and the cask
+  installs both.
 - **No separate notarize script.** `scripts/codesign.sh` signs and notarizes in one post-build hook; there is only one
   darwin binary.
 
@@ -58,6 +61,7 @@ These family rules are Go-specific and don't apply here:
 
 - `make check` before every commit. `make selftest` after anything that could change vectors (llama.cpp, the model
   files, image sizing, prompts): every vector must keep cosine ≥ 0.999 with tests/reference.
-- `make eval` (testbed + evals/evals.json) after anything that touches ranking or readers. Currently 43/43 top-1.
+- `make eval` (testbed + evals/evals.json) after anything that touches ranking or readers. Currently 44/44 top-1, 9 of
+  10 at the right place: "penguin in the film" opens where the narration names it, a few seconds before it's shown.
 - The index records which pipeline made its vectors (`embedder::vector_source`); bump its version when vectors change
   on purpose, and indexes re-embed.

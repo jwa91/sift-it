@@ -15,8 +15,8 @@ build: $(LLAMA)
 
 install: build
 	install -d $(BIN_DIR)
-	install -m 0755 target/release/sift-it $(BIN_DIR)/sift-it
-	@echo "installed sift-it to $(BIN_DIR)/sift-it"
+	install -m 0755 target/release/sift-it target/release/sift-it-transcribe $(BIN_DIR)/
+	@echo "installed sift-it and sift-it-transcribe to $(BIN_DIR)"
 	@echo "ensure $(BIN_DIR) is on your PATH"
 
 dev: install

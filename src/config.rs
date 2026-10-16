@@ -55,6 +55,8 @@ pub struct Config {
     pub include_code: bool,
     /// Index while on battery power.
     pub index_on_battery: bool,
+    /// Write down what's said in recordings and videos (in the background, once the rest is indexed: speech.rs).
+    pub transcribe: bool,
 }
 
 impl Default for Config {
@@ -65,6 +67,7 @@ impl Default for Config {
             excluded_extensions: Vec::new(),
             include_code: false,
             index_on_battery: true,
+            transcribe: true,
         }
     }
 }

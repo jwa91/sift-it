@@ -1,5 +1,6 @@
 //! The index: one SQLite file. A row per file, a row per segment (a passage, a PDF page, a picture, a video frame,
-//! 30 s of sound) with its vector, and a full-text index over every segment's words and its file's name.
+//! 30 s of sound, what's said in a recording) with its vector, and a full-text index over every segment's words and
+//! its file's name and tags.
 //!
 //! The indexer is the only writer; searchers read alongside it (WAL), and notice its changes through SQLite's
 //! data_version.
@@ -13,7 +14,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// 2: segment ids are never reused (AUTOINCREMENT), so a searcher can tell new segments from replaced ones.
-const SCHEMA_VERSION: i64 = 2;
+/// 3: files.transcript, how far what's said in a recording or video has been written down (see speech.rs).
+const SCHEMA_VERSION: i64 = 3;
 
 /// What a segment is, which also says which of the model's inputs made its vector.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
@@ -31,6 +33,8 @@ pub enum Segment {
     Sound,
     /// A video frame.
     Frame,
+    /// What's said in a recording or video, written down (speech.rs): a sentence or a few, with their time.
+    Speech,
 }
 
 impl Segment {
@@ -42,13 +46,22 @@ impl Segment {
             Segment::Ocr => "ocr",
             Segment::Sound => "sound",
             Segment::Frame => "frame",
+            Segment::Speech => "speech",
         }
     }
 
     pub fn parse(name: &str) -> Option<Segment> {
-        [Segment::Passage, Segment::Page, Segment::Picture, Segment::Ocr, Segment::Sound, Segment::Frame]
-            .into_iter()
-            .find(|segment| segment.as_str() == name)
+        [
+            Segment::Passage,
+            Segment::Page,
+            Segment::Picture,
+            Segment::Ocr,
+            Segment::Sound,
+            Segment::Frame,
+            Segment::Speech,
+        ]
+        .into_iter()
+        .find(|segment| segment.as_str() == name)
     }
 }
 
@@ -96,6 +109,19 @@ pub fn vector_to_blob(vector: &[f32]) -> Vec<u8> {
 
 pub fn blob_to_vector(blob: &[u8], into: &mut Vec<f32>) {
     into.extend(blob.as_chunks::<4>().0.iter().map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])));
+}
+
+/// Words for the keyword index from a file: its name (name_words), and the tags read from it (a recording's title,
+/// artist and album: see av::tags), which `info` holds.
+pub fn file_words(path: &Path, info: &serde_json::Value) -> String {
+    let mut words = name_words(path);
+    if let Some(tags) = info.get("tags").and_then(|tags| tags.as_object()) {
+        for value in tags.values().filter_map(|value| value.as_str()) {
+            words.push(' ');
+            words.push_str(value);
+        }
+    }
+    words
 }
 
 /// Words for the keyword index from a path: the file's name split at punctuation and case changes, its extension,
@@ -161,8 +187,9 @@ impl Store {
                  modified REAL NOT NULL,
                  state TEXT NOT NULL DEFAULT 'pending',   -- pending | done | failed
                  error TEXT,
-                 info TEXT,                               -- JSON: pages, duration, width, height
-                 indexed_at REAL
+                 info TEXT,                               -- JSON: pages, duration, width, height, tags
+                 indexed_at REAL,
+                 transcript TEXT                          -- NULL (to do) | at:<seconds> | done | failed: <why>
              );
              CREATE INDEX IF NOT EXISTS files_state ON files(state);
              CREATE TABLE IF NOT EXISTS segments (
@@ -190,24 +217,34 @@ impl Store {
                 self.conn.execute("INSERT INTO meta VALUES ('schema', ?1)", [SCHEMA_VERSION.to_string()])?;
             }
             Some(SCHEMA_VERSION) => {}
-            Some(1) => self.conn.execute_batch(
-                "BEGIN;
-                 ALTER TABLE segments RENAME TO segments_v1;
-                 CREATE TABLE segments (
-                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                     file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
-                     segment TEXT NOT NULL,
-                     loc REAL,
-                     loc_end REAL,
-                     text TEXT,
-                     vector BLOB
-                 );
-                 INSERT INTO segments SELECT id, file_id, segment, loc, loc_end, text, vector FROM segments_v1;
-                 DROP TABLE segments_v1;
-                 CREATE INDEX segments_file ON segments(file_id);
-                 UPDATE meta SET value = '2' WHERE key = 'schema';
-                 COMMIT;",
-            )?,
+            Some(old @ (1 | 2)) => {
+                if old == 1 {
+                    self.conn.execute_batch(
+                        "BEGIN;
+                         ALTER TABLE segments RENAME TO segments_v1;
+                         CREATE TABLE segments (
+                             id INTEGER PRIMARY KEY AUTOINCREMENT,
+                             file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+                             segment TEXT NOT NULL,
+                             loc REAL,
+                             loc_end REAL,
+                             text TEXT,
+                             vector BLOB
+                         );
+                         INSERT INTO segments SELECT id, file_id, segment, loc, loc_end, text, vector FROM segments_v1;
+                         DROP TABLE segments_v1;
+                         CREATE INDEX segments_file ON segments(file_id);
+                         COMMIT;",
+                    )?;
+                }
+                // What's said in recordings is written down from now on; nothing indexed so far is read again.
+                self.conn.execute_batch(
+                    "BEGIN;
+                     ALTER TABLE files ADD COLUMN transcript TEXT;
+                     UPDATE meta SET value = '3' WHERE key = 'schema';
+                     COMMIT;",
+                )?;
+            }
             Some(other) => bail!("{} is index version {other}; this build reads {SCHEMA_VERSION}", self.path.display()),
         }
         Ok(())
@@ -272,7 +309,7 @@ impl Store {
             self.delete_segments(id)?;
             self.conn.execute(
                 "UPDATE files SET kind = ?2, size = ?3, modified = ?4, state = 'pending', error = NULL, info = NULL,
-                 indexed_at = NULL WHERE id = ?1",
+                 indexed_at = NULL, transcript = NULL WHERE id = ?1",
                 params![id, found.kind.as_str(), found.size as i64, found.modified],
             )?;
             Ok(id)
@@ -352,7 +389,7 @@ impl Store {
                     && (modified - row.modified).abs() < 0.001 => {}
             _ => return Ok(false),
         }
-        let name = name_words(&row.path);
+        let name = file_words(&row.path, info);
         {
             tx.execute("DELETE FROM words WHERE rowid IN (SELECT id FROM segments WHERE file_id = ?1)", [row.id])?;
             tx.execute("DELETE FROM segments WHERE file_id = ?1", [row.id])?;
@@ -395,6 +432,140 @@ impl Store {
         )?;
         tx.commit()?;
         Ok(true)
+    }
+
+    /// Recordings and videos whose speech is still to be written down (or was, partway: `at`), newest first. The
+    /// second of each is where to go on from.
+    pub fn transcripts_pending(&self, limit: usize) -> Result<Vec<(FileRow, f64)>> {
+        let mut statement = self.conn.prepare(
+            "SELECT id, path, kind, size, modified, transcript FROM files
+             WHERE state = 'done' AND kind IN ('audio', 'video') AND (transcript IS NULL OR transcript LIKE 'at:%')
+             ORDER BY modified DESC LIMIT ?1",
+        )?;
+        let rows = statement.query_map([limit as i64], |row| {
+            let progress: Option<String> = row.get(5)?;
+            Ok((
+                FileRow {
+                    id: row.get(0)?,
+                    path: PathBuf::from(row.get::<_, String>(1)?),
+                    kind: Kind::parse(&row.get::<_, String>(2)?).unwrap_or(Kind::Audio),
+                    size: row.get::<_, i64>(3)? as u64,
+                    modified: row.get(4)?,
+                },
+                progress.and_then(|p| p.strip_prefix("at:").and_then(|at| at.parse().ok())).unwrap_or(0.0),
+            ))
+        })?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// How many recordings and videos have their speech written down, and how many in all.
+    pub fn transcript_counts(&self) -> Result<(usize, usize)> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*) FILTER (WHERE transcript IS NOT NULL AND transcript NOT LIKE 'at:%'), COUNT(*)
+             FROM files WHERE state = 'done' AND kind IN ('audio', 'video')",
+            [],
+            |row| Ok((row.get::<_, i64>(0)? as usize, row.get::<_, i64>(1)? as usize)),
+        )?)
+    }
+
+    /// Writes down a stretch of what's said in a file (speech segments with their vectors), and how far that goes:
+    /// `upto` seconds, or `done`. The first stretch (from 0) replaces what was written before, and takes the file's
+    /// tags, which go into the keyword index with its name. Nothing is written (false) when the file changed since
+    /// it was handed out: it's being indexed again.
+    pub fn add_transcript(
+        &mut self,
+        row: &FileRow,
+        from: f64,
+        passages: &[NewSegment],
+        tags: Option<&serde_json::Value>,
+        progress: &str,
+    ) -> Result<bool> {
+        let tx = self.conn.transaction()?;
+        let current: Option<(String, i64, f64, String, Option<String>)> = tx
+            .query_row("SELECT path, size, modified, state, info FROM files WHERE id = ?1", [row.id], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })
+            .optional()?;
+        let Some((path, size, modified, state, info)) = current else { return Ok(false) };
+        if Path::new(&path) != row.path
+            || size as u64 != row.size
+            || (modified - row.modified).abs() >= 0.001
+            || state != "done"
+        {
+            return Ok(false);
+        }
+        let mut info: serde_json::Value =
+            info.and_then(|info| serde_json::from_str(&info).ok()).unwrap_or_else(|| serde_json::json!({}));
+        if from == 0.0 {
+            tx.execute(
+                "DELETE FROM words WHERE rowid IN (SELECT id FROM segments WHERE file_id = ?1 AND segment = 'speech')",
+                [row.id],
+            )?;
+            tx.execute("DELETE FROM segments WHERE file_id = ?1 AND segment = 'speech'", [row.id])?;
+            if let Some(tags) = tags.filter(|tags| tags.as_object().is_some_and(|tags| !tags.is_empty())) {
+                info["tags"] = tags.clone();
+                // The file's other segments are found by its tags too.
+                let name = file_words(&row.path, &info);
+                let segments: Vec<(i64, Option<String>)> = tx
+                    .prepare("SELECT id, text FROM segments WHERE file_id = ?1")?
+                    .query_map([row.id], |r| Ok((r.get(0)?, r.get(1)?)))?
+                    .collect::<std::result::Result<_, _>>()?;
+                for (id, text) in segments {
+                    tx.execute("DELETE FROM words WHERE rowid = ?1", [id])?;
+                    tx.execute(
+                        "INSERT INTO words (rowid, name, text) VALUES (?1, ?2, ?3)",
+                        params![id, name, text.unwrap_or_default()],
+                    )?;
+                }
+            }
+        }
+        let name = file_words(&row.path, &info);
+        {
+            let mut insert = tx.prepare(
+                "INSERT INTO segments (file_id, segment, loc, loc_end, text, vector) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            )?;
+            let mut words = tx.prepare("INSERT INTO words (rowid, name, text) VALUES (?1, ?2, ?3)")?;
+            for passage in passages {
+                insert.execute(params![
+                    row.id,
+                    passage.segment.as_str(),
+                    passage.loc,
+                    passage.loc_end,
+                    passage.text,
+                    passage.vector.as_deref().map(vector_to_blob),
+                ])?;
+                words.execute(params![tx.last_insert_rowid(), name, passage.text.as_deref().unwrap_or("")])?;
+            }
+        }
+        let spoken: i64 =
+            tx.query_row("SELECT COUNT(*) FROM segments WHERE file_id = ?1 AND segment = 'speech'", [row.id], |r| {
+                r.get(0)
+            })?;
+        info["speech"] = serde_json::json!(spoken);
+        tx.execute(
+            "UPDATE files SET transcript = ?2, info = ?3 WHERE id = ?1",
+            params![row.id, progress, info.to_string()],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// Makes sure what's written down of recordings comes from the speech model that writes it now (`source`, see
+    /// speech::source). When it doesn't, all of it is written down again. True then.
+    pub fn adopt_speech_source(&self, source: &str) -> Result<bool> {
+        let stored = self.meta("speech_source")?;
+        let stale = stored.as_deref().is_some_and(|stored| stored != source);
+        if stale {
+            self.conn.execute_batch(
+                "DELETE FROM words WHERE rowid IN (SELECT id FROM segments WHERE segment = 'speech');
+                 DELETE FROM segments WHERE segment = 'speech';
+                 UPDATE files SET transcript = NULL;",
+            )?;
+        }
+        if stored.as_deref() != Some(source) {
+            self.set_meta("speech_source", source)?;
+        }
+        Ok(stale)
     }
 
     /// A segment's whole text.
@@ -506,7 +677,7 @@ impl Store {
     pub fn requeue_all(&self) -> Result<()> {
         self.conn.execute_batch(
             "INSERT INTO words (words) VALUES ('delete-all'); DELETE FROM segments;
-             UPDATE files SET state = 'pending', error = NULL, info = NULL, indexed_at = NULL;",
+             UPDATE files SET state = 'pending', error = NULL, info = NULL, indexed_at = NULL, transcript = NULL;",
         )?;
         Ok(())
     }

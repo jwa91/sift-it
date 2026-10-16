@@ -396,11 +396,19 @@ fn make_preview(store: &Store, hit: &Hit, folder: &Path) -> Preview {
         }
         Kind::Video => {
             preview.picture = picture("video", hit.loc);
-            if hit.segment == Segment::Sound {
+            if matches!(hit.segment, Segment::Sound | Segment::Speech) {
                 preview.levels = levels();
             }
+            if hit.segment == Segment::Speech {
+                preview.text = segment_text();
+            }
         }
-        Kind::Audio => preview.levels = levels(),
+        Kind::Audio => {
+            preview.levels = levels();
+            if hit.segment == Segment::Speech {
+                preview.text = segment_text();
+            }
+        }
         Kind::Text | Kind::Doc | Kind::Code => preview.text = segment_text(),
     }
     preview
@@ -447,7 +455,7 @@ fn draw_query(frame: &mut Frame, app: &App, area: Rect) {
 /// Where in the file it matched, said shortly.
 fn place(hit: &Hit) -> String {
     match (hit.segment, hit.loc) {
-        (Segment::Sound, Some(start)) => timestamp(start),
+        (Segment::Sound | Segment::Speech, Some(start)) => timestamp(start),
         (Segment::Frame, Some(at)) => timestamp(at),
         (_, Some(page)) if hit.kind == Kind::Pdf => format!("p. {page}"),
         (Segment::Passage, Some(cell)) if hit.path.ends_with(".ipynb") => format!("cell {cell}"),
@@ -573,9 +581,10 @@ fn draw_preview(frame: &mut Frame, app: &mut App, area: Rect) {
                 Span::styled(block.to_string(), style)
             })
             .collect();
+        let verb = if hit.segment == Segment::Speech { "said" } else { "heard" };
         let heard = match (hit.loc, hit.loc_end) {
-            (Some(start), Some(end)) => format!("heard at {}–{}", timestamp(start), timestamp(end)),
-            (Some(start), None) => format!("heard at {}", timestamp(start)),
+            (Some(start), Some(end)) => format!("{verb} at {}–{}", timestamp(start), timestamp(end)),
+            (Some(start), None) => format!("{verb} at {}", timestamp(start)),
             _ => String::new(),
         };
         let lines = vec![Line::from(spans), Line::styled(heard, Style::new().fg(Color::DarkGray))];

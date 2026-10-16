@@ -19,6 +19,8 @@ recordings, videos, and code. DigUp also includes a CLI.
 - **Raycast integration:** a separate TypeScript extension uses `sift-it serve` for searches and previews.
 - **Ranking changes:** account for file length and give ordinary words less weight than numbers, code searches,
   and quoted phrases.
+- **Speech, written down:** what's said in recordings and videos is transcribed in the background, so a word or a name
+  spoken in a podcast is found at its moment. Indexing stays fast: this runs only after everything else is searchable.
 
 ### Ranking for mixed files
 
@@ -46,7 +48,8 @@ See [the ranking notes](docs/ranking.md) for the formulas, evaluation method, an
 
 ## Install
 
-Requirements: Apple Silicon and macOS 14 or later. The model download is 865 MB.
+Requirements: Apple Silicon and macOS 14 or later. The model download is 1.6 GB: 865 MB to search, and 740 MB to write
+down what's said in recordings. If [Handy](https://handy.computer) has the same speech model, sift-it uses its copy.
 
 ```sh
 brew install jwa91/tap/sift-it
@@ -123,12 +126,25 @@ sift-it reads only the folders you select. It does not change, move, or upload y
 | PDFs | Individual pages, including text recognition for scanned pages |
 | Pictures | Image content in formats macOS can read, including HEIC and RAW |
 | Screenshots | Image content and recognized text |
-| Recordings | Overlapping 30-second windows, with results at the matching time |
-| Videos | Frames from individual shots and long shots, plus audio windows |
+| Recordings | Overlapping 30-second windows, and what's said in them, with results at the matching time |
+| Videos | Frames from individual shots and long shots, plus audio windows and what's said |
+| Tags | The title, artist and album of recordings and videos, found by their words |
 | Code and notebooks | Source passages and notebook cells, with code indexing enabled |
 
 Text that contains mostly numbers uses word search only. Silent audio windows do not enter the index.
 The embedding model can miss or confuse sounds and pictures. See [the documented limitations](docs/ranking.md#results).
+
+### What's said in recordings
+
+Once everything is indexed, the indexer writes down what's said in recordings and videos with
+[Parakeet Ultra](https://huggingface.co/moondream/parakeet-ultra), which understands 25 European languages, Dutch and
+English among them. It runs on [transcribe.cpp](https://github.com/handy-computer/transcribe.cpp) in a helper process,
+`sift-it-transcribe`, at a lower priority than everything else, and gives its memory back when it's done. It writes a
+recording down a few minutes at a time: any change in your folders comes first, and it goes on where it stopped.
+On an Apple silicon Mac it writes down a 30-minute podcast in under half a minute.
+
+Each passage is a sentence or a few, with its time: a search for a word said in a podcast opens it at that moment.
+`sift-it status` shows how far it is; `sift-it config transcribe off` turns it off.
 
 sift-it skips hidden folders, nested `~/Library` folders, app bundles, packages, dependency folders, and build folders.
 It also skips recognized secret files and iCloud files that exist only in the cloud.
@@ -151,6 +167,7 @@ sift-it selftest
 Run `sift-it --help` for all commands and options.
 Data lives in `~/Library/Application Support/Sift It`, or the folder specified by `SIFT_IT_HOME`.
 This folder contains `config.json`, `index.sqlite`, `status.json`, `indexer.log`, `models/`, and `previews/`.
+`SIFT_IT_SPEECH_MODEL` points at another copy of the speech model.
 `brew uninstall --zap sift-it` removes the installation and its data.
 
 ## Build from source
@@ -191,6 +208,10 @@ repository), and `sift-it/sift-it-web` (reserved for the web app). Run the engin
   under Apache 2.0.
 - [ggml-org's GGUF conversion](https://huggingface.co/ggml-org/embeddinggemma-2-GGUF) provides the model files used here.
 - [llama.cpp](https://github.com/ggml-org/llama.cpp) provides model execution under the MIT License.
+- [Parakeet Ultra](https://huggingface.co/moondream/parakeet-ultra), by Moondream (post-trained from NVIDIA's
+  Parakeet TDT 0.6B v3), writes down speech under CC-BY-4.0, in
+  [Handy's GGUF conversion](https://huggingface.co/handy-computer/parakeet-ultra-gguf).
+- [transcribe.cpp](https://github.com/handy-computer/transcribe.cpp), by the Handy team, runs it under the MIT License.
 
 sift-it uses the [MIT License](LICENSE). The license preserves DigUp's copyright notice alongside the sift-it copyright notice.
 The copied reference files also include [DigUp's original MIT notice](tests/reference/LICENSE).

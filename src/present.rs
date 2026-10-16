@@ -80,7 +80,7 @@ fn header(terminal: &Terminal, number: usize, hit: &Hit) -> String {
 fn place(hit: &Hit) -> Option<String> {
     let notebook = hit.path.ends_with(".ipynb");
     match (hit.segment, hit.loc) {
-        (Segment::Sound, Some(start)) => Some(match hit.loc_end {
+        (Segment::Sound | Segment::Speech, Some(start)) => Some(match hit.loc_end {
             Some(end) => format!("{}–{}", timestamp(start), timestamp(end)),
             None => timestamp(start),
         }),
@@ -131,6 +131,16 @@ fn body(terminal: &Terminal, hit: &Hit, words: &[String], searcher: &Searcher) -
         let thumbnail = preview::thumbnail(Path::new(&hit.path), kind, loc, 360, &previews).ok()?;
         terminal.picture(&thumbnail, PICTURE_ROWS).map(|p| format!("{INDENT}{p}"))
     };
+    // What's said there, when that's what matched.
+    let speech = |out: &mut String, hit: &Hit| {
+        if hit.segment != Segment::Speech {
+            return;
+        }
+        let said = hit.excerpt.as_deref().map(|text| format!("“{text}”"));
+        for line in said.map(|t| passage(terminal, &t, width, PASSAGE_LINES, words)).unwrap_or_default() {
+            push_line(out, &line);
+        }
+    };
     match hit.kind {
         Kind::Image | Kind::Screenshot => {
             if let Some(shown) = picture("image", None) {
@@ -149,6 +159,7 @@ fn body(terminal: &Terminal, hit: &Hit, words: &[String], searcher: &Searcher) -
             if let Some(wave) = waveform(terminal, hit, width) {
                 push_line(&mut out, &wave);
             }
+            speech(&mut out, hit);
         }
         Kind::Video => {
             if let Some(shown) = picture("video", hit.loc) {
@@ -159,6 +170,12 @@ fn body(terminal: &Terminal, hit: &Hit, words: &[String], searcher: &Searcher) -
                     if let Some(wave) = waveform(terminal, hit, width) {
                         push_line(&mut out, &wave);
                     }
+                }
+                (Segment::Speech, _) => {
+                    if let Some(wave) = waveform(terminal, hit, width) {
+                        push_line(&mut out, &wave);
+                    }
+                    speech(&mut out, hit);
                 }
                 (_, Some(at)) => push_line(&mut out, &terminal.dim(&format!("seen at {}", timestamp(at)))),
                 _ => {}

@@ -20,6 +20,7 @@ mod search;
 mod selftest;
 mod serve;
 mod service;
+mod speech;
 mod store;
 mod term;
 
@@ -45,7 +46,7 @@ enum Command {
         #[command(subcommand)]
         action: Option<FolderAction>,
     },
-    /// Change an option: include-code, index-on-battery (true or false), exclude-ext (comma-separated)
+    /// Change an option: include-code, index-on-battery, transcribe (true or false), exclude-ext (comma-separated)
     Config { key: Option<String>, value: Option<String> },
     /// How many files these folders hold, and about how long indexing them takes
     Estimate {
@@ -172,7 +173,7 @@ enum ServiceAction {
 enum ModelAction {
     /// Whether the model files are there
     Status,
-    /// Download the model files (865 MB, once)
+    /// Download the model files (1.6 GB, once: 865 MB to search, 740 MB to write down speech)
     Download {
         #[arg(long)]
         json: bool,
@@ -419,6 +420,7 @@ fn set_option(key: Option<String>, value: Option<String>) -> Result<()> {
         match key {
             "include-code" => config.include_code = flag()?,
             "index-on-battery" => config.index_on_battery = flag()?,
+            "transcribe" => config.transcribe = flag()?,
             "exclude-ext" => {
                 config.excluded_extensions = value
                     .split(',')
@@ -426,7 +428,7 @@ fn set_option(key: Option<String>, value: Option<String>) -> Result<()> {
                     .filter(|e| !e.is_empty())
                     .collect()
             }
-            _ => bail!("no option {key}: include-code, index-on-battery, exclude-ext"),
+            _ => bail!("no option {key}: include-code, index-on-battery, transcribe, exclude-ext"),
         }
         config.save()?;
     } else if key.is_some() {
@@ -473,11 +475,29 @@ fn index(json: bool, reindex: bool) -> Result<()> {
             indexer::Event::Finished { indexed, failed, seconds, .. } => {
                 eprintln!("{indexed} files indexed, {failed} failed, in {seconds:.1} s")
             }
+            indexer::Event::Transcribing { .. } => {}
+            indexer::Event::Transcribed { path, passages, seconds, ms } => {
+                eprintln!("  {path}: {passages} passages of speech in {seconds:.0} s of sound, {ms} ms")
+            }
+            indexer::Event::TranscribeFailed { path, error } => eprintln!("  {path}: {error}"),
         }
     };
     let sync = indexer.sync(&config)?;
     report(sync);
-    indexer.index_pending(&config, &mut report, &|| false, &mut Vec::new)
+    indexer.index_pending(&config, &mut report, &|| false, &mut Vec::new)?;
+    // Then what's said in recordings and videos, when the speech model is there.
+    if config.transcribe && !indexer.store.transcripts_pending(1)?.is_empty() {
+        match speech::Transcriber::start() {
+            Ok(mut transcriber) => {
+                if !json {
+                    eprintln!("writing down what's said in recordings and videos…");
+                }
+                while indexer.transcribe_next(&mut transcriber, &mut report, &|| false)? {}
+            }
+            Err(error) => eprintln!("what's said in recordings isn't written down: {error:#}"),
+        }
+    }
+    Ok(())
 }
 
 fn search_once(q: &str, kinds: &[String], limit: usize, words_only: bool, json: bool) -> Result<()> {
@@ -516,12 +536,14 @@ fn status(json: bool) -> Result<()> {
     let stats = store.stats()?;
     let config = Config::load()?;
     let models = models::status(&config::models_dir());
+    let (spoken, recordings) = store.transcript_counts()?;
     if json {
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
                 "index": config::index_path().display().to_string(),
                 "stats": stats,
+                "speech": {"done": spoken, "total": recordings, "unavailable": speech::unavailable()},
                 "config": config,
                 "models": models,
             }))?
@@ -548,6 +570,12 @@ fn status(json: bool) -> Result<()> {
             "not downloaded"
         }
     );
+    let speech = match speech::unavailable() {
+        _ if !config.transcribe => "off (sift-it config transcribe on)".to_string(),
+        Some(why) => why,
+        None => format!("{spoken} of {recordings} recordings and videos written down"),
+    };
+    println!("speech:  {speech}");
     Ok(())
 }
 

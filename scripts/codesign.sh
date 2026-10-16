@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
-# Signs and notarizes the sift-it binary with what this Mac's keychain holds, as Apple intends:
+# Signs and notarizes sift-it's binaries (sift-it, and sift-it-transcribe, its speech helper) with what this Mac's
+# keychain holds, as Apple intends:
 #   - a "Developer ID Application" certificate with its private key. With exactly one, that's the one; with several,
 #     SIFT_IT_SIGN_IDENTITY names it (its name or SHA-1).
 #   - a notarytool keychain profile: "notarytool", or the one SIFT_IT_NOTARY_PROFILE names.
 # A Mac you release from needs both, once. The repo holds no credentials and no references to any.
 #
-#   scripts/codesign.sh <binary>    sign and notarize it
-#   scripts/codesign.sh --check     check that this Mac can (make release runs it before building)
+#   scripts/codesign.sh <binary>...   sign them, and notarize them in one submission
+#   scripts/codesign.sh --check       check that this Mac can (make release runs it before building)
 #
-# Hardened runtime needs no entitlements: llama.cpp compiles its Metal shaders at run time from source embedded in the
-# binary, which hardened runtime allows.
+# Hardened runtime needs no entitlements: llama.cpp and transcribe.cpp compile their Metal shaders at run time from
+# source embedded in the binary, which hardened runtime allows.
 set -euo pipefail
 
 profile="${SIFT_IT_NOTARY_PROFILE:-notarytool}"
@@ -56,14 +57,21 @@ if [ "${1:-}" = "--check" ]; then
   exit 0
 fi
 
-binary="${1:?usage: scripts/codesign.sh <binary> | --check}"
+if [ "$#" -eq 0 ]; then
+  echo "usage: scripts/codesign.sh <binary>... | --check" >&2
+  exit 2
+fi
 check
-codesign --force --options runtime --timestamp --identifier dev.jwa91.sift-it --sign "$(identity)" "$binary"
-echo "codesign: signed $binary"
+for binary in "$@"; do
+  codesign --force --options runtime --timestamp --identifier "dev.jwa91.$(basename "$binary")" --sign "$(identity)" "$binary"
+  echo "codesign: signed $binary"
+done
 
-zip="$(mktemp -t sift-it-notarize.XXXXXX).zip"
-ditto -c -k --sequesterRsrc "$binary" "$zip"
-echo "notarytool: submitting $binary (profile $profile)"
+stage="$(mktemp -d -t sift-it-notarize)"
+cp "$@" "$stage/"
+zip="$stage.zip"
+ditto -c -k --sequesterRsrc "$stage" "$zip"
+echo "notarytool: submitting $* (profile $profile)"
 xcrun notarytool submit "$zip" --keychain-profile "$profile" --wait
-rm -f "$zip"
-echo "notarytool: accepted $binary"
+rm -rf "$stage" "$zip"
+echo "notarytool: accepted $*"

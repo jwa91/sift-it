@@ -1,6 +1,7 @@
 //! Recordings and videos. Sound becomes 30-second windows (see av.rs), each a vector of what's heard in it, so a match
 //! points to its moment. A video's frames (one per shot, and every 30 s within a long one) are pictures with their
-//! time; its sound is read the same way as a recording's.
+//! time; its sound is read the same way as a recording's. Their tags (title, artist, album) go into the keyword index
+//! with the file's name. What's said in them is written down later, apart from this first pass (speech.rs).
 
 use super::{Payload, Piece, Sink};
 use crate::av;
@@ -21,7 +22,7 @@ pub fn read_audio(path: &Path, sink: Sink) -> Result<serde_json::Value> {
         windows += 1;
         sound(start, samples, sink)
     })?;
-    Ok(serde_json::json!({ "duration": seconds, "windows": windows }))
+    Ok(serde_json::json!({ "duration": seconds, "windows": windows, "tags": av::tags(path) }))
 }
 
 pub fn read_video(path: &Path, sink: Sink) -> Result<serde_json::Value> {
@@ -48,6 +49,7 @@ pub fn read_video(path: &Path, sink: Sink) -> Result<serde_json::Value> {
         "height": video.height,
         "frames": video.frames,
         "windows": windows,
+        "tags": av::tags(path),
     }))
 }
 

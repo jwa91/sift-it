@@ -7,6 +7,9 @@
 //!
 //! While it runs, files that appear go to the front of the queue (`changes`): a new screenshot is searchable in a
 //! second or two even while a long video is being read.
+//!
+//! `transcribe_next` is the second stage, for recordings and videos the first pass is done with: what's said in them,
+//! written down a chunk at a time (speech.rs), each chunk's passages embedded and stored as soon as they're back.
 
 use crate::config::Config;
 use crate::crawl::{self, Found, Kind, Rescan};
@@ -58,6 +61,23 @@ pub enum Event {
         seconds: f64,
         stopped: bool,
     },
+    /// A stretch of a recording or video was written down: what's said up to `at` seconds of `duration`.
+    Transcribing {
+        path: String,
+        at: f64,
+        duration: f64,
+    },
+    /// A recording or video was written down to its end.
+    Transcribed {
+        path: String,
+        passages: usize,
+        seconds: f64,
+        ms: u64,
+    },
+    TranscribeFailed {
+        path: String,
+        error: String,
+    },
 }
 
 enum Message {
@@ -80,6 +100,8 @@ pub struct Indexer {
     pub store: Store,
     models: PathBuf,
     embedder: Option<Embedder>,
+    /// The loaded model has the image and audio encoders (else it's the text model alone).
+    media: bool,
 }
 
 impl Indexer {
@@ -101,7 +123,10 @@ impl Indexer {
         if reread > 0 {
             eprintln!("{reread} text and code files are read again: their passages are cut differently now");
         }
-        Ok(Self { store, models, embedder: None })
+        if store.adopt_speech_source(crate::speech::source())? {
+            eprintln!("what's said in recordings was written down by another speech model: it's written down again");
+        }
+        Ok(Self { store, models, embedder: None, media: false })
     }
 
     /// Frees the model (about 1 GB) until it's needed again.
@@ -213,9 +238,11 @@ impl Indexer {
         }
         let started = Instant::now();
         on_event(Event::Started { pending: pending.len() });
-        if self.embedder.is_none() {
+        if self.embedder.is_none() || !self.media {
+            self.embedder = None;
             let files = ModelFiles::in_folder(&self.models)?;
             self.embedder = Some(Embedder::load(&files, false)?);
+            self.media = true;
         }
 
         // The files handed out, by id (workers send only ids).
@@ -406,6 +433,91 @@ impl Indexer {
             }
         }
         Ok(())
+    }
+
+    /// Writes down what's said in the next recording or video that's waiting for it, a chunk at a time, until it's
+    /// done or `stop` says so between chunks (it goes on from there next time). False when there's none waiting.
+    pub fn transcribe_next(
+        &mut self,
+        transcriber: &mut crate::speech::Transcriber,
+        on_event: &mut dyn FnMut(Event),
+        stop: &dyn Fn() -> bool,
+    ) -> Result<bool> {
+        let Some((row, from)) = self.store.transcripts_pending(1)?.into_iter().next() else { return Ok(false) };
+        let path = row.path.display().to_string();
+        let started = Instant::now();
+        // The tags go in with the first stretch (they're read again when it starts over).
+        let mut tags = (from == 0.0).then(|| crate::av::tags(&row.path));
+        if !crate::av::has_audio(&row.path) {
+            self.store.add_transcript(&row, from, &[], tags.as_ref(), "done")?;
+            on_event(Event::Transcribed { path, passages: 0, seconds: 0.0, ms: 0 });
+            return Ok(true);
+        }
+        let duration = crate::av::duration(&row.path);
+        let title = crate::readers::title_of(&row.path);
+        let title = tags.as_ref().and_then(|tags| tags["title"].as_str().map(str::to_string)).unwrap_or(title);
+        let mut written = 0usize;
+        let mut changed = false;
+        let outcome = crate::speech::transcribe(transcriber, &row.path, from, &mut |start, end, spoken| {
+            let passages = crate::speech::passages(spoken);
+            let texts: Vec<String> =
+                passages.iter().map(|p| crate::embedder::prompts::document(Some(&title), &p.text)).collect();
+            let vectors = if texts.is_empty() {
+                Vec::new()
+            } else {
+                let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+                self.text_model()?.embed_texts(&refs).unwrap_or_default()
+            };
+            let mut vectors = vectors.into_iter();
+            let segments: Vec<NewSegment> = passages
+                .into_iter()
+                .map(|p| NewSegment {
+                    segment: crate::store::Segment::Speech,
+                    loc: Some(p.start),
+                    loc_end: Some(p.end),
+                    text: Some(p.text),
+                    vector: vectors.next(),
+                })
+                .collect();
+            written += segments.len();
+            if !self.store.add_transcript(&row, start, &segments, tags.take().as_ref(), &format!("at:{end:.2}"))? {
+                // The file changed: it's being indexed again, and written down after that.
+                changed = true;
+                return Ok(false);
+            }
+            on_event(Event::Transcribing { path: path.clone(), at: end, duration });
+            Ok(!stop())
+        });
+        match outcome {
+            Ok(crate::speech::Outcome::Finished(end)) if !changed => {
+                self.store.add_transcript(&row, end, &[], None, "done")?;
+                on_event(Event::Transcribed {
+                    path,
+                    passages: written,
+                    seconds: end - from,
+                    ms: started.elapsed().as_millis() as u64,
+                });
+            }
+            Ok(_) => {}
+            // The helper stopped: the file isn't at fault, and goes on later with a new one.
+            Err(error) if error.downcast_ref::<crate::speech::Gone>().is_some() => return Err(error),
+            Err(error) => {
+                let error = format!("{error:#}");
+                self.store.add_transcript(&row, from, &[], None, &format!("failed: {error}"))?;
+                on_event(Event::TranscribeFailed { path, error });
+            }
+        }
+        Ok(true)
+    }
+
+    /// A model for text: the loaded one, or else the text model alone (a third of the memory, quick to load).
+    fn text_model(&mut self) -> Result<&mut Embedder> {
+        if self.embedder.is_none() {
+            let files = ModelFiles::in_folder(&self.models)?;
+            self.embedder = Some(Embedder::load(&files, true)?);
+            self.media = false;
+        }
+        Ok(self.embedder.as_mut().expect("just loaded"))
     }
 
     /// Embeds the batched texts, one model call for up to 16 of them.

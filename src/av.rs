@@ -152,11 +152,12 @@ fn read_pass(
     Ok(Pass::Finished)
 }
 
-/// Decodes the sound and hands over its windows: (start in seconds, samples). Returns the seconds of sound read.
+/// Decodes the sound from `from` seconds on, handing it over as it comes (16 kHz mono). Returns the seconds of sound
+/// read, counted from 0.
 ///
-/// When AVFoundation gives up partway, reading starts again a second past where it stopped (the lost second is
-/// silence in the windows, so every window keeps its true time); only a file it can't get past fails.
-pub fn read_audio(path: &Path, on_window: &mut dyn FnMut(f64, &[f32]) -> Result<()>) -> Result<f64> {
+/// When AVFoundation gives up partway, reading starts again a second past where it stopped, and that second is
+/// silence: the timeline stays true. Only a file it can't get past fails.
+pub fn read_samples(path: &Path, from: f64, on_samples: &mut dyn FnMut(&[f32]) -> Result<()>) -> Result<f64> {
     const SKIP: usize = AUDIO_RATE;
     const MAX_RESUMES: usize = 50;
     let asset = asset(path);
@@ -165,39 +166,13 @@ pub fn read_audio(path: &Path, on_window: &mut dyn FnMut(f64, &[f32]) -> Result<
     if tracks.count() == 0 {
         bail!("no sound in it");
     }
-
-    let mut buffer: Vec<f32> = Vec::with_capacity(AUDIO_WINDOW * 2);
-    let mut buffer_start = 0usize; // the sample number of buffer[0]
-    let mut total = 0usize; // samples read (and silence put in for skipped stretches)
-    let mut emitted = false;
-    let mut emit = |start: usize, samples: &[f32], emitted: &mut bool| -> Result<()> {
-        *emitted = true;
-        if rms(samples) < SILENCE {
-            return Ok(());
-        }
-        on_window(start as f64 / AUDIO_RATE as f64, samples)
-    };
-    let mut add = |samples: &[f32],
-                   buffer: &mut Vec<f32>,
-                   buffer_start: &mut usize,
-                   total: &mut usize,
-                   emitted: &mut bool|
-     -> Result<()> {
-        buffer.extend_from_slice(samples);
-        *total += samples.len();
-        while buffer.len() >= AUDIO_WINDOW {
-            emit(*buffer_start, &buffer[..AUDIO_WINDOW], emitted)?;
-            buffer.drain(..AUDIO_HOP);
-            *buffer_start += AUDIO_HOP;
-        }
-        Ok(())
-    };
-
+    let first = (from.max(0.0) * AUDIO_RATE as f64) as usize;
+    let mut total = first; // samples read (and silence put in for skipped stretches)
     let mut resumes = 0;
     loop {
-        let start = total;
-        let pass = read_pass(&asset, &tracks, start as f64 / AUDIO_RATE as f64, &mut |samples| {
-            add(samples, &mut buffer, &mut buffer_start, &mut total, &mut emitted)
+        let pass = read_pass(&asset, &tracks, total as f64 / AUDIO_RATE as f64, &mut |samples| {
+            total += samples.len();
+            on_samples(samples)
         })?;
         match pass {
             Pass::Finished => break,
@@ -207,17 +182,72 @@ pub fn read_audio(path: &Path, on_window: &mut dyn FnMut(f64, &[f32]) -> Result<
                     bail!("AVFoundation stopped reading it {MAX_RESUMES} times; the last: {reason}");
                 }
                 // Past the spot it stumbled on, keeping the timeline: a second of silence stands in for it.
-                let silence = vec![0.0f32; SKIP];
-                add(&silence, &mut buffer, &mut buffer_start, &mut total, &mut emitted)?;
+                total += SKIP;
+                on_samples(&vec![0.0f32; SKIP])?;
             }
         }
     }
+    Ok(total as f64 / AUDIO_RATE as f64)
+}
+
+/// Decodes the sound and hands over its windows: (start in seconds, samples). Returns the seconds of sound read.
+pub fn read_audio(path: &Path, on_window: &mut dyn FnMut(f64, &[f32]) -> Result<()>) -> Result<f64> {
+    let mut buffer: Vec<f32> = Vec::with_capacity(AUDIO_WINDOW * 2);
+    let mut buffer_start = 0usize; // the sample number of buffer[0]
+    let mut emitted = false;
+    let mut emit = |start: usize, samples: &[f32], emitted: &mut bool| -> Result<()> {
+        *emitted = true;
+        if rms(samples) < SILENCE {
+            return Ok(());
+        }
+        on_window(start as f64 / AUDIO_RATE as f64, samples)
+    };
+    let seconds = read_samples(path, 0.0, &mut |samples| {
+        buffer.extend_from_slice(samples);
+        while buffer.len() >= AUDIO_WINDOW {
+            emit(buffer_start, &buffer[..AUDIO_WINDOW], &mut emitted)?;
+            buffer.drain(..AUDIO_HOP);
+            buffer_start += AUDIO_HOP;
+        }
+        Ok(())
+    })?;
     // The rest: on its own if nothing came before; else only when it holds a few seconds the last window didn't.
     let uncovered = buffer.len().saturating_sub(AUDIO_WINDOW - AUDIO_HOP);
     if (!emitted && buffer.len() >= AUDIO_RATE) || (emitted && uncovered >= 3 * AUDIO_RATE) {
         emit(buffer_start, &buffer, &mut emitted)?;
     }
-    Ok(total as f64 / AUDIO_RATE as f64)
+    Ok(seconds)
+}
+
+/// The tags a recording or video carries (ID3, iTunes, QuickTime): its title, artist, album and the like, as
+/// {"title": …, "artist": …}. Empty when it has none.
+pub fn tags(path: &Path) -> serde_json::Value {
+    const KEYS: [(&str, &str); 6] = [
+        ("title", "title"),
+        ("artist", "artist"),
+        ("albumName", "album"),
+        ("creator", "creator"),
+        ("subject", "subject"),
+        ("description", "description"),
+    ];
+    let mut tags = serde_json::Map::new();
+    autoreleasepool(|_| {
+        let items = unsafe { asset(path).commonMetadata() };
+        for item in items.iter() {
+            let (Some(key), Some(value)) = (unsafe { item.commonKey() }, unsafe { item.stringValue() }) else {
+                continue;
+            };
+            let key = key.to_string();
+            let value = value.to_string().trim().to_string();
+            if let Some((_, name)) = KEYS.iter().find(|(common, _)| *common == key)
+                && !value.is_empty()
+                && !tags.contains_key(*name)
+            {
+                tags.insert(name.to_string(), serde_json::Value::String(value.chars().take(500).collect()));
+            }
+        }
+    });
+    serde_json::Value::Object(tags)
 }
 
 /// A recording's loudness in `columns` slices (peak of each, scaled so the loudest is 1), for a waveform.
