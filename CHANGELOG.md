@@ -7,6 +7,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com); versions follow
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-10-16
+
 ### Added
 
 - What's said in recordings and videos is written down in the background, once everything else is indexed: passages
