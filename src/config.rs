@@ -586,10 +586,14 @@ impl Default for Ranking {
     }
 }
 
-/// When the background indexer works.
+/// When the background indexer works, and with how much memory.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Indexing {
+    /// How much memory indexing may take, in MB: how many files are read at once, and whether what's said in
+    /// recordings is written down beside the reading or after it (indexer::Plan). What's written is the same either
+    /// way. At `auto`, a quarter of the Mac's memory.
+    pub memory_mb: Budget,
     /// Index while on battery power. In Low Power Mode it always waits.
     pub on_battery: bool,
     /// A changed path is handled once it has been quiet this long: a download, a copy, an export settling.
@@ -602,7 +606,7 @@ pub struct Indexing {
 
 impl Default for Indexing {
     fn default() -> Self {
-        Self { on_battery: true, quiet_ms: 1500, full_sync_min: 30, release_model_s: 60 }
+        Self { memory_mb: Budget::Auto, on_battery: true, quiet_ms: 1500, full_sync_min: 30, release_model_s: 60 }
     }
 }
 

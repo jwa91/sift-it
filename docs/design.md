@@ -1,8 +1,8 @@
 # Design: indexing and search
 
-Status: agreed on 2026-10-17. Steps 1 to 4 of the build order are built: the config, with depth in place of size and
-length limits, the engine, the vector store, and search in each of its forms with `auto` choosing. It replaces the
-earlier design with several indexes.
+Status: agreed on 2026-10-17. Steps 1 to 5 of the build order are built: the config, with depth in place of size and
+length limits, the engine, the vector store, search in each of its forms with `auto` choosing, and indexing's memory
+budget. It replaces the earlier design with several indexes.
 
 The goal is the best search there is for everything on a Mac, by meaning across text, pictures, sound and video, while
 being careful with memory and fast. It has to run well on an 8 GB MacBook and use what a 24 GB M4 has.
@@ -34,15 +34,27 @@ Every vector it writes is f32, and what it produces never depends on the Mac it 
 
 `indexing.memory_mb`, `auto` by default, decides throughput only:
 
-- the batch size the embedding model works with
 - how many workers read files at once, each holding decoded media
 - whether the embedding model and the speech helper run side by side or one after the other
 
-On 8 GB the models take turns and the batches are small. On 24 GB embedding and transcription run together. The
-vectors are the same either way.
+At `auto` it's a quarter of the Mac's memory. Side by side takes both models, about 1 GB each, and two readers. On
+8 GB (2 GB for indexing) the models take turns. On 24 GB (6 GB) embedding and transcription run together: a thread
+hands the speech helper the recordings already read, and the embedding thread embeds and stores what comes back
+between files. Reading takes at most a third of the cores, two to four files at once, and a small budget makes that
+fewer, down to one. The vectors are the same either way.
+
+Measured on the 8 GB Mac:
+
+- The embedding model's batch size changes nothing: 17.7 passages a second one at a time, and 17.7, 18.1 and 18.0 in
+  batches of 2,048, 4,096 and 8,192 tokens, with the same 0.9 to 1.0 GB footprint. So it isn't part of the budget, and
+  stays at 2,048 tokens (an image takes 1,120). Whether a bigger GPU gains from bigger batches,
+  `SIFT_IT_BATCH_TOKENS=4096 sift-it bench-embed` shows.
+- The speech helper peaks at 1.0 GB with a three-minute stretch, which takes it 12 s.
+- Two readers index the testbed in 20 s, one in 29 s, both at a 940 MB peak: what a reader decodes is small next to
+  the model. The budget reckons with 128 MB a reader.
 
 The rest stays as it is: FSEvents, a full sync now and then, waiting for a charger or out of Low Power Mode, letting the
-model go when there's nothing to do, and transcription once everything else is read.
+model go when there's nothing to do, and, when the models take turns, transcription once everything else is read.
 
 ## The vector store
 
@@ -375,3 +387,5 @@ change.
 - How a word found only in metadata counts when the query has a number, which today makes the words decide. "beach
   2017" belongs in the eval set.
 - Whether 10% of memory is the right default search budget.
+- Whether side by side is faster overall on 24 GB, where both models share the GPU: the time to index a folder of
+  recordings with `indexing.memory_mb` at 2048 and at 6144 tells.

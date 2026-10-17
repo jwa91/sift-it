@@ -197,7 +197,8 @@ impl std::fmt::Display for Stop {
 impl std::error::Error for Stop {}
 
 /// Writes down what's said in a file from `from` seconds on, a chunk at a time: after each, `on_chunk(start, end,
-/// sentences)` (seconds from the file's start) stores it and says whether to go on.
+/// sentences)` (seconds from the file's start) stores it and says whether to go on. After the last chunk the file is
+/// finished, whatever `on_chunk` says: there's nothing to go on with.
 pub fn transcribe(
     transcriber: &mut Transcriber,
     path: &Path,
@@ -234,8 +235,8 @@ pub fn transcribe(
         Err(error) => return Err(error),
     }
     let end = start + buffer.len() as f64 / AUDIO_RATE as f64;
-    if buffer.len() >= AUDIO_RATE / 2 && !send(&buffer, start)? {
-        return Ok(Outcome::Stopped);
+    if buffer.len() >= AUDIO_RATE / 2 {
+        send(&buffer, start)?;
     }
     Ok(Outcome::Finished(end))
 }

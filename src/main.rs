@@ -516,20 +516,28 @@ fn index(json: bool, reindex: bool) -> Result<()> {
                 eprintln!("  {path}: {passages} passages of speech in {seconds:.0} s of sound, {ms} ms")
             }
             indexer::Event::TranscribeFailed { path, error } => eprintln!("  {path}: {error}"),
+            indexer::Event::SpeechStopped { error } => {
+                eprintln!("what's said in recordings is written down after the reading: {error}")
+            }
         }
     };
     let sync = indexer.sync(&config)?;
     report(sync);
-    if let Err(error) = indexer.index_pending(&config, &mut report, &|| false, &mut Vec::new) {
+    // What's said in recordings and videos is written down beside the reading when memory allows, else after it.
+    let mut helper = None;
+    let beside = indexer::Plan::of(&config.indexing).beside && speech::unavailable().is_none();
+    if let Err(error) =
+        indexer.index_pending(&config, &mut report, &|| false, &mut Vec::new, beside.then_some(&mut helper))
+    {
         // This process can't go on (indexer::Stuck); a new one can, with the file set aside.
         if error.is::<indexer::Stuck>() {
             bail!("{error}. Run `sift-it index` again for the rest");
         }
         return Err(error);
     }
-    // Then what's said in recordings and videos, when the speech model is there.
+    // Then what's said in recordings and videos that's left, when the speech model is there.
     if !indexer.store.transcripts_pending(1)?.is_empty() {
-        match speech::Transcriber::start() {
+        match helper.map_or_else(speech::Transcriber::start, Ok) {
             Ok(mut transcriber) => {
                 if !json {
                     eprintln!("writing down what's said in recordings and videos…");
@@ -578,6 +586,7 @@ fn status(json: bool) -> Result<()> {
     let models = models::status(&config::models_dir());
     let transcripts = store.transcripts()?;
     let queued = store.queued(5)?;
+    let plan = indexer::Plan::of(&config.indexing);
     // The engine, if it's running (status doesn't start it): what it holds.
     let engine = client::Client::running().and_then(|mut engine| engine.request("status", serde_json::json!({})).ok());
     if json {
@@ -593,6 +602,7 @@ fn status(json: bool) -> Result<()> {
                     "seconds": transcripts.seconds,
                     "unavailable": speech::unavailable(),
                 },
+                "indexing": {"memory_mb": plan.memory >> 20, "readers": plan.readers, "speech_beside": plan.beside},
                 "engine": engine,
                 "config": config,
                 "models": models,
@@ -654,6 +664,13 @@ fn status(json: bool) -> Result<()> {
         None => format!("{} of {} recordings and videos written down", transcripts.done, transcripts.total),
     };
     println!("speech:  {speech}");
+    println!(
+        "memory:  indexing takes up to {} MB: {} {} read at once, speech written down {} the reading",
+        plan.memory >> 20,
+        plan.readers,
+        if plan.readers == 1 { "file" } else { "files" },
+        if plan.beside { "beside" } else { "after" }
+    );
     Ok(())
 }
 

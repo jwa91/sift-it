@@ -22,7 +22,8 @@ recordings, videos, and code. DigUp also includes a CLI.
 - **Ranking changes:** account for file length and give ordinary words less weight than numbers, code searches,
   and quoted phrases.
 - **Speech, written down:** what's said in recordings and videos is transcribed in the background, so a word or a name
-  spoken in a podcast is found at its moment. Indexing stays fast: this runs only after everything else is searchable.
+  spoken in a podcast is found at its moment. With enough memory this runs beside the reading; otherwise only after
+  everything else is searchable.
 
 ### Ranking for mixed files
 
@@ -236,6 +237,7 @@ sift-it config sources.ignore '["*.psd", "~/Documents/Old"]'
 sift-it config reading.video.keep_every_s 10
 sift-it config reading.rules '[{"path": "~/Movies/Footage/**", "depth": "words"}]'
 sift-it config indexing.on_battery false
+sift-it config indexing.memory_mb 4096
 ```
 
 | Section | Holds | A change counts |
@@ -244,8 +246,14 @@ sift-it config indexing.on_battery false
 | `reading` | how deep and how files are read, per kind, file type, and folder | the files it affects are read again |
 | `ranking` | the constants search ranks by | at the next search |
 | `search` | whether a search is by meaning or by words, unless it says, which form of the vectors it scans, and the memory that may take | at the next search |
-| `indexing` | battery and timing of the background indexer | at once |
+| `indexing` | the memory, battery and timing of the background indexer | at once |
 | `log` | the size of the indexer's log | at once |
+
+`indexing.memory_mb` decides only how fast indexing goes, never what it writes. At `auto` it's a quarter of the
+Mac's memory. With room for the embedding model and the speech model together (about 1 GB each, plus 256 MB for two
+readers), what's said in recordings is written down beside the reading; with less, the models take turns. That's
+2 GB on an 8 GB Mac, where they take turns, and 6 GB on a 24 GB Mac, where they run together. Reading takes up to a
+third of the cores, two to four files at once, and a small budget makes that fewer. `sift-it status` shows the plan.
 
 A reading value resolves in four steps, and the last one that sets it wins: the top of `reading`, the kind
 (`reading.video`), the file type (`reading.types.mov`), then each rule in `reading.rules` whose path matches.

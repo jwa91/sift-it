@@ -3,8 +3,9 @@
 //! (FSEvents), a moment after they go quiet. It reads what's new, newest and cheapest first, and lets the model go
 //! after `indexing.release_model_s` with nothing to do. A change to config.json counts at once, with a full sync.
 //!
-//! Once everything is read, and only then, it writes down what's said in recordings and videos (speech.rs), a chunk
-//! at a time: anything that changes in the folders comes first, and the writing down goes on where it stopped.
+//! It writes down what's said in recordings and videos (speech.rs), a chunk at a time: beside the reading when
+//! `indexing.memory_mb` allows both models (indexer::Plan), else once everything is read. Anything that changes in the
+//! folders comes first, and the writing down goes on where it stopped.
 //!
 //! With nothing left to do, it writes the next generation of a vector partition that's due one (vectors.rs).
 //!
@@ -17,7 +18,7 @@
 //! waits. When a reader gets stuck (indexer::Stuck), it exits, and launchd starts a new one.
 
 use crate::config::{self, Config};
-use crate::indexer::{Event, Indexer, Stuck};
+use crate::indexer::{Event, Indexer, Plan, Stuck};
 use crate::power;
 use crate::speech::Transcriber;
 use crate::store::{self, Store};
@@ -114,13 +115,17 @@ impl Reporter {
                     if *stopped { ", stopped early" } else { "" }
                 ));
             }
-            Event::Transcribing { path, at, duration } => {
+            // Beside the reading, the reading's progress is what's shown.
+            Event::Transcribing { path, at, duration } if self.status.state == "transcribing" => {
                 self.status.current = Some(path.clone());
                 self.status.detail = Some(format!("{} of {}", clock(*at), clock(*duration)));
             }
+            Event::Transcribing { .. } => {}
             Event::Transcribed { path, passages, seconds, ms } => {
                 self.status.speech_done += 1;
-                self.status.done = self.status.speech_done;
+                if self.status.state == "transcribing" {
+                    self.status.done = self.status.speech_done;
+                }
                 log(&format!(
                     "wrote down {}: {passages} passages, {seconds:.0} s of sound in {ms} ms",
                     file_name(path)
@@ -128,9 +133,14 @@ impl Reporter {
             }
             Event::TranscribeFailed { path, error } => {
                 self.status.speech_done += 1;
-                self.status.done = self.status.speech_done;
+                if self.status.state == "transcribing" {
+                    self.status.done = self.status.speech_done;
+                }
                 self.status.last_error = Some(format!("{}: {error}", file_name(path)));
                 log(&format!("can't write down what's said in {path}: {error}"));
+            }
+            Event::SpeechStopped { error } => {
+                log(&format!("writing down speech beside the reading stopped, it goes on after it: {error}"))
             }
         }
         self.write(false);
@@ -430,7 +440,12 @@ pub fn run() -> Result<()> {
                     };
                     let mut events = |event: Event| reporter.event(&event);
                     let mut take = || changes.take();
-                    if let Err(error) = indexer.index_pending(&config, &mut events, &stop, &mut take) {
+                    // Speech beside the reading, when memory allows both models.
+                    let beside = Plan::of(&config.indexing).beside
+                        && crate::speech::unavailable().is_none()
+                        && speech_failed_at.is_none_or(|at| at.elapsed() > SPEECH_RETRY);
+                    let helper = beside.then_some(&mut transcriber);
+                    if let Err(error) = indexer.index_pending(&config, &mut events, &stop, &mut take, helper) {
                         log(&format!("indexing stopped: {error:#}"));
                         reporter.status.last_error = Some(format!("{error:#}"));
                         if error.is::<Stuck>() {

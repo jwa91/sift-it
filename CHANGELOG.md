@@ -16,7 +16,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com); versions follow
 - Searches by `words` or by `meaning`, per search (`--by`, or `mode` in a request) with a default in `search.mode`.
   By words loads nothing. The first search by meaning loads the model and the vectors, and they stay until
   `sift-it engine unload`.
-- `sift-it status` shows what the engine holds.
+- `sift-it status` shows what the engine holds, and how the indexer uses its memory.
+- `indexing.memory_mb` decides how fast indexing goes, never what it writes: how many files are read at once, and
+  whether what's said in recordings is written down beside the reading or after it. At `auto` it's a quarter of the
+  Mac's memory: on 8 GB the embedding and speech models take turns, on 24 GB they run together.
 - `search.vectors` sets which form of the vectors a search scans: `exact-f32`, `exact-f16`, which reads half as much,
   or `sketch`, which compares the query with a 96-byte sketch of every vector and scores the closest few thousand
   exactly. `auto`, the default, scans the most precise form whose rows fit in `search.memory_mb`, a tenth of the Mac's
@@ -68,6 +71,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com); versions follow
   A reader that hands over nothing for ten minutes is now stuck: its file is set aside and tried again six hours
   later, and the indexer makes way for a new process (launchd starts the daemon again; `sift-it index` says to run it
   again).
+- A recording or video the indexer stopped writing down right after its last stretch is no longer marked as failed:
+  it went on from its very end, which AVFoundation can't read. After its last stretch a file is written down.
 
 ## [0.2.0] — 2026-10-16
 
