@@ -2,6 +2,7 @@
 //!
 //!   config.json     what to index and how: one per Mac (`sift-it config`, `sift-it folders`)
 //!   index.sqlite    the index
+//!   vectors/        its vectors (vectors.rs)
 //!   status.json     what the background indexer is doing (for front ends)
 //!   models/         the model files
 //!   previews/       thumbnails rendered for search results
@@ -611,6 +612,21 @@ impl Default for Indexing {
 pub struct Search {
     /// What a search is by when it doesn't say.
     pub mode: Mode,
+    /// Which form of the vectors a search by meaning scans.
+    pub vectors: Scan,
+}
+
+/// Which form of the vectors a search by meaning scans. Every form is written for every vector (vectors.rs), so a
+/// change reads nothing again.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Scan {
+    /// Every vector as it was made: exact scores.
+    #[default]
+    #[serde(rename = "exact-f32")]
+    ExactF32,
+    /// Every vector at half precision: half the memory, and nearly exact scores.
+    #[serde(rename = "exact-f16")]
+    ExactF16,
 }
 
 /// What a search is by.

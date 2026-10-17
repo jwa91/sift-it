@@ -14,7 +14,8 @@
 //!   {"id":2,"op":"recent","limit":40}                    → {"id":2,"hits":[…]}: recently changed files
 //!   {"id":3,"op":"text","segment_id":12} or {"op":"text","path":"…"} → {"text":…}: a segment's whole text, or a
 //!       file's (its text segments in order)
-//!   {"id":4,"op":"status"}                               → {"meaning":"ready","vectors":n,"stats":{…}}
+//!   {"id":4,"op":"status"}                               → {"meaning":"ready","vectors":n,"scan":"exact-f32",
+//!       "resident":bytes,"stats":{…}}: how many vectors are mapped, in which form, and how much of them is in memory
 //!   {"id":5,"op":"unload"}                               → {"ok":true}: the model and the vectors go
 //!   {"id":6,"op":"stop"}                                 → {"ok":true}, and the engine exits
 //!
@@ -23,8 +24,8 @@
 //!           {"event":"config","error":…}: config.json can't be read (the ranking stays as it was)
 //!
 //! Nothing loads before it's needed: a search by words uses SQLite's full-text index alone. The first search by meaning
-//! loads the text model and the vectors, off the searching threads. What's loaded stays until `unload` or the engine
-//! stopping. There are no idle timers.
+//! loads the text model and maps the vectors (vectors.rs), off the searching threads. What's loaded stays until `unload`
+//! or the engine stopping. There are no idle timers.
 
 use crate::config::{self, Config, Mode};
 use crate::embedder::{Embedder, ModelFiles};
@@ -150,16 +151,24 @@ impl Core {
                 Ok(json!({"text": text}))
             }
             "status" => {
-                let (vectors, stats) = self.with_searcher(|searcher| {
+                let (vectors, resident, stats) = self.with_searcher(|searcher| {
                     searcher.refresh()?;
-                    Ok((searcher.vector_count(), searcher.store().stats()?))
+                    Ok((searcher.vector_count(), searcher.vectors_resident(), searcher.store().stats()?))
                 })?;
+                let scan = self.config.lock().unwrap().1.search.vectors;
                 let meaning = self.meaning.lock().unwrap();
                 let error = match &meaning.meaning {
                     Meaning::Unavailable(error) => Some(error.clone()),
                     _ => None,
                 };
-                Ok(json!({"meaning": meaning.meaning.name(), "error": error, "vectors": vectors, "stats": stats}))
+                Ok(json!({
+                    "meaning": meaning.meaning.name(),
+                    "error": error,
+                    "vectors": vectors,
+                    "scan": scan,
+                    "resident": resident,
+                    "stats": stats,
+                }))
             }
             "unload" => {
                 self.unload();
@@ -182,15 +191,20 @@ impl Core {
         self.with_searcher(|searcher| searcher.search(request, vector.as_deref()))
     }
 
-    /// The searcher, opened on first need, ranking by config.json's values as they are now.
+    /// The searcher, opened on first need, ranking by config.json's values as they are now, and scanning the form of
+    /// the vectors it says.
     fn with_searcher<T>(&self, work: impl FnOnce(&mut Searcher) -> Result<T>) -> Result<T> {
         let changed = self.reload_config();
-        let ranking = || self.config.lock().unwrap().1.ranking.clone();
+        let config = || self.config.lock().unwrap().1.clone();
         let mut searcher = self.searcher.lock().unwrap();
         match searcher.as_mut() {
-            Some(searcher) if changed => searcher.set_ranking(ranking()),
+            Some(searcher) if changed => {
+                let config = config();
+                searcher.set_ranking(config.ranking);
+                searcher.set_scan(config.search.vectors)?;
+            }
             Some(_) => {}
-            None => *searcher = Some(Searcher::open(&self.index, ranking())?),
+            None => *searcher = Some(Searcher::open(&self.index, config().ranking)?),
         }
         work(searcher.as_mut().expect("just opened"))
     }
@@ -252,9 +266,10 @@ impl Core {
     }
 
     fn load(&self, generation: u64) {
+        let scan = || self.config.lock().unwrap().1.search.vectors;
         let loaded = (|| -> Result<(Embedder, Vectors)> {
             let embedder = Embedder::load(&ModelFiles::in_folder(&self.models)?, true)?;
-            let vectors = Vectors::load(&Store::open_readonly(&self.index)?)?;
+            let vectors = Vectors::load(&Store::open_readonly(&self.index)?, scan())?;
             Ok((embedder, vectors))
         })();
         let mut state = self.meaning.lock().unwrap();
@@ -264,7 +279,11 @@ impl Core {
         }
         let event = match loaded {
             Ok((embedder, vectors)) => {
-                let installed = self.with_searcher(|searcher| searcher.set_vectors(vectors));
+                // In the form config.json says now: it may have changed meanwhile.
+                let installed = self.with_searcher(|searcher| {
+                    searcher.set_vectors(vectors)?;
+                    searcher.set_scan(scan())
+                });
                 match installed {
                     Ok(()) => {
                         state.meaning = Meaning::Ready(embedder);

@@ -1,7 +1,7 @@
 //! Hybrid search: meaning (the model's vectors) and exact words (the full-text index), one result per file.
 //!
-//! Meaning: every vector is scored against the query (cosine similarity, one matrix-vector product). What counts is the
-//! lift: how far a segment stands above the median segment for this query. Queries differ in how close they land to
+//! Meaning: every vector is scored against the query (cosine similarity, a scan of the vector files, mapped: see
+//! vectors.rs). What counts is the lift: how far a segment stands above the median segment for this query. Queries differ in how close they land to
 //! everything (a vague query is near all of it), and the lift takes that out. EmbeddingGemma 2 puts text, pictures and
 //! sound on one scale (measured on the testbed: the typical score of each kind for a query is within a few hundredths
 //! of the others'), so one median serves all of them. A segment that lifts little isn't shown, which gives an honest
@@ -17,38 +17,18 @@
 //! note that mentions steam and a train doesn't outrank a photo of a steam train. Words also pick which of a file's
 //! segments a result opens at, between segments the meaning scores about the same.
 
-use crate::config::{Mode, Ranking};
+use crate::config::{Mode, Ranking, Scan};
 use crate::crawl::Kind;
-use crate::embedder::DIM;
-use crate::store::{Segment, Store, blob_to_vector};
+use crate::store::{Segment, Store};
+use crate::vectors::{self, Form, Map};
 use anyhow::Result;
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Above this many vectors, the median is taken from a sample (it's the same median, faster).
 const MEDIAN_SAMPLE: usize = 50_000;
-
-#[link(name = "Accelerate", kind = "framework")]
-unsafe extern "C" {
-    fn cblas_sgemv(
-        order: i32,
-        trans: i32,
-        m: i32,
-        n: i32,
-        alpha: f32,
-        a: *const f32,
-        lda: i32,
-        x: *const f32,
-        incx: i32,
-        beta: f32,
-        y: *mut f32,
-        incy: i32,
-    );
-}
-const ROW_MAJOR: i32 = 101;
-const NO_TRANS: i32 = 111;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Request {
@@ -121,20 +101,34 @@ pub struct Searcher {
     penalties: Vec<f32>,
 }
 
-/// The index's vectors in memory, in the order they were added: what a search by meaning scans.
+/// The index's vectors, for searches by meaning: each partition's rows in the form searches scan, mapped, and which
+/// segment each live row is, in the order the segments were made.
 #[derive(Default)]
 pub struct Vectors {
+    folder: PathBuf,
+    form: Form,
+    partitions: Vec<Mapped>,
     ids: Vec<i64>,
-    rows: HashMap<i64, usize>,
     files: Vec<i64>,
-    matrix: Vec<f32>,
+    /// Where each segment's vector is: its partition (in `partitions`) and row.
+    places: Vec<(usize, usize)>,
+    /// Each segment's place in `ids`, `files` and `places`.
+    index: HashMap<i64, usize>,
     max_id: i64,
 }
 
+/// A partition's rows, as far as they're mapped.
+struct Mapped {
+    id: i64,
+    generation: i64,
+    rows: usize,
+    map: Map,
+}
+
 impl Vectors {
-    /// All the vectors in the index.
-    pub fn load(store: &Store) -> Result<Self> {
-        let mut vectors = Self::default();
+    /// All the vectors in the index, to be scanned in the form `scan` says.
+    pub fn load(store: &Store, scan: Scan) -> Result<Self> {
+        let mut vectors = Self { folder: store.vectors(), form: form_of(scan), ..Default::default() };
         vectors.catch_up(store)?;
         Ok(vectors)
     }
@@ -143,81 +137,125 @@ impl Vectors {
         self.ids.len()
     }
 
-    /// Catches up with the indexer's commits: only the new vectors when nothing was removed, all of them otherwise.
+    /// How much of what's mapped is in memory now.
+    pub fn resident(&self) -> usize {
+        self.partitions.iter().map(|partition| partition.map.resident()).sum()
+    }
+
+    /// Catches up with the indexer's commits: only the new rows when nothing was removed or moved.
     fn catch_up(&mut self, store: &Store) -> Result<()> {
-        // Segment ids are never reused, so what's loaded is still right unless some of it was deleted.
-        let kept: i64 = store.conn.query_row(
-            "SELECT COUNT(*) FROM segments WHERE vector IS NOT NULL AND id <= ?1",
+        // A partition's files go when its next generation is written, which can be between reading where its rows
+        // are and mapping them: then that's read again.
+        let mut tries = 0;
+        loop {
+            match self.try_catch_up(store) {
+                Err(error) if tries < 3 && is_gone(&error) => tries += 1,
+                outcome => return outcome,
+            }
+        }
+    }
+
+    fn try_catch_up(&mut self, store: &Store) -> Result<()> {
+        // One read transaction: the partitions and the segments as they were at one moment.
+        let snapshot = store.conn.unchecked_transaction()?;
+        let partitions = vectors::partitions(&snapshot)?;
+        // A next generation moved rows: everything is read again.
+        let moved = self.partitions.iter().any(|mapped| {
+            partitions.iter().any(|partition| partition.id == mapped.id && partition.generation != mapped.generation)
+        });
+        if moved {
+            *self = Self { folder: std::mem::take(&mut self.folder), form: self.form, ..Default::default() };
+        }
+        // The partitions with new rows are mapped again, as far as their rows go now: all or none.
+        let mut maps = Vec::new();
+        for partition in &partitions {
+            let mapped = self.partitions.iter().position(|mapped| mapped.id == partition.id);
+            if mapped.is_none_or(|at| self.partitions[at].rows != partition.rows as usize) {
+                let path = partition.path(&self.folder, self.form);
+                let map = Map::open(&path, partition.rows as usize * self.form.row_bytes())?;
+                maps.push((
+                    mapped,
+                    Mapped { id: partition.id, generation: partition.generation, rows: partition.rows as usize, map },
+                ));
+            }
+        }
+        for (at, mapped) in maps {
+            match at {
+                Some(at) => self.partitions[at] = mapped,
+                None => self.partitions.push(mapped),
+            }
+        }
+        // Segment ids are never reused, so what's here is still right unless some of it was deleted.
+        let kept: i64 = snapshot.query_row(
+            "SELECT COUNT(*) FROM segments WHERE row IS NOT NULL AND id <= ?1",
             [self.max_id],
             |row| row.get(0),
         )?;
         if kept as usize != self.ids.len() {
-            self.drop_deleted(store)?;
+            self.drop_deleted(&snapshot)?;
         }
-        let mut statement = store
-            .conn
-            .prepare("SELECT id, file_id, vector FROM segments WHERE vector IS NOT NULL AND id > ?1 ORDER BY id")?;
+        let mut statement = snapshot.prepare(
+            "SELECT id, file_id, partition, row FROM segments WHERE row IS NOT NULL AND id > ?1 ORDER BY id",
+        )?;
         let mut rows = statement.query([self.max_id])?;
         while let Some(row) = rows.next()? {
-            let id: i64 = row.get(0)?;
-            let blob = row.get_ref(2)?.as_blob()?;
-            if blob.len() != DIM * 4 {
-                continue;
-            }
-            self.rows.insert(id, self.ids.len());
+            let (id, file, partition, place): (i64, i64, i64, i64) =
+                (row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?);
+            let Some(partition) = self.partitions.iter().position(|mapped| mapped.id == partition) else { continue };
+            self.index.insert(id, self.ids.len());
             self.ids.push(id);
-            self.files.push(row.get(1)?);
-            blob_to_vector(blob, &mut self.matrix);
+            self.files.push(file);
+            self.places.push((partition, place as usize));
             self.max_id = self.max_id.max(id);
         }
         Ok(())
     }
 
     /// Drops the vectors whose segments are gone (a file changed or left), keeping the rest in place.
-    fn drop_deleted(&mut self, store: &Store) -> Result<()> {
-        let mut statement = store.conn.prepare("SELECT id FROM segments WHERE vector IS NOT NULL AND id <= ?1")?;
+    fn drop_deleted(&mut self, conn: &rusqlite::Connection) -> Result<()> {
+        let mut statement = conn.prepare("SELECT id FROM segments WHERE row IS NOT NULL AND id <= ?1")?;
         let present: std::collections::HashSet<i64> =
             statement.query_map([self.max_id], |row| row.get(0))?.collect::<std::result::Result<_, _>>()?;
         let mut kept = 0;
-        for row in 0..self.ids.len() {
-            if present.contains(&self.ids[row]) {
-                if kept != row {
-                    self.ids[kept] = self.ids[row];
-                    self.files[kept] = self.files[row];
-                    self.matrix.copy_within(row * DIM..(row + 1) * DIM, kept * DIM);
-                }
+        for at in 0..self.ids.len() {
+            if present.contains(&self.ids[at]) {
+                self.ids[kept] = self.ids[at];
+                self.files[kept] = self.files[at];
+                self.places[kept] = self.places[at];
                 kept += 1;
             }
         }
         self.ids.truncate(kept);
         self.files.truncate(kept);
-        self.matrix.truncate(kept * DIM);
-        self.rows = self.ids.iter().enumerate().map(|(row, &id)| (id, row)).collect();
+        self.places.truncate(kept);
+        self.index = self.ids.iter().enumerate().map(|(at, &id)| (id, at)).collect();
         Ok(())
     }
 
     /// Cosine similarity of every vector with the query (vectors are normalized).
     fn cosines(&self, query: &[f32]) -> Vec<f32> {
-        let n = self.ids.len();
-        let mut scores = vec![0.0f32; n];
-        unsafe {
-            cblas_sgemv(
-                ROW_MAJOR,
-                NO_TRANS,
-                n as i32,
-                DIM as i32,
-                1.0,
-                self.matrix.as_ptr(),
-                DIM as i32,
-                query.as_ptr(),
-                1,
-                0.0,
-                scores.as_mut_ptr(),
-                1,
-            );
-        }
-        scores
+        let scores: Vec<Vec<f32>> = self
+            .partitions
+            .iter()
+            .map(|partition| vectors::scores(&partition.map, self.form, partition.rows, query))
+            .collect();
+        self.places.iter().map(|&(partition, row)| scores[partition][row]).collect()
     }
+}
+
+/// The form of the rows that `scan` reads.
+fn form_of(scan: Scan) -> Form {
+    match scan {
+        Scan::ExactF32 => Form::F32,
+        Scan::ExactF16 => Form::F16,
+    }
+}
+
+/// A file that's not there (any more).
+fn is_gone(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause.downcast_ref::<std::io::Error>().is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+    })
 }
 
 /// "code: retry with backoff": a search of code, and only of code. Without the prefix (or the code filter), a search
@@ -292,9 +330,9 @@ impl Searcher {
         Ok(searcher)
     }
 
-    /// Loads the index's vectors, for searches by meaning.
-    pub fn load_vectors(&mut self) -> Result<()> {
-        let vectors = Vectors::load(&self.store)?;
+    /// Loads the index's vectors, for searches by meaning, to be scanned in the form `scan` says.
+    pub fn load_vectors(&mut self, scan: Scan) -> Result<()> {
+        let vectors = Vectors::load(&self.store, scan)?;
         self.set_vectors(vectors)
     }
 
@@ -321,8 +359,22 @@ impl Searcher {
         self.ranking = ranking;
     }
 
+    /// Scans the vectors in the form `scan` says from the next search on (when they're loaded).
+    pub fn set_scan(&mut self, scan: Scan) -> Result<()> {
+        if !self.loaded || self.vectors.form == form_of(scan) {
+            return Ok(());
+        }
+        let vectors = Vectors::load(&self.store, scan)?;
+        self.set_vectors(vectors)
+    }
+
     pub fn vector_count(&self) -> usize {
         self.vectors.len()
+    }
+
+    /// How much of the mapped vectors is in memory now.
+    pub fn vectors_resident(&self) -> usize {
+        self.vectors.resident()
     }
 
     pub fn store(&self) -> &Store {
@@ -379,11 +431,10 @@ impl Searcher {
             }
             _ => (Vec::new(), 0.0),
         };
-        let lift_of = |segment: i64| vectors.rows.get(&segment).and_then(|&row| cosines.get(row)).map(|c| c - median);
+        let lift_of = |segment: i64| vectors.index.get(&segment).and_then(|&at| cosines.get(at)).map(|c| c - median);
         // The lift less what the length of the segment's file explains: what results are ranked and shown by.
         let fit_at = |row: usize| cosines[row] - median - self.penalties.get(row).copied().unwrap_or(0.0);
-        let fit_of =
-            |segment: i64| vectors.rows.get(&segment).filter(|&&row| row < cosines.len()).map(|&row| fit_at(row));
+        let fit_of = |segment: i64| vectors.index.get(&segment).filter(|&&at| at < cosines.len()).map(|&at| fit_at(at));
 
         let mut candidates: HashMap<i64, Candidate> = HashMap::new();
         let words = words_of(request.text());
@@ -429,8 +480,8 @@ impl Searcher {
         // Group by file, keeping the segments close to each file's best.
         let mut by_file: HashMap<i64, Vec<Candidate>> = HashMap::new();
         for candidate in candidates.into_values() {
-            let file = match vectors.rows.get(&candidate.segment) {
-                Some(&row) => vectors.files[row],
+            let file = match vectors.index.get(&candidate.segment) {
+                Some(&at) => vectors.files[at],
                 None => match self.file_of(candidate.segment)? {
                     Some(file) => file,
                     None => continue,
@@ -753,44 +804,81 @@ mod tests {
     use super::*;
     use crate::store::NewSegment;
 
-    /// An index in a file of its own, removed when the test ends.
+    /// An index in a folder of its own, removed when the test ends.
     struct TempIndex(std::path::PathBuf);
     impl TempIndex {
         fn new(name: &str) -> Self {
-            let index = Self(std::env::temp_dir().join(format!("sift-it-test-{name}-{}.sqlite", std::process::id())));
-            index.remove();
-            index
-        }
-        fn remove(&self) {
-            for suffix in ["", "-wal", "-shm"] {
-                let _ = std::fs::remove_file(format!("{}{suffix}", self.0.display()));
-            }
+            let folder = std::env::temp_dir().join(format!("sift-it-test-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&folder);
+            Self(folder.join("index.sqlite"))
         }
     }
     impl Drop for TempIndex {
         fn drop(&mut self) {
-            self.remove();
+            let _ = std::fs::remove_dir_all(self.0.parent().unwrap());
         }
     }
 
     /// A file of `kind` whose passages are `texts`, indexed without vectors.
     fn add(store: &mut Store, path: &str, kind: Kind, texts: Vec<String>) {
+        add_segments(store, path, kind, texts.into_iter().map(|text| (text, None)).collect());
+    }
+
+    /// A file of `kind` whose passages are these texts, with these vectors.
+    fn add_segments(store: &mut Store, path: &str, kind: Kind, passages: Vec<(String, Option<Vec<f32>>)>) -> i64 {
         let settings = crate::config::Settings::BASE;
         let found = crate::crawl::Found { path: path.into(), kind, size: 1, modified: 1.0, settings };
         store.queue(&found, None, 0.0).unwrap();
         let row = store.pending(100).unwrap().into_iter().find(|row| row.path == Path::new(path)).unwrap();
-        let segments: Vec<NewSegment> = texts
+        let segments: Vec<NewSegment> = passages
             .into_iter()
             .enumerate()
-            .map(|(i, text)| NewSegment {
+            .map(|(i, (text, vector))| NewSegment {
                 segment: Segment::Passage,
                 loc: Some(i as f64 + 1.0),
                 loc_end: None,
                 text: Some(text),
-                vector: None,
+                vector,
             })
             .collect();
         assert!(store.finish_file(&row, &segments, &serde_json::json!({}), false).unwrap());
+        row.id
+    }
+
+    #[test]
+    fn the_vectors_are_followed_through_new_rows_and_a_next_generation() {
+        let index = TempIndex::new("generations");
+        let mut store = Store::open(&index.0).unwrap();
+        let unit = crate::vectors::unit;
+        let passage = |seed| (format!("passage {seed}"), Some(unit(seed)));
+        let one = add_segments(&mut store, "/a/one.txt", Kind::Plaintext, vec![passage(1), passage(2)]);
+        let mut searcher = Searcher::open(&index.0, Ranking::default()).unwrap();
+        searcher.load_vectors(Scan::ExactF32).unwrap();
+        let best = |searcher: &mut Searcher, seed| {
+            let request = Request { q: "zebra".into(), limit: 1, ..Default::default() };
+            let hit = searcher.search(&request, Some(&unit(seed))).unwrap().hits.remove(0);
+            (hit.name, hit.cosine.unwrap())
+        };
+        assert_eq!(best(&mut searcher, 2).0, "one.txt");
+
+        // New rows are mapped as they come.
+        add_segments(&mut store, "/a/two.txt", Kind::Plaintext, vec![passage(3)]);
+        let (name, cosine) = best(&mut searcher, 3);
+        assert_eq!(name, "two.txt");
+        assert!((cosine - 1.0).abs() < 1e-5);
+
+        // Two of three rows dead: the next generation moves the last one, and the searcher follows.
+        store.remove_file(one).unwrap();
+        assert_eq!(store.compact_vectors().unwrap(), ["main"]);
+        let (name, cosine) = best(&mut searcher, 3);
+        assert_eq!((name.as_str(), searcher.vector_count()), ("two.txt", 1));
+        assert!((cosine - 1.0).abs() < 1e-5);
+
+        // At half precision: nearly the same.
+        searcher.set_scan(Scan::ExactF16).unwrap();
+        let (name, cosine) = best(&mut searcher, 3);
+        assert_eq!(name, "two.txt");
+        assert!((cosine - 1.0).abs() < 1e-3);
     }
 
     #[test]

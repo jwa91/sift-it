@@ -16,9 +16,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com); versions follow
   By words loads nothing. The first search by meaning loads the model and the vectors, and they stay until
   `sift-it engine unload`.
 - `sift-it status` shows what the engine holds.
+- `search.vectors` sets which form of the vectors a search scans: `exact-f32` (the default) or `exact-f16`, which reads
+  half as much. `sift-it bench-search` measures both.
 
 ### Changed
 
+- The vectors are in files beside the index (`vectors/`), each written in three forms: as made, at half precision, and
+  as a sketch for searches to come. The engine maps them instead of copying them into memory, so macOS can drop their
+  pages under pressure. Code has a partition of its own. When a quarter of a partition belongs to removed files, the
+  indexer writes it again while it's idle.
 - One `config.json` with a section for each part of the work: `sources`, `reading`, `ranking`, `indexing` and `log`.
   Every value is written out, `sift-it config <key> <value>` sets any of them by its dotted name, and a value the file
   leaves out keeps its default.

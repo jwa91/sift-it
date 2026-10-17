@@ -6,6 +6,8 @@
 //! Once everything is read, and only then, it writes down what's said in recordings and videos (speech.rs), a chunk
 //! at a time: anything that changes in the folders comes first, and the writing down goes on where it stopped.
 //!
+//! With nothing left to do, it writes the next generation of a vector partition that's due one (vectors.rs).
+//!
 //! It says what it's doing in status.json (for `sift-it status` and front ends), and listens to signals:
 //!   SIGUSR1  look for changes now (a full sync)
 //!   SIGUSR2  pause or resume
@@ -34,6 +36,8 @@ use std::time::{Duration, Instant, SystemTime};
 const WAIT_CHECK: Duration = Duration::from_secs(10);
 /// A speech helper that couldn't start is tried again after this long.
 const SPEECH_RETRY: Duration = Duration::from_secs(300);
+/// Writing the vectors' next generation, when it failed (a full disk), is tried again after this long.
+const COMPACT_RETRY: Duration = Duration::from_secs(3600);
 
 static RESYNC: AtomicBool = AtomicBool::new(false);
 static TOGGLE_PAUSE: AtomicBool = AtomicBool::new(false);
@@ -343,6 +347,8 @@ pub fn run() -> Result<()> {
     let mut speech_problem: Option<String> = None;
     // When the helper last failed to start: it's tried again a while later, not on every pass.
     let mut speech_failed_at: Option<Instant> = None;
+    // When writing a partition's next generation last failed: the same.
+    let mut compact_failed_at: Option<Instant> = None;
 
     while !SHUTDOWN.load(Ordering::SeqCst) {
         // The config changed: watch the folders it names now, and sync it all (what's read, and how, may differ).
@@ -511,6 +517,19 @@ pub fn run() -> Result<()> {
                 transcriber = None;
             }
             reporter.status.current = None;
+            // Partitions with many dead rows, or sketches made against a mean that moved: their next generation.
+            if !paused && compact_failed_at.is_none_or(|at| at.elapsed() > COMPACT_RETRY) {
+                match indexer.store.compact_vectors() {
+                    Ok(written) if !written.is_empty() => {
+                        log(&format!("wrote the vectors again: {}", written.join(", ")))
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        log(&format!("can't write the vectors again: {error:#}"));
+                        compact_failed_at = Some(Instant::now());
+                    }
+                }
+            }
             let detail = speech_problem.clone().filter(|_| to_write);
             reporter.set("idle", detail);
         }

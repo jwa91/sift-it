@@ -17,7 +17,7 @@ recordings, videos, and code. DigUp also includes a CLI.
 - **Terminal interface:** search interactively, preview results, and open files at the matching page, time, or line.
 - **Script integration:** use JSON output or pass search result paths to other commands.
 - **One engine for every search:** a resident process answers the terminal, scripts, and Raycast alike. It loads the
-  model and the vectors for the first search by meaning and keeps them, and a search by words loads nothing.
+  model and maps the vectors for the first search by meaning and keeps them, and a search by words loads nothing.
 - **Raycast integration:** a separate TypeScript extension uses `sift-it serve` for searches and previews.
 - **Ranking changes:** account for file length and give ordinary words less weight than numbers, code searches,
   and quoted phrases.
@@ -100,8 +100,8 @@ Piped searches print one path per line. JSON output includes scores and matching
 Every search goes to one resident process, the engine. It starts at login, or with the first search when it isn't
 running, and holds nothing until it's needed. A search is by `meaning` or by `words`:
 
-- **By meaning**, the default, uses the model and the vectors. The first such search loads them, which takes a few
-  seconds, and they stay loaded for every search after it.
+- **By meaning**, the default, uses the model and the vectors. The first such search loads the model and maps the
+  vectors, which takes a few seconds, and they stay for every search after it.
 - **By words** uses only the full-text index. It needs no model and holds almost nothing in memory.
 
 ```sh
@@ -113,6 +113,11 @@ sift-it engine unload
 `sift-it config search.mode` sets the default, and `--by` overrides it for one search. `sift-it engine unload` lets the
 model and the vectors go until the next search by meaning, and `sift-it status` shows what the engine holds. A new
 version of sift-it replaces a running engine of an older one at its first search.
+
+The vectors are in files beside the index, and the engine maps them rather than copying them into memory: macOS can
+drop their pages when it needs the memory, and reads them again for the next search. `search.vectors` sets which form a
+search scans. `exact-f32`, the default, gives exact scores. `exact-f16` reads half as much, with scores within a
+thousandth. Both forms are always written, so a change takes effect at the next search.
 `sift-it open <n>` opens a result from the last search.
 PDF results open in Preview at their page. Recordings and videos open in QuickTime at their matching time.
 Text and code results open at their matching line in a supported editor.
@@ -203,8 +208,8 @@ sift-it selftest
 Run `sift-it --help` for all commands and options.
 
 Data lives in `~/Library/Application Support/Sift It`, or the folder specified by `SIFT_IT_HOME`.
-This folder contains `config.json`, `index.sqlite`, `status.json`, `indexer.log`, `engine.log`, `engine.sock`,
-`models/`, and `previews/`.
+This folder contains `config.json`, `index.sqlite`, `vectors/`, `status.json`, `indexer.log`, `engine.log`,
+`engine.sock`, `models/`, and `previews/`.
 `SIFT_IT_SPEECH_MODEL` points at another copy of the speech model.
 `brew uninstall --zap sift-it` removes the installation and its data.
 
@@ -225,7 +230,7 @@ sift-it config indexing.on_battery false
 | `sources` | folders, ignore patterns, the file types of each kind, whether code is read | at the next sync |
 | `reading` | how deep and how files are read, per kind, file type, and folder | the files it affects are read again |
 | `ranking` | the constants search ranks by | at the next search |
-| `search` | whether a search is by meaning or by words, unless it says | at the next search |
+| `search` | whether a search is by meaning or by words, unless it says, and which form of the vectors it scans | at the next search |
 | `indexing` | battery and timing of the background indexer | at once |
 | `log` | the size of the indexer's log | at once |
 

@@ -1,20 +1,21 @@
 //! The index: one SQLite file. A row per file, a row per segment (a passage, a PDF page, a picture, a video frame,
-//! 30 s of sound, what's said in a recording) with its vector, and a full-text index over every segment's words and
-//! its file's name and tags.
+//! 30 s of sound, what's said in a recording) with where its vector is, and a full-text index over every segment's
+//! words and its file's name and tags. The vectors themselves are in files beside it (vectors.rs).
 //!
 //! The indexer is the only writer; searchers read alongside it (WAL), and notice its changes through SQLite's
 //! data_version.
 
 use crate::crawl::{Found, Kind};
 use crate::embedder::DIM;
+use crate::vectors;
 use anyhow::{Context, Result, bail};
-use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, TransactionBehavior, params};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// An index of another version is dropped and made again.
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
 
 /// What a segment is, which also says which of the model's inputs made its vector.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
@@ -150,14 +151,6 @@ pub struct Store {
     path: PathBuf,
 }
 
-pub fn vector_to_blob(vector: &[f32]) -> Vec<u8> {
-    vector.iter().flat_map(|v| v.to_le_bytes()).collect()
-}
-
-pub fn blob_to_vector(blob: &[u8], into: &mut Vec<f32>) {
-    into.extend(blob.as_chunks::<4>().0.iter().map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])));
-}
-
 /// Words for the keyword index from a file: its name (name_words), and the tags read from it (a recording's title,
 /// artist and album: see av::tags), which `info` holds.
 pub fn file_words(path: &Path, info: &serde_json::Value) -> String {
@@ -236,8 +229,12 @@ impl Store {
             eprintln!("{} was made by another version of sift-it: everything is indexed again", self.path.display());
             self.conn.execute_batch(
                 "DROP TABLE IF EXISTS words; DROP TABLE IF EXISTS segments; DROP TABLE IF EXISTS files;
-                 DELETE FROM meta; VACUUM;",
+                 DROP TABLE IF EXISTS partitions; DELETE FROM meta; VACUUM;",
             )?;
+            let folder = self.vectors();
+            if folder.exists() {
+                std::fs::remove_dir_all(&folder).with_context(|| format!("can't remove {}", folder.display()))?;
+            }
         }
         self.conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS files (
@@ -263,18 +260,26 @@ impl Store {
                  loc REAL,
                  loc_end REAL,
                  text TEXT,
-                 vector BLOB
+                 partition INTEGER,                       -- where its vector is (vectors.rs): the partition,
+                 row INTEGER                              -- and the row in its files
              );
              CREATE INDEX IF NOT EXISTS segments_file ON segments(file_id);
+             CREATE INDEX IF NOT EXISTS segments_row ON segments(partition, row) WHERE row IS NOT NULL;
              CREATE VIRTUAL TABLE IF NOT EXISTS words USING fts5(
                  name, text, content = '', contentless_delete = 1,
                  tokenize = 'unicode61 remove_diacritics 2', prefix = '2 3'
              );",
         )?;
+        self.conn.execute_batch(vectors::SCHEMA)?;
         if version != Some(SCHEMA_VERSION) {
             self.set_meta("schema", &SCHEMA_VERSION.to_string())?;
         }
         Ok(())
+    }
+
+    /// The folder the vectors are in.
+    pub fn vectors(&self) -> PathBuf {
+        vectors::folder(&self.path)
     }
 
     pub fn meta(&self, key: &str) -> Result<Option<String>> {
@@ -395,14 +400,15 @@ impl Store {
     /// file, and a search finds that part meanwhile. The `first` part clears what an earlier read left. Nothing is
     /// written (false) when the file left the index or changed since it was handed out.
     pub fn write_part(&mut self, row: &FileRow, segments: &[NewSegment], first: bool) -> Result<bool> {
-        let tx = self.conn.transaction()?;
+        let folder = self.vectors();
+        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         if !as_handed_out(&tx, row)? {
             return Ok(false);
         }
         if first {
             delete_segments(&tx, row.id)?;
         }
-        insert_segments(&tx, row.id, &name_words(&row.path), segments)?;
+        insert_segments(&tx, &folder, row, &name_words(&row.path), segments)?;
         tx.commit()?;
         Ok(true)
     }
@@ -440,7 +446,8 @@ impl Store {
         parts: bool,
         error: Option<&str>,
     ) -> Result<bool> {
-        let tx = self.conn.transaction()?;
+        let folder = self.vectors();
+        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         if !as_handed_out(&tx, row)? {
             return Ok(false);
         }
@@ -451,11 +458,11 @@ impl Store {
             // The parts went in by the file's name alone: now its tags are known, they're found by those too.
             rename_words(&tx, row.id, &name)?;
         }
-        insert_segments(&tx, row.id, &name, segments)?;
+        insert_segments(&tx, &folder, row, &name, segments)?;
         // A file with nothing in it is still findable by its name.
         if segments.is_empty() && !parts {
             let empty = NewSegment { segment: Segment::Passage, loc: None, loc_end: None, text: None, vector: None };
-            insert_segments(&tx, row.id, &name, &[empty])?;
+            insert_segments(&tx, &folder, row, &name, &[empty])?;
         }
         tx.execute(
             "UPDATE files SET state = ?2, error = ?3, info = ?4, indexed_at = ?5 WHERE id = ?1",
@@ -514,7 +521,8 @@ impl Store {
         tags: Option<&serde_json::Value>,
         progress: &str,
     ) -> Result<bool> {
-        let tx = self.conn.transaction()?;
+        let folder = self.vectors();
+        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let current: Option<(String, i64, f64, String, Option<String>)> = tx
             .query_row("SELECT path, size, modified, state, info FROM files WHERE id = ?1", [row.id], |r| {
                 Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
@@ -542,7 +550,7 @@ impl Store {
                 rename_words(&tx, row.id, &file_words(&row.path, &info))?;
             }
         }
-        insert_segments(&tx, row.id, &file_words(&row.path, &info), passages)?;
+        insert_segments(&tx, &folder, row, &file_words(&row.path, &info), passages)?;
         let spoken: i64 =
             tx.query_row("SELECT COUNT(*) FROM segments WHERE file_id = ?1 AND segment = 'speech'", [row.id], |r| {
                 r.get(0)
@@ -622,7 +630,7 @@ impl Store {
         }
         stats.segments = self.conn.query_row("SELECT COUNT(*) FROM segments", [], |row| row.get(0))?;
         stats.vectors =
-            self.conn.query_row("SELECT COUNT(*) FROM segments WHERE vector IS NOT NULL", [], |row| row.get(0))?;
+            self.conn.query_row("SELECT COUNT(*) FROM segments WHERE row IS NOT NULL", [], |row| row.get(0))?;
         Ok(stats)
     }
 
@@ -651,13 +659,30 @@ impl Store {
         )?)
     }
 
-    /// Drops every vector and queues every file again (after a change of model or pipeline).
+    /// Drops every vector and queues every file again (after a change of model or pipeline). The vector files go with
+    /// the next tidy_vectors.
     pub fn requeue_all(&self) -> Result<()> {
-        self.conn.execute_batch(
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute_batch(
             "INSERT INTO words (words) VALUES ('delete-all'); DELETE FROM segments;
              UPDATE files SET state = 'pending', error = NULL, info = NULL, indexed_at = NULL, transcript = NULL;",
         )?;
+        vectors::clear(&tx)?;
+        tx.commit()?;
         Ok(())
+    }
+
+    /// Writes the next generation of the partitions that are due one (vectors::compact), for when the indexer is idle.
+    /// Returns their names.
+    pub fn compact_vectors(&mut self) -> Result<Vec<String>> {
+        let folder = self.vectors();
+        vectors::compact(&mut self.conn, &folder)
+    }
+
+    /// Removes the vector files no partition uses any more.
+    pub fn tidy_vectors(&mut self) -> Result<()> {
+        let folder = self.vectors();
+        vectors::tidy(&mut self.conn, &folder)
     }
 }
 
@@ -684,25 +709,43 @@ fn delete_segments(conn: &Connection, file_id: i64) -> Result<()> {
     Ok(())
 }
 
-/// Writes segments, each with its words (and the file's, `name`) in the keyword index.
-fn insert_segments(conn: &Connection, file_id: i64, name: &str, segments: &[NewSegment]) -> Result<()> {
+/// Writes a file's segments, each with its words (and the file's, `name`) in the keyword index. Their vectors are
+/// appended to the file's partition first (`folder`), and the segments point at their rows: `conn`'s transaction holds
+/// the write lock (BEGIN IMMEDIATE), and commits after the rows are on disk.
+fn insert_segments(
+    conn: &Connection,
+    folder: &Path,
+    file: &FileRow,
+    name: &str,
+    segments: &[NewSegment],
+) -> Result<()> {
+    let vectors: Vec<&[f32]> = segments.iter().filter_map(|segment| segment.vector.as_deref()).collect();
+    if let Some(vector) = vectors.iter().find(|vector| vector.len() != DIM) {
+        bail!("vector of {} values", vector.len());
+    }
+    let (partition, mut next) = if vectors.is_empty() {
+        (None, 0)
+    } else {
+        let (partition, first) = vectors::append(conn, folder, vectors::partition_of(file.kind), &vectors)?;
+        (Some(partition), first)
+    };
     let mut insert = conn.prepare_cached(
-        "INSERT INTO segments (file_id, segment, loc, loc_end, text, vector) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        "INSERT INTO segments (file_id, segment, loc, loc_end, text, partition, row) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
     )?;
     let mut words = conn.prepare_cached("INSERT INTO words (rowid, name, text) VALUES (?1, ?2, ?3)")?;
     for segment in segments {
-        if let Some(vector) = &segment.vector
-            && vector.len() != DIM
-        {
-            bail!("vector of {} values", vector.len());
-        }
+        let row = segment.vector.as_ref().map(|_| {
+            next += 1;
+            next - 1
+        });
         insert.execute(params![
-            file_id,
+            file.id,
             segment.segment.as_str(),
             segment.loc,
             segment.loc_end,
             segment.text,
-            segment.vector.as_deref().map(vector_to_blob),
+            row.and(partition),
+            row,
         ])?;
         words.execute(params![conn.last_insert_rowid(), name, segment.text.as_deref().unwrap_or("")])?;
     }
@@ -734,23 +777,19 @@ mod tests {
     use super::*;
     use crate::config::Settings;
 
-    /// A store in a file of its own, removed when the test ends.
+    /// A store in a folder of its own, removed when the test ends.
     struct TempStore(Store, PathBuf);
     impl TempStore {
         fn new(name: &str) -> Self {
-            let path = std::env::temp_dir().join(format!("sift-it-test-{name}-{}.sqlite", std::process::id()));
-            Self::remove(&path);
+            let folder = std::env::temp_dir().join(format!("sift-it-test-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&folder);
+            let path = folder.join("index.sqlite");
             Self(Store::open(&path).unwrap(), path)
-        }
-        fn remove(path: &Path) {
-            for suffix in ["", "-wal", "-shm"] {
-                let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
-            }
         }
     }
     impl Drop for TempStore {
         fn drop(&mut self) {
-            Self::remove(&self.1);
+            let _ = std::fs::remove_dir_all(self.1.parent().unwrap());
         }
     }
 
@@ -849,5 +888,98 @@ mod tests {
         let reopened = Store::open(&store.1).unwrap();
         assert_eq!(reopened.files().unwrap().len(), 0);
         assert_eq!(reopened.meta("schema").unwrap().as_deref(), Some(SCHEMA_VERSION.to_string().as_str()));
+    }
+
+    /// A file of `kind` with a passage for each of `vectors`, written.
+    fn add_vectors(store: &mut Store, path: &str, kind: Kind, vectors: &[Vec<f32>]) -> i64 {
+        let id = store.queue(&Found { kind, ..found(path) }, None, 0.0).unwrap();
+        let job = store.pending(100).unwrap().into_iter().find(|row| row.id == id).unwrap();
+        let segments: Vec<NewSegment> =
+            vectors.iter().map(|vector| NewSegment { vector: Some(vector.clone()), ..passage("words") }).collect();
+        assert!(store.finish_file(&job, &segments, &serde_json::json!({}), false).unwrap());
+        id
+    }
+
+    /// A file's vectors, read from where its segments say they are.
+    fn stored(store: &Store, file: i64) -> Vec<Vec<f32>> {
+        let mut statement = store
+            .conn
+            .prepare(
+                "SELECT p.name, s.row FROM segments s JOIN partitions p ON p.id = s.partition
+                 WHERE s.file_id = ?1 AND s.row IS NOT NULL ORDER BY s.id",
+            )
+            .unwrap();
+        let places: Vec<(String, i64)> =
+            statement.query_map([file], |r| Ok((r.get(0)?, r.get(1)?))).unwrap().map(Result::unwrap).collect();
+        let bytes = DIM * 4;
+        places
+            .into_iter()
+            .map(|(name, row)| {
+                let row = row as usize;
+                let rows = vectors::read_rows(&store.conn, &store.vectors(), &name, vectors::Form::F32).unwrap();
+                rows[row * bytes..(row + 1) * bytes].as_chunks::<4>().0.iter().map(|b| f32::from_le_bytes(*b)).collect()
+            })
+            .collect()
+    }
+
+    fn partition(store: &Store, name: &str) -> vectors::Partition {
+        vectors::partitions(&store.conn).unwrap().into_iter().find(|p| p.name == name).unwrap()
+    }
+
+    /// The files in the vectors folder.
+    fn files(store: &Store) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(store.vectors())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn vectors_get_a_next_generation_when_a_quarter_is_dead_or_the_mean_moved() {
+        let mut store = TempStore::new("vectors");
+        let unit = vectors::unit;
+        let gone = add_vectors(&mut store.0, "/a/gone.txt", Kind::Plaintext, &[unit(1), unit(2), unit(3)]);
+        let kept = add_vectors(&mut store.0, "/a/kept.txt", Kind::Plaintext, &[unit(4), unit(5)]);
+        add_vectors(&mut store.0, "/a/main.rs", Kind::Code, &[unit(6)]);
+        assert_eq!((partition(&store.0, "main").rows, partition(&store.0, "code").rows), (5, 1));
+        assert_eq!(stored(&store.0, kept), [unit(4), unit(5)]);
+
+        // The sketches were made against the first file's mean, and five rows have another: they're made again, and
+        // the rows stay where they are.
+        assert_eq!(store.0.compact_vectors().unwrap(), ["main"]);
+        assert_eq!((partition(&store.0, "main").generation, partition(&store.0, "main").rows), (1, 5));
+        assert_eq!(stored(&store.0, kept), [unit(4), unit(5)]);
+        assert!(store.0.compact_vectors().unwrap().is_empty());
+
+        // Three of five rows dead: the live ones move to a generation of their own.
+        store.0.remove_file(gone).unwrap();
+        assert_eq!(partition(&store.0, "main").dead, 3);
+        assert_eq!(store.0.compact_vectors().unwrap(), ["main"]);
+        let main = partition(&store.0, "main");
+        assert_eq!((main.generation, main.rows, main.dead), (2, 2, 0));
+        assert_eq!(stored(&store.0, kept), [unit(4), unit(5)]);
+        let names = ["code.0.f16", "code.0.f32", "code.0.sketch", "main.2.f16", "main.2.f32", "main.2.sketch"];
+        assert_eq!(files(&store.0), names);
+
+        // Everything again: the partitions start over, and their files go.
+        store.0.requeue_all().unwrap();
+        store.0.tidy_vectors().unwrap();
+        assert_eq!((partition(&store.0, "main").generation, partition(&store.0, "main").rows), (3, 0));
+        assert!(files(&store.0).is_empty());
+    }
+
+    #[test]
+    fn rows_a_crash_left_are_written_over() {
+        use std::io::Write;
+        let mut store = TempStore::new("leftovers");
+        add_vectors(&mut store.0, "/a/one.txt", Kind::Plaintext, &[vectors::unit(1)]);
+        // A crash between appending and committing leaves rows nothing points at.
+        let path = partition(&store.0, "main").path(&store.0.vectors(), vectors::Form::F32);
+        std::fs::OpenOptions::new().append(true).open(&path).unwrap().write_all(&[7; 1000]).unwrap();
+        let two = add_vectors(&mut store.0, "/a/two.txt", Kind::Plaintext, &[vectors::unit(2)]);
+        assert_eq!(stored(&store.0, two), [vectors::unit(2)]);
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 2 * DIM as u64 * 4);
     }
 }

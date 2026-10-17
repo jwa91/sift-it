@@ -144,14 +144,16 @@ pub struct Indexer {
 
 impl Indexer {
     /// An indexer for this store. Vectors from another pipeline (another model or llama.cpp) are dropped, and their
-    /// files queued again: they'd never compare right with new queries.
-    pub fn new(store: Store, models: PathBuf) -> Result<Self> {
+    /// files queued again: they'd never compare right with new queries. Vector files no partition uses (what a crash
+    /// left, or what was dropped) go.
+    pub fn new(mut store: Store, models: PathBuf) -> Result<Self> {
         if store.adopt_vector_source(&crate::embedder::vector_source())? {
             eprintln!("the index was made by another model or pipeline: everything is indexed again");
         }
         if store.adopt_speech_source(crate::speech::source())? {
             eprintln!("what's said in recordings was written down by another speech model: it's written down again");
         }
+        store.tidy_vectors()?;
         Ok(Self { store, models, embedder: None, media: false })
     }
 

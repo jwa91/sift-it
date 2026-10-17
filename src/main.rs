@@ -25,6 +25,7 @@ mod service;
 mod speech;
 mod store;
 mod term;
+mod vectors;
 
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
@@ -137,7 +138,7 @@ enum Command {
     /// Time the model on texts, pictures and sound (for tuning)
     #[command(hide = true)]
     BenchEmbed,
-    /// Time search over an index of random vectors (for tuning)
+    /// Time search over an index of random vectors in each form of the vectors (for tuning)
     #[command(hide = true)]
     BenchSearch {
         #[arg(long, default_value_t = 200_000)]
@@ -535,6 +536,10 @@ fn index(json: bool, reindex: bool) -> Result<()> {
             Err(error) => eprintln!("what's said in recordings isn't written down: {error:#}"),
         }
     }
+    let written = indexer.store.compact_vectors()?;
+    if !written.is_empty() && !json {
+        eprintln!("wrote the vectors again: {}", written.join(", "));
+    }
     Ok(())
 }
 
@@ -623,7 +628,12 @@ fn status(json: bool) -> Result<()> {
     let engine = match engine {
         None => "not running (the next search starts it)".to_string(),
         Some(engine) => match engine["meaning"].as_str().unwrap_or("") {
-            "ready" => format!("running, {} vectors in memory for search by meaning", engine["vectors"]),
+            "ready" => format!(
+                "running, {} vectors mapped for search by meaning ({}, {} MB of them in memory)",
+                engine["vectors"],
+                engine["scan"].as_str().unwrap_or("?"),
+                engine["resident"].as_u64().unwrap_or(0) >> 20
+            ),
             "loading" => "running, loading the model and the vectors".to_string(),
             "unavailable" => format!("running, by words only: {}", engine["error"].as_str().unwrap_or("no model")),
             _ => "running, nothing loaded (search by meaning loads it)".to_string(),
@@ -644,7 +654,9 @@ fn status(json: bool) -> Result<()> {
     Ok(())
 }
 
-/// An index of random unit vectors (and words), then searches over it.
+/// An index of random unit vectors (and words), then searches over it in each form of the vectors: how long mapping
+/// them takes, the first search (its rows come into memory) and the ones after, and what's in memory then. Mapped rows
+/// aren't in the footprint: macOS can drop them under pressure and read them again.
 fn bench_search(count: usize) -> Result<()> {
     let folder = std::env::temp_dir().join(format!("sift-it-bench-{}", std::process::id()));
     std::fs::create_dir_all(&folder)?;
@@ -695,21 +707,41 @@ fn bench_search(count: usize) -> Result<()> {
         }
     }
     println!("built an index of {count} vectors in {:.1} s", started.elapsed().as_secs_f64());
-    let started = std::time::Instant::now();
-    let mut searcher = search::Searcher::open(&path, config::Ranking::default())?;
-    searcher.load_vectors()?;
-    println!("loaded it in {:.0} ms", started.elapsed().as_secs_f64() * 1000.0);
     let mut query: Vec<f32> = (0..embedder::DIM).map(|i| ((i * 7919) % 101) as f32 - 50.0).collect();
     embedder::normalize(&mut query);
-    for q in ["topic42", "something else entirely"] {
-        let request = search::Request { q: q.into(), mode: None, kinds: vec![], limit: 40, prefix_last: true };
-        searcher.search(&request, Some(&query))?;
+    let request = |q: &str| search::Request { q: q.into(), mode: None, kinds: vec![], limit: 40, prefix_last: true };
+    let ms = |started: std::time::Instant| started.elapsed().as_secs_f64() * 1000.0;
+    for scan in [config::Scan::ExactF32, config::Scan::ExactF16] {
+        let started = std::time::Instant::now();
+        let mut searcher = search::Searcher::open(&path, config::Ranking::default())?;
+        searcher.load_vectors(scan)?;
+        let loaded = ms(started);
+        let started = std::time::Instant::now();
+        searcher.search(&request("topic42"), Some(&query))?;
+        let first = ms(started);
         let started = std::time::Instant::now();
         for _ in 0..20 {
-            searcher.search(&request, Some(&query))?;
+            searcher.search(&request("something else entirely"), Some(&query))?;
         }
-        println!("search {q:?}: {:.1} ms", started.elapsed().as_secs_f64() * 1000.0 / 20.0);
+        println!(
+            "{}: mapped in {loaded:.0} ms, first search {first:.1} ms, then {:.1} ms; {} MB of it in memory, \
+             footprint {} MB",
+            serde_json::json!(scan).as_str().unwrap_or("?"),
+            ms(started) / 20.0,
+            searcher.vectors_resident() >> 20,
+            footprint() >> 20
+        );
     }
     std::fs::remove_dir_all(&folder)?;
     Ok(())
+}
+
+/// The memory macOS counts against this process (its footprint).
+fn footprint() -> u64 {
+    let mut info: libc::rusage_info_v2 = unsafe { std::mem::zeroed() };
+    let buffer = &mut info as *mut libc::rusage_info_v2 as *mut libc::rusage_info_t;
+    if unsafe { libc::proc_pid_rusage(std::process::id() as i32, libc::RUSAGE_INFO_V2, buffer) } != 0 {
+        return 0;
+    }
+    info.ri_phys_footprint
 }

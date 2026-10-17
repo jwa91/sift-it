@@ -1,8 +1,8 @@
 # Design: indexing and search
 
-Status: agreed on 2026-10-17. Steps 1 and 2 of the build order are built: the config, with depth in place of size
-and length limits, and the engine, which still loads its vectors from SQLite until step 3. It replaces the earlier
-design with several indexes.
+Status: agreed on 2026-10-17. Steps 1 to 3 of the build order are built: the config, with depth in place of size
+and length limits, the engine, and the vector store with its two exact forms. It replaces the earlier design with
+several indexes.
 
 The goal is the best search there is for everything on a Mac, by meaning across text, pictures, sound and video, while
 being careful with memory and fast. It has to run well on an 8 GB MacBook and use what a 24 GB M4 has.
@@ -58,19 +58,25 @@ vectors/
 ```
 
 - **Partitions.** Everything outside code is one partition, and each project's code is one of its own. The code of an
-  inactive project is never mapped, and removing a project removes its files.
+  inactive project is never mapped, and removing a project removes its files. Until projects exist (step 6), all code
+  is one partition, `code`.
 - **Three forms, written once.** For every vector the indexer appends the f32 row, the f16 row and the sketch. Every
   value of `search.vectors` then maps a file that's ready to scan, and switching between them costs nothing. The price
   is 1.6 KB of disk per vector on top of the f32 row's 3 KB.
 - **Sketches.** A sketch has one bit per dimension, set when the value is above the partition's mean. SQLite keeps the
-  mean. When it drifts as the partition grows, the indexer rewrites the sketch file from the f32 rows.
+  mean the sketches were made against, and the sums of the rows and their squares. When the partition's mean has moved
+  so far that about 1% of the bits would come out differently, the partition is due its next generation, as below. A
+  sketch file and its mean change together that way, even across a crash. With no dead rows, the next generation's
+  f32 and f16 files are links to the current ones, and only the sketches are written.
 - **Append, then commit.** The indexer appends a segment's rows before it commits the segment in SQLite, so SQLite never
   points at a row that isn't written. A crash between the two leaves rows nothing points at.
 - **Compaction.** Rows of removed segments stay until a quarter of a partition is dead. Then the indexer, when idle,
-  writes the partition's next generation, moves its rows in SQLite in one transaction, and deletes the old files.
+  writes the partition's next generation, moves its rows in SQLite in one transaction, and deletes the old files. A
+  trigger counts a partition's dead rows as their segments go.
 - **No copies.** The engine maps the files read-only and scans them in place. Their pages belong to the files, so under
   memory pressure macOS drops them and reads them again later, where memory it had copied into would be swapped out.
-  Loading reads only the row table from SQLite and the median sample.
+  Loading reads only the row table from SQLite and the median sample. The f16 rows are scanned as they are, converted
+  to f32 in registers.
 
 ## Search
 
