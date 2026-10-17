@@ -49,6 +49,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com); versions follow
 - The limits on file size, PDF pages and recording length.
 - `sift-it search --words-only`: `--by words` replaces it.
 
+### Fixed
+
+- A file can no longer stall indexing for good. Vision sometimes never returns from reading the text on a picture,
+  right after it compiles its models for the Neural Engine (once per binary), and nothing in the process can stop it.
+  A reader that hands over nothing for ten minutes is now stuck: its file is set aside and tried again six hours
+  later, and the indexer makes way for a new process (launchd starts the daemon again; `sift-it index` says to run it
+  again).
+
 ## [0.2.0] — 2026-10-16
 
 ### Added

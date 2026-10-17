@@ -426,6 +426,12 @@ impl Store {
         self.write_file(row, &[], &serde_json::json!({}), false, Some(error))
     }
 
+    /// A file whose reading got stuck (indexer::STUCK): failed like one that couldn't be read, but tried again later
+    /// (requeue_passing), since what got stuck is more likely the framework reading it than the file.
+    pub fn set_aside(&mut self, row: &FileRow, error: &str) -> Result<bool> {
+        self.write_file(row, &[], &serde_json::json!({ "stuck": true }), false, Some(error))
+    }
+
     fn write_file(
         &mut self,
         row: &FileRow,
@@ -634,12 +640,13 @@ impl Store {
         Ok(stale)
     }
 
-    /// Queues again the files where some piece couldn't be embedded (a passing failure, perhaps), once they've had
-    /// `hours` to settle. Returns how many.
-    pub fn requeue_unembedded(&self, hours: f64) -> Result<usize> {
+    /// Queues again the files where some piece couldn't be embedded, or reading got stuck (set_aside): passing
+    /// failures, perhaps. Once they've had `hours` to settle. Returns how many.
+    pub fn requeue_passing(&self, hours: f64) -> Result<usize> {
         Ok(self.conn.execute(
-            "UPDATE files SET state = 'pending' WHERE state = 'done'
-             AND json_extract(info, '$.unembedded') > 0 AND indexed_at < ?1",
+            "UPDATE files SET state = 'pending' WHERE indexed_at < ?1
+             AND ((state = 'done' AND json_extract(info, '$.unembedded') > 0)
+                  OR (state = 'failed' AND json_extract(info, '$.stuck')))",
             [now() - hours * 3600.0],
         )?)
     }

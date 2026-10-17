@@ -516,7 +516,13 @@ fn index(json: bool, reindex: bool) -> Result<()> {
     };
     let sync = indexer.sync(&config)?;
     report(sync);
-    indexer.index_pending(&config, &mut report, &|| false, &mut Vec::new)?;
+    if let Err(error) = indexer.index_pending(&config, &mut report, &|| false, &mut Vec::new) {
+        // This process can't go on (indexer::Stuck); a new one can, with the file set aside.
+        if error.is::<indexer::Stuck>() {
+            bail!("{error}. Run `sift-it index` again for the rest");
+        }
+        return Err(error);
+    }
     // Then what's said in recordings and videos, when the speech model is there.
     if !indexer.store.transcripts_pending(1)?.is_empty() {
         match speech::Transcriber::start() {

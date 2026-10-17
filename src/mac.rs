@@ -189,6 +189,10 @@ pub fn save_jpeg(image: &CGImage, path: &Path, quality: f64) -> Result<()> {
 }
 
 /// The text Vision reads in a picture, line by line from the top.
+///
+/// Vision reads text in one picture at a time per process, whichever thread asks. The first time a binary reads text,
+/// it compiles its model for the Neural Engine, which can take a few minutes, and now and then it never returns from
+/// that request, nor from any after it (indexer::STUCK).
 pub fn recognize_text(image: &CGImage) -> Result<String> {
     let request = unsafe { VNRecognizeTextRequest::init(VNRecognizeTextRequest::alloc()) };
     request.setRecognitionLevel(VNRequestTextRecognitionLevel::Accurate);

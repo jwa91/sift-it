@@ -12,10 +12,10 @@
 //!   SIGTERM  stop (what isn't finished stays queued)
 //!
 //! One runs at a time (daemon.lock). With `indexing.on_battery` off it waits for a charger; in Low Power Mode it always
-//! waits.
+//! waits. When a reader gets stuck (indexer::Stuck), it exits, and launchd starts a new one.
 
 use crate::config::{self, Config};
-use crate::indexer::{Event, Indexer};
+use crate::indexer::{Event, Indexer, Stuck};
 use crate::power;
 use crate::speech::Transcriber;
 use crate::store::{self, Store};
@@ -426,8 +426,14 @@ pub fn run() -> Result<()> {
                     let mut take = || changes.take();
                     if let Err(error) = indexer.index_pending(&config, &mut events, &stop, &mut take) {
                         log(&format!("indexing stopped: {error:#}"));
-                        changes.rescan = true;
                         reporter.status.last_error = Some(format!("{error:#}"));
+                        if error.is::<Stuck>() {
+                            // The stuck thread can't be stopped, and what it's stuck in stays stuck in this process:
+                            // it ends, and launchd starts a new daemon (KeepAlive), which goes on with the rest.
+                            reporter.set("stopped", None);
+                            return Err(error);
+                        }
+                        changes.rescan = true;
                         // Not straight back into the same failure.
                         sleep_interruptibly(Duration::from_secs(30));
                     }

@@ -10,6 +10,9 @@
 //! While it runs, files that appear go to the front of the queue (`changes`): a new screenshot is searchable in a
 //! second or two even while a long video is being read.
 //!
+//! A reader that hands over nothing for STUCK is stuck in a framework call that won't return, and no thread can be
+//! stopped from outside: its file is set aside, and the run ends with `Stuck`, for a new process to go on.
+//!
 //! `transcribe_next` is the second stage, for recordings and videos the first pass is done with: what's said in them,
 //! written down a chunk at a time (speech.rs), each chunk's passages embedded and stored as soon as they're back.
 
@@ -92,6 +95,30 @@ enum Message {
 /// Segments a file keeps before they're written as a part (Store::write_part): about 2.5 MB of vectors.
 const PART: usize = 256;
 
+/// A reader that hands over nothing for this long is stuck. Vision's text recognition can be: right after it compiles
+/// its models for the Neural Engine (once per binary, the first time it reads text), it sometimes waits forever, and
+/// cancelling the request doesn't help. That compile is also the longest real wait: almost five minutes for one
+/// picture on an 8 GB Mac under memory pressure, and a reader queued behind it waits too (Vision reads text in one
+/// picture at a time). Time asleep doesn't count: Instant stands still while the Mac sleeps.
+const STUCK: Duration = if cfg!(test) { Duration::from_secs(1) } else { Duration::from_secs(600) };
+
+/// The file a worker's reader is on, and since when it's been at it without handing over a piece.
+type Busy = Arc<Mutex<Option<(i64, Instant)>>>;
+
+/// A reader got stuck (STUCK) on this file. It's set aside (Store::set_aside), and the run ends: the thread can't be
+/// stopped, and what it's stuck in stays stuck for this process (Vision reads no more text in it). A new process goes
+/// on with the rest.
+#[derive(Debug)]
+pub struct Stuck(pub PathBuf);
+
+impl std::fmt::Display for Stuck {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "reading {} got stuck: nothing came of it in {} minutes", self.0.display(), STUCK.as_secs() / 60)
+    }
+}
+
+impl std::error::Error for Stuck {}
+
 /// A file being put together from its pieces.
 struct Assembly {
     row: FileRow,
@@ -145,8 +172,8 @@ impl Indexer {
         let found_paths: HashSet<&PathBuf> = crawl.found.iter().map(|f| &f.path).collect();
         let transaction = self.store.conn.unchecked_transaction()?;
         let (added, mut changed) = self.queue_found(&crawl.found, &existing)?;
-        // Files where some piece couldn't be embedded: once in a while, try them again.
-        changed += self.store.requeue_unembedded(6.0)?;
+        // Files where some piece couldn't be embedded, or reading got stuck: once in a while, try them again.
+        changed += self.store.requeue_passing(6.0)?;
         let mut removed = 0;
         for (path, row) in &existing {
             if found_paths.contains(path) || crawl.unavailable.iter().any(|root| path.starts_with(root)) {
@@ -248,21 +275,24 @@ impl Indexer {
         // of pieces (a long recording) can't keep a short one waiting behind it. The doorbell wakes this thread.
         let (doorbell, door) = sync_channel::<()>(1);
         let workers = std::thread::available_parallelism().map(|n| (n.get() / 3).clamp(2, 4)).unwrap_or(2);
-        let mut threads = Vec::new();
         let mut receivers = Vec::new();
+        let mut busy: Vec<Busy> = Vec::new();
         for _ in 0..workers {
             let (sender, receiver) = sync_channel::<Message>(4);
             receivers.push(receiver);
+            let worker_busy = Arc::new(Mutex::new(None));
+            busy.push(worker_busy.clone());
             let queue = queue.clone();
             let finished = finished.clone();
             let doorbell = doorbell.clone();
             let reading = reading.clone();
-            threads.push(std::thread::spawn(move || {
+            std::thread::spawn(move || {
                 let send = |message: Message| -> Result<()> {
                     sender.send(message).map_err(|_| anyhow!("indexing stopped"))?;
                     let _ = doorbell.try_send(());
                     Ok(())
                 };
+                let mark = |id: Option<i64>| *worker_busy.lock().unwrap() = id.map(|id| (id, Instant::now()));
                 while !finished.load(Ordering::Relaxed) {
                     let Some(row) = queue.lock().unwrap().pop_front() else {
                         // More may come (a file that appeared): wait until the run is over.
@@ -275,18 +305,26 @@ impl Indexer {
                     }
                     // Read with this run's values. A file queued for other ones meanwhile isn't written (Store::write_file).
                     let settings = reading.resolve(&row.path, row.kind);
+                    mark(Some(id));
                     // A reader that panics (a file no one expected) is a file that couldn't be read, not a lost run.
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         objc2::rc::autoreleasepool(|_| {
-                            readers::read(&row.path, row.kind, &settings, &mut |piece| send(Message::Piece(id, piece)))
+                            readers::read(&row.path, row.kind, &settings, &mut |piece| {
+                                // While a piece waits for this thread to take it, the reader isn't the one stuck.
+                                mark(None);
+                                let sent = send(Message::Piece(id, piece));
+                                mark(Some(id));
+                                sent
+                            })
                         })
                     }))
                     .unwrap_or_else(|_| Err(anyhow!("the reader crashed on it")));
+                    mark(None);
                     if send(Message::Done(id, result)).is_err() {
                         break;
                     }
                 }
-            }));
+            });
         }
         drop(doorbell);
 
@@ -321,6 +359,18 @@ impl Indexer {
                 if run.completed == known.len() {
                     return Ok(());
                 }
+                let stuck =
+                    busy.iter().find_map(|busy| busy.lock().unwrap().filter(|(_, since)| since.elapsed() >= STUCK));
+                if let Some((id, _)) = stuck {
+                    let row = &known[&id];
+                    let error = format!("reading it got stuck: nothing came of it in {} minutes", STUCK.as_secs() / 60);
+                    // Parts written of it go. It's tried again later (Store::requeue_passing).
+                    if self.store.set_aside(row, &error)? {
+                        run.failed += 1;
+                        on_event(Event::Failed { path: row.path.display().to_string(), error });
+                    }
+                    return Err(Stuck(row.path.clone()).into());
+                }
                 // One message from each worker that has one, in turn.
                 let mut received = false;
                 for offset in 0..receivers.len() {
@@ -348,11 +398,10 @@ impl Indexer {
                 }
             }
         })();
+        // Nothing waits for the workers: each stops at its next piece (its channel is gone) or when it finds the run
+        // over. One stuck in a reader never would.
         finished.store(true, Ordering::Relaxed);
         drop(receivers);
-        for thread in threads {
-            let _ = thread.join();
-        }
         on_event(Event::Finished {
             indexed: run.indexed,
             failed: run.failed,
@@ -621,4 +670,58 @@ fn is_changed(row: &FileRow, found: &Found) -> bool {
         || (row.modified - found.modified).abs() > 0.001
         || row.kind != found.kind
         || row.reading != found.reading()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Depth;
+    use std::os::unix::ffi::OsStrExt;
+    use std::path::Path;
+
+    /// A reader that never hands over anything (a pipe no one writes to: opening it waits for a writer) gets its file
+    /// set aside and ends the run, and the other files are read meanwhile.
+    #[test]
+    fn a_stuck_reader_sets_its_file_aside_and_ends_the_run() {
+        let folder = std::env::temp_dir().join(format!("sift-it-test-stuck-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&folder);
+        std::fs::create_dir_all(&folder).unwrap();
+        let (stuck, fine) = (folder.join("stuck.txt"), folder.join("fine.txt"));
+        std::fs::write(&fine, "a few words to find").unwrap();
+        let pipe = std::ffi::CString::new(stuck.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(pipe.as_ptr(), 0o600) }, 0);
+
+        let mut config = Config::default();
+        config.reading.all.depth = Some(Depth::Words);
+        let store = Store::open(&folder.join("index.sqlite")).unwrap();
+        for path in [&stuck, &fine] {
+            let settings = config.reading.resolve(path, Kind::Plaintext);
+            let found = Found { path: path.clone(), kind: Kind::Plaintext, size: 1, modified: 1.0, settings };
+            store.queue(&found, None, 0.0).unwrap();
+        }
+        let mut indexer = Indexer::new(store, folder.join("models")).unwrap();
+        let mut failed = Vec::new();
+        let mut events = |event| {
+            if let Event::Failed { path, .. } = event {
+                failed.push(path);
+            }
+        };
+        let outcome = indexer.index_pending(&config, &mut events, &|| false, &mut Vec::new);
+
+        assert!(outcome.unwrap_err().is::<Stuck>());
+        assert_eq!(failed, [stuck.display().to_string()]);
+        let state = |path: &Path| -> String {
+            let path = path.to_string_lossy();
+            indexer.store.conn.query_row("SELECT state FROM files WHERE path = ?1", [path], |row| row.get(0)).unwrap()
+        };
+        assert_eq!(state(&stuck), "failed");
+        assert_eq!(state(&fine), "done");
+        // It's tried again later.
+        assert_eq!(indexer.store.requeue_passing(0.0).unwrap(), 1);
+        assert_eq!(state(&stuck), "pending");
+
+        // A writer lets the reader go: it finds the run over.
+        drop(std::fs::OpenOptions::new().write(true).open(&stuck).unwrap());
+        std::fs::remove_dir_all(&folder).unwrap();
+    }
 }
