@@ -16,6 +16,8 @@ recordings, videos, and code. DigUp also includes a CLI.
 - **Rust implementation:** the search engine, file readers, and background indexer use Rust.
 - **Terminal interface:** search interactively, preview results, and open files at the matching page, time, or line.
 - **Script integration:** use JSON output or pass search result paths to other commands.
+- **One engine for every search:** a resident process answers the terminal, scripts, and Raycast alike. It loads the
+  model and the vectors for the first search by meaning and keeps them, and a search by words loads nothing.
 - **Raycast integration:** a separate TypeScript extension uses `sift-it serve` for searches and previews.
 - **Ranking changes:** account for file length and give ordinary words less weight than numbers, code searches,
   and quoted phrases.
@@ -59,7 +61,7 @@ sift-it service install
 sift-it search "the warranty for the washing machine"
 ```
 
-The background indexer starts at login and updates the index when files change.
+The background indexer and the search engine start at login. The indexer updates the index when files change.
 macOS can request access to Documents, Desktop, or Downloads. Allow access when macOS requests it.
 You can also grant Full Disk Access in System Settings → Privacy & Security.
 
@@ -92,6 +94,25 @@ sift-it search "annual maintenance" | while IFS= read -r result_path; do open "$
 
 Quoted phrases require matching words together and in order. Matching ignores case and accents.
 Piped searches print one path per line. JSON output includes scores and matching locations.
+
+### The engine
+
+Every search goes to one resident process, the engine. It starts at login, or with the first search when it isn't
+running, and holds nothing until it's needed. A search is by `meaning` or by `words`:
+
+- **By meaning**, the default, uses the model and the vectors. The first such search loads them, which takes a few
+  seconds, and they stay loaded for every search after it.
+- **By words** uses only the full-text index. It needs no model and holds almost nothing in memory.
+
+```sh
+sift-it search "INV-2024-0113" --by words
+sift-it config search.mode words
+sift-it engine unload
+```
+
+`sift-it config search.mode` sets the default, and `--by` overrides it for one search. `sift-it engine unload` lets the
+model and the vectors go until the next search by meaning, and `sift-it status` shows what the engine holds. A new
+version of sift-it replaces a running engine of an older one at its first search.
 `sift-it open <n>` opens a result from the last search.
 PDF results open in Preview at their page. Recordings and videos open in QuickTime at their matching time.
 Text and code results open at their matching line in a supported editor.
@@ -112,9 +133,9 @@ Code appears in `code:` searches or when you select the code filter.
 [Sift It for Raycast](https://github.com/jwa91/sift-it-for-raycast) provides search, folder management, and indexing status.
 The extension uses the same sift-it index and model.
 
-Other programs can use `sift-it serve`. It accepts JSON requests through stdin and returns JSON replies through stdout.
-It keeps vectors and the query encoder in memory while the interface remains open.
-See [src/serve.rs](src/serve.rs) for the request and reply formats.
+Other programs can use `sift-it serve`. It accepts JSON requests through stdin and returns JSON replies through stdout,
+relayed to the engine over its socket, and it renders previews itself.
+See [src/engine.rs](src/engine.rs) and [src/serve.rs](src/serve.rs) for the request and reply formats.
 
 ## Supported files
 
@@ -182,7 +203,8 @@ sift-it selftest
 Run `sift-it --help` for all commands and options.
 
 Data lives in `~/Library/Application Support/Sift It`, or the folder specified by `SIFT_IT_HOME`.
-This folder contains `config.json`, `index.sqlite`, `status.json`, `indexer.log`, `models/`, and `previews/`.
+This folder contains `config.json`, `index.sqlite`, `status.json`, `indexer.log`, `engine.log`, `engine.sock`,
+`models/`, and `previews/`.
 `SIFT_IT_SPEECH_MODEL` points at another copy of the speech model.
 `brew uninstall --zap sift-it` removes the installation and its data.
 
@@ -203,6 +225,7 @@ sift-it config indexing.on_battery false
 | `sources` | folders, ignore patterns, the file types of each kind, whether code is read | at the next sync |
 | `reading` | how deep and how files are read, per kind, file type, and folder | the files it affects are read again |
 | `ranking` | the constants search ranks by | at the next search |
+| `search` | whether a search is by meaning or by words, unless it says | at the next search |
 | `indexing` | battery and timing of the background indexer | at once |
 | `log` | the size of the indexer's log | at once |
 

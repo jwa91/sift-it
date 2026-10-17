@@ -1,7 +1,8 @@
 # Design: indexing and search
 
-Status: agreed on 2026-10-17. Step 1 of the build order is built, with depth in place of size and length limits. It
-replaces the earlier design with several indexes.
+Status: agreed on 2026-10-17. Steps 1 and 2 of the build order are built: the config, with depth in place of size
+and length limits, and the engine, which still loads its vectors from SQLite until step 3. It replaces the earlier
+design with several indexes.
 
 The goal is the best search there is for everything on a Mac, by meaning across text, pictures, sound and video, while
 being careful with memory and fast. It has to run well on an 8 GB MacBook and use what a 24 GB M4 has.
@@ -79,9 +80,13 @@ One resident process, the engine, answers every search.
   must not wait for a charger.
 - It speaks today's JSON lines over a Unix socket in the data folder. `sift-it serve` becomes a relay between stdio and
   that socket, and starts the engine when it isn't running. `sift-it search` and the TUI go through the engine too.
-- The engine reports its version when a client connects. When it differs from the relay's, the relay stops the engine
-  and starts the installed one.
-- Results carry a path, kind and location. Opening them is up to the front end.
+- The engine reports its build when a client connects: its version and the binary it runs from, so a new build while
+  developing counts too. When it differs from the client's, the client stops the engine and starts its own, through
+  launchd when the LaunchAgent runs that binary.
+- Results carry a path, kind and location. Opening them is up to the front end, and so are previews: `serve` renders
+  them, since drawing a video frame or a PDF page is reader code, which stays out of the engine.
+- While the model and the vectors load, a search by meaning is answered by words, and an event says when meaning is
+  there. A request can say `wait` instead, as `sift-it search` does.
 
 ### Modes
 

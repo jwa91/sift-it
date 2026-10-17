@@ -17,7 +17,7 @@
 //! note that mentions steam and a train doesn't outrank a photo of a steam train. Words also pick which of a file's
 //! segments a result opens at, between segments the meaning scores about the same.
 
-use crate::config::Ranking;
+use crate::config::{Mode, Ranking};
 use crate::crawl::Kind;
 use crate::embedder::DIM;
 use crate::store::{Segment, Store, blob_to_vector};
@@ -50,10 +50,13 @@ unsafe extern "C" {
 const ROW_MAJOR: i32 = 101;
 const NO_TRANS: i32 = 111;
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Request {
     #[serde(default)]
     pub q: String,
+    /// By words or by meaning (config.json's `search.mode` when not said).
+    #[serde(default)]
+    pub mode: Option<Mode>,
     /// Only these kinds of file (all when empty).
     #[serde(default)]
     pub kinds: Vec<Kind>,
@@ -68,7 +71,7 @@ fn default_limit() -> usize {
     40
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Hit {
     pub path: String,
     pub name: String,
@@ -96,7 +99,7 @@ pub struct Hit {
     pub info: serde_json::Value,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Response {
     pub hits: Vec<Hit>,
     /// Meaning was part of this search (false: words only).
@@ -106,18 +109,115 @@ pub struct Response {
 
 pub struct Searcher {
     store: Store,
+    ranking: Ranking,
+    file_kinds: HashMap<i64, Kind>,
+    data_version: i64,
+    /// The index's vectors come from the pipeline the query encoder belongs to (else: words only, until reindexed).
+    compatible: bool,
+    /// The vectors, for searches by meaning: empty until loaded (load_vectors, set_vectors).
+    vectors: Vectors,
+    loaded: bool,
+    /// What each vector's lift is lowered by for the length of its file (`ranking.length_penalty`).
+    penalties: Vec<f32>,
+}
+
+/// The index's vectors in memory, in the order they were added: what a search by meaning scans.
+#[derive(Default)]
+pub struct Vectors {
     ids: Vec<i64>,
     rows: HashMap<i64, usize>,
     files: Vec<i64>,
-    /// What each vector's lift is lowered by for the length of its file (`ranking.length_penalty`).
-    penalties: Vec<f32>,
-    ranking: Ranking,
     matrix: Vec<f32>,
-    file_kinds: HashMap<i64, Kind>,
-    data_version: i64,
     max_id: i64,
-    /// The index's vectors come from the pipeline the query encoder belongs to (else: words only, until reindexed).
-    compatible: bool,
+}
+
+impl Vectors {
+    /// All the vectors in the index.
+    pub fn load(store: &Store) -> Result<Self> {
+        let mut vectors = Self::default();
+        vectors.catch_up(store)?;
+        Ok(vectors)
+    }
+
+    pub fn len(&self) -> usize {
+        self.ids.len()
+    }
+
+    /// Catches up with the indexer's commits: only the new vectors when nothing was removed, all of them otherwise.
+    fn catch_up(&mut self, store: &Store) -> Result<()> {
+        // Segment ids are never reused, so what's loaded is still right unless some of it was deleted.
+        let kept: i64 = store.conn.query_row(
+            "SELECT COUNT(*) FROM segments WHERE vector IS NOT NULL AND id <= ?1",
+            [self.max_id],
+            |row| row.get(0),
+        )?;
+        if kept as usize != self.ids.len() {
+            self.drop_deleted(store)?;
+        }
+        let mut statement = store
+            .conn
+            .prepare("SELECT id, file_id, vector FROM segments WHERE vector IS NOT NULL AND id > ?1 ORDER BY id")?;
+        let mut rows = statement.query([self.max_id])?;
+        while let Some(row) = rows.next()? {
+            let id: i64 = row.get(0)?;
+            let blob = row.get_ref(2)?.as_blob()?;
+            if blob.len() != DIM * 4 {
+                continue;
+            }
+            self.rows.insert(id, self.ids.len());
+            self.ids.push(id);
+            self.files.push(row.get(1)?);
+            blob_to_vector(blob, &mut self.matrix);
+            self.max_id = self.max_id.max(id);
+        }
+        Ok(())
+    }
+
+    /// Drops the vectors whose segments are gone (a file changed or left), keeping the rest in place.
+    fn drop_deleted(&mut self, store: &Store) -> Result<()> {
+        let mut statement = store.conn.prepare("SELECT id FROM segments WHERE vector IS NOT NULL AND id <= ?1")?;
+        let present: std::collections::HashSet<i64> =
+            statement.query_map([self.max_id], |row| row.get(0))?.collect::<std::result::Result<_, _>>()?;
+        let mut kept = 0;
+        for row in 0..self.ids.len() {
+            if present.contains(&self.ids[row]) {
+                if kept != row {
+                    self.ids[kept] = self.ids[row];
+                    self.files[kept] = self.files[row];
+                    self.matrix.copy_within(row * DIM..(row + 1) * DIM, kept * DIM);
+                }
+                kept += 1;
+            }
+        }
+        self.ids.truncate(kept);
+        self.files.truncate(kept);
+        self.matrix.truncate(kept * DIM);
+        self.rows = self.ids.iter().enumerate().map(|(row, &id)| (id, row)).collect();
+        Ok(())
+    }
+
+    /// Cosine similarity of every vector with the query (vectors are normalized).
+    fn cosines(&self, query: &[f32]) -> Vec<f32> {
+        let n = self.ids.len();
+        let mut scores = vec![0.0f32; n];
+        unsafe {
+            cblas_sgemv(
+                ROW_MAJOR,
+                NO_TRANS,
+                n as i32,
+                DIM as i32,
+                1.0,
+                self.matrix.as_ptr(),
+                DIM as i32,
+                query.as_ptr(),
+                1,
+                0.0,
+                scores.as_mut_ptr(),
+                1,
+            );
+        }
+        scores
+    }
 }
 
 /// "code: retry with backoff": a search of code, and only of code. Without the prefix (or the code filter), a search
@@ -174,41 +274,62 @@ struct Candidate {
 }
 
 impl Searcher {
-    /// A searcher of the index at `path`, ranking by `ranking` (config.json's).
+    /// A searcher of the index at `path`, ranking by `ranking` (config.json's). It searches by words until vectors
+    /// are loaded.
     pub fn open(path: &Path, ranking: Ranking) -> Result<Self> {
         let store = Store::open_readonly(path)?;
         let mut searcher = Self {
             store,
-            ids: Vec::new(),
-            rows: HashMap::new(),
-            files: Vec::new(),
-            penalties: Vec::new(),
             ranking,
-            matrix: Vec::new(),
             file_kinds: HashMap::new(),
             data_version: -1,
-            max_id: 0,
             compatible: true,
+            vectors: Vectors::default(),
+            loaded: false,
+            penalties: Vec::new(),
         };
         searcher.refresh()?;
         Ok(searcher)
     }
 
+    /// Loads the index's vectors, for searches by meaning.
+    pub fn load_vectors(&mut self) -> Result<()> {
+        let vectors = Vectors::load(&self.store)?;
+        self.set_vectors(vectors)
+    }
+
+    /// Takes vectors loaded elsewhere (on another connection, off the searching thread), and catches them up with
+    /// what the indexer committed meanwhile.
+    pub fn set_vectors(&mut self, mut vectors: Vectors) -> Result<()> {
+        vectors.catch_up(&self.store)?;
+        self.penalties = length_penalties(&vectors.files, &self.ranking);
+        self.vectors = vectors;
+        self.loaded = true;
+        Ok(())
+    }
+
+    /// Lets the vectors go: searches are by words until they're loaded again.
+    pub fn unload(&mut self) {
+        self.vectors = Vectors::default();
+        self.penalties = Vec::new();
+        self.loaded = false;
+    }
+
     /// Ranks by these values from the next search on.
     pub fn set_ranking(&mut self, ranking: Ranking) {
-        self.penalties = length_penalties(&self.files, &ranking);
+        self.penalties = length_penalties(&self.vectors.files, &ranking);
         self.ranking = ranking;
     }
 
     pub fn vector_count(&self) -> usize {
-        self.ids.len()
+        self.vectors.len()
     }
 
     pub fn store(&self) -> &Store {
         &self.store
     }
 
-    /// Catches up with the indexer's commits: only the new vectors when nothing was removed, all of them otherwise.
+    /// Catches up with the indexer's commits: the files' kinds, and the vectors when they're loaded.
     pub fn refresh(&mut self) -> Result<bool> {
         let version = self.store.data_version()?;
         if version == self.data_version {
@@ -217,65 +338,18 @@ impl Searcher {
         self.data_version = version;
         self.compatible =
             self.store.meta("vector_source")?.is_none_or(|source| source == crate::embedder::vector_source());
-        // Segment ids are never reused, so what's loaded is still right unless some of it was deleted.
-        let kept: i64 = self.store.conn.query_row(
-            "SELECT COUNT(*) FROM segments WHERE vector IS NOT NULL AND id <= ?1",
-            [self.max_id],
-            |row| row.get(0),
-        )?;
-        if kept as usize != self.ids.len() {
-            self.drop_deleted()?;
-        }
-        let mut statement = self
-            .store
-            .conn
-            .prepare("SELECT id, file_id, vector FROM segments WHERE vector IS NOT NULL AND id > ?1 ORDER BY id")?;
-        let mut rows = statement.query([self.max_id])?;
-        while let Some(row) = rows.next()? {
-            let id: i64 = row.get(0)?;
-            let blob = row.get_ref(2)?.as_blob()?;
-            if blob.len() != DIM * 4 {
-                continue;
-            }
-            self.rows.insert(id, self.ids.len());
-            self.ids.push(id);
-            self.files.push(row.get(1)?);
-            blob_to_vector(blob, &mut self.matrix);
-            self.max_id = self.max_id.max(id);
-        }
-        drop(rows);
-        drop(statement);
         let mut statement = self.store.conn.prepare("SELECT id, kind FROM files")?;
         self.file_kinds = statement
             .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))?
             .filter_map(|row| row.ok())
             .filter_map(|(id, kind)| Kind::parse(&kind).map(|kind| (id, kind)))
             .collect();
-        self.penalties = length_penalties(&self.files, &self.ranking);
-        Ok(true)
-    }
-
-    /// Drops the loaded vectors whose segments are gone (a file changed or left), keeping the rest in place.
-    fn drop_deleted(&mut self) -> Result<()> {
-        let mut statement = self.store.conn.prepare("SELECT id FROM segments WHERE vector IS NOT NULL AND id <= ?1")?;
-        let present: std::collections::HashSet<i64> =
-            statement.query_map([self.max_id], |row| row.get(0))?.collect::<std::result::Result<_, _>>()?;
-        let mut kept = 0;
-        for row in 0..self.ids.len() {
-            if present.contains(&self.ids[row]) {
-                if kept != row {
-                    self.ids[kept] = self.ids[row];
-                    self.files[kept] = self.files[row];
-                    self.matrix.copy_within(row * DIM..(row + 1) * DIM, kept * DIM);
-                }
-                kept += 1;
-            }
+        drop(statement);
+        if self.loaded {
+            self.vectors.catch_up(&self.store)?;
+            self.penalties = length_penalties(&self.vectors.files, &self.ranking);
         }
-        self.ids.truncate(kept);
-        self.files.truncate(kept);
-        self.matrix.truncate(kept * DIM);
-        self.rows = self.ids.iter().enumerate().map(|(row, &id)| (id, row)).collect();
-        Ok(())
+        Ok(true)
     }
 
     pub fn search(&mut self, request: &Request, query: Option<&[f32]>) -> Result<Response> {
@@ -293,10 +367,11 @@ impl Searcher {
         let wanted_file = |file: i64| self.file_kinds.get(&file).is_some_and(|&kind| wanted(kind));
 
         // Meaning: every vector's cosine, and the query's median.
-        let query = query.filter(|_| self.compatible);
+        let query = query.filter(|_| self.compatible && self.loaded);
+        let vectors = &self.vectors;
         let (cosines, median) = match query {
-            Some(query) if !self.ids.is_empty() => {
-                let cosines = self.cosines(query);
+            Some(query) if vectors.len() > 0 => {
+                let cosines = vectors.cosines(query);
                 let n = cosines.len() as f32;
                 let prior = ranking.prior_median * ranking.prior_weight;
                 let median = (median(&cosines) * n + prior) / (n + ranking.prior_weight);
@@ -304,10 +379,11 @@ impl Searcher {
             }
             _ => (Vec::new(), 0.0),
         };
-        let lift_of = |segment: i64| self.rows.get(&segment).and_then(|&row| cosines.get(row)).map(|c| c - median);
+        let lift_of = |segment: i64| vectors.rows.get(&segment).and_then(|&row| cosines.get(row)).map(|c| c - median);
         // The lift less what the length of the segment's file explains: what results are ranked and shown by.
         let fit_at = |row: usize| cosines[row] - median - self.penalties.get(row).copied().unwrap_or(0.0);
-        let fit_of = |segment: i64| self.rows.get(&segment).filter(|&&row| row < cosines.len()).map(|&row| fit_at(row));
+        let fit_of =
+            |segment: i64| vectors.rows.get(&segment).filter(|&&row| row < cosines.len()).map(|&row| fit_at(row));
 
         let mut candidates: HashMap<i64, Candidate> = HashMap::new();
         let words = words_of(request.text());
@@ -327,17 +403,17 @@ impl Searcher {
             // The kinds asked for, and at most `per_file` of a file, before the 5000 are taken.
             let mut shown: Vec<(usize, f32)> = (0..cosines.len())
                 .map(|i| (i, fit_at(i)))
-                .filter(|&(i, fit)| fit >= ranking.shown_lift && wanted_file(self.files[i]))
+                .filter(|&(i, fit)| fit >= ranking.shown_lift && wanted_file(vectors.files[i]))
                 .collect();
             shown.sort_by(|a, b| b.1.total_cmp(&a.1));
             let mut per_file: HashMap<i64, usize> = HashMap::new();
             let taken = shown.into_iter().filter(|&(i, _)| {
-                let count = per_file.entry(self.files[i]).or_default();
+                let count = per_file.entry(vectors.files[i]).or_default();
                 *count += 1;
                 *count <= ranking.per_file
             });
             for (i, fit) in taken.take(5000) {
-                candidates.insert(self.ids[i], Candidate { segment: self.ids[i], score: fit, words: false });
+                candidates.insert(vectors.ids[i], Candidate { segment: vectors.ids[i], score: fit, words: false });
             }
         }
         if phrases.is_empty() && !words.is_empty() {
@@ -353,8 +429,8 @@ impl Searcher {
         // Group by file, keeping the segments close to each file's best.
         let mut by_file: HashMap<i64, Vec<Candidate>> = HashMap::new();
         for candidate in candidates.into_values() {
-            let file = match self.rows.get(&candidate.segment) {
-                Some(&row) => self.files[row],
+            let file = match vectors.rows.get(&candidate.segment) {
+                Some(&row) => vectors.files[row],
                 None => match self.file_of(candidate.segment)? {
                     Some(file) => file,
                     None => continue,
@@ -464,29 +540,6 @@ impl Searcher {
             }
         }
         Ok(Response { hits, meaning: false, ms: 0.0 })
-    }
-
-    /// Cosine similarity of every vector with the query (vectors are normalized).
-    fn cosines(&self, query: &[f32]) -> Vec<f32> {
-        let n = self.ids.len();
-        let mut scores = vec![0.0f32; n];
-        unsafe {
-            cblas_sgemv(
-                ROW_MAJOR,
-                NO_TRANS,
-                n as i32,
-                DIM as i32,
-                1.0,
-                self.matrix.as_ptr(),
-                DIM as i32,
-                query.as_ptr(),
-                1,
-                0.0,
-                scores.as_mut_ptr(),
-                1,
-            );
-        }
-        scores
     }
 
     /// Segments with every word, best first (FTS5's bm25).
@@ -749,7 +802,7 @@ mod tests {
         drop(store);
         let mut searcher = Searcher::open(&index.0, Ranking::default()).unwrap();
         let search = |searcher: &mut Searcher, kinds: Vec<Kind>| {
-            let request = Request { q: "needle".into(), kinds, limit: 10, prefix_last: false };
+            let request = Request { q: "needle".into(), mode: None, kinds, limit: 10, prefix_last: false };
             searcher.search(&request, None).unwrap().hits.into_iter().map(|hit| hit.path).collect::<Vec<_>>()
         };
         assert_eq!(search(&mut searcher, vec![Kind::Plaintext]), vec!["/notes/note.txt"]);

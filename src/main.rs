@@ -1,8 +1,10 @@
 mod av;
+mod client;
 mod config;
 mod crawl;
 mod daemon;
 mod embedder;
+mod engine;
 mod estimate;
 mod eval;
 mod finder;
@@ -26,7 +28,7 @@ mod term;
 
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
-use config::Config;
+use config::{Config, Mode};
 use crawl::Kind;
 use std::path::PathBuf;
 
@@ -72,9 +74,9 @@ enum Command {
         kind: Vec<String>,
         #[arg(short = 'n', default_value_t = 10)]
         limit: usize,
-        /// Exact words only, without the model
-        #[arg(long)]
-        words_only: bool,
+        /// By words or by meaning (config.json's `search.mode` when not said)
+        #[arg(long, value_enum)]
+        by: Option<Mode>,
         #[arg(long)]
         json: bool,
     },
@@ -94,11 +96,16 @@ enum Command {
         #[arg(short, long)]
         reveal: bool,
     },
-    /// Answer searches over stdin/stdout (JSON lines), for front ends
+    /// Relay a front end's searches (JSON lines over stdin/stdout) to the engine, and make its previews
     Serve,
+    /// The engine that answers every search: run it (launchd does), or stop it or let its model go
+    Engine {
+        #[command(subcommand)]
+        action: Option<EngineAction>,
+    },
     /// Keep the index up to date in the background, watching the folders for changes
     Daemon,
-    /// The background indexer as a LaunchAgent (starts at login)
+    /// The background indexer and the engine as LaunchAgents (they start at login)
     Service {
         #[command(subcommand)]
         action: ServiceAction,
@@ -159,6 +166,14 @@ enum FolderAction {
 }
 
 #[derive(Subcommand)]
+enum EngineAction {
+    /// Stop it (the next search starts it again)
+    Stop,
+    /// Let the model and the vectors go, until a search by meaning needs them
+    Unload,
+}
+
+#[derive(Subcommand)]
 enum ServiceAction {
     /// Install and start it
     Install,
@@ -166,7 +181,7 @@ enum ServiceAction {
     Uninstall,
     /// Whether it's installed and running
     Status,
-    /// Print the LaunchAgent plist it would install
+    /// Print the LaunchAgent plists it would install
     Plist,
 }
 
@@ -220,9 +235,7 @@ fn run(cli: Cli) -> Result<()> {
             Ok(())
         }
         Command::Index { json, reindex } => index(json, reindex),
-        Command::Search { words, kind, limit, words_only, json } => {
-            search_once(&words.join(" "), &kind, limit, words_only, json)
-        }
+        Command::Search { words, kind, limit, by, json } => search_once(&words.join(" "), &kind, limit, by, json),
         Command::Open { target, at, reveal } => {
             let place = match target.parse::<usize>() {
                 Ok(number) if !std::path::Path::new(&target).exists() => open::recall(number)?,
@@ -231,14 +244,27 @@ fn run(cli: Cli) -> Result<()> {
             println!("{}", open::open(&place, reveal)?);
             Ok(())
         }
-        Command::Serve => serve::serve(&config::index_path(), &config::models_dir()),
+        Command::Serve => serve::serve(),
+        Command::Engine { action: None } => engine::run(&config::index_path(), &config::models_dir()),
+        Command::Engine { action: Some(action) } => {
+            let Some(mut engine) = client::Client::running() else {
+                println!("the engine isn't running");
+                return Ok(());
+            };
+            let op = match action {
+                EngineAction::Stop => "stop",
+                EngineAction::Unload => "unload",
+            };
+            engine.request(op, serde_json::json!({}))?;
+            Ok(())
+        }
         Command::Daemon => daemon::run(),
         Command::Service { action } => match action {
             ServiceAction::Install => service::install(),
             ServiceAction::Uninstall => service::uninstall(),
             ServiceAction::Status => service::status(),
             ServiceAction::Plist => {
-                print!("{}", service::plist()?);
+                print!("{}", service::plists()?);
                 Ok(())
             }
         },
@@ -256,13 +282,24 @@ fn run(cli: Cli) -> Result<()> {
                 } else if let models::Progress::Ready { file } = progress {
                     eprintln!("\r{file}: ready{:20}", "");
                 }
+            })
+            .and_then(|()| {
+                // An engine that couldn't load the model tries again on its next search by meaning.
+                if let Some(mut engine) = client::Client::running()
+                    && engine.request("status", serde_json::json!({}))?["meaning"] == "unavailable"
+                {
+                    engine.request("unload", serde_json::json!({}))?;
+                }
+                Ok(())
             }),
         },
         Command::Eval { file, verbose } => {
-            let mut searcher = search::Searcher::open(&config::index_path(), Config::load()?.ranking)?;
-            let files = embedder::ModelFiles::in_folder(&config::models_dir())?;
-            let mut encoder = embedder::Embedder::load(&files, true)?;
-            eval::run(&file, &mut searcher, &mut encoder, verbose)
+            // The engine's own answers, in this process: what's measured is what front ends get.
+            let core = engine::Core::new(&config::index_path(), &config::models_dir(), Box::new(|_| {}))?;
+            let outcome = eval::run(&file, &core, verbose);
+            // The model goes before the process does (llama.cpp aborts when its Metal device is freed under one).
+            core.unload();
+            outcome
         }
         Command::Read { path, tokens } => {
             let path = config::expand(&path.to_string_lossy());
@@ -495,21 +532,15 @@ fn index(json: bool, reindex: bool) -> Result<()> {
     Ok(())
 }
 
-fn search_once(q: &str, kinds: &[String], limit: usize, words_only: bool, json: bool) -> Result<()> {
+fn search_once(q: &str, kinds: &[String], limit: usize, by: Option<Mode>, json: bool) -> Result<()> {
     let kinds = kinds
         .iter()
         .map(|name| Kind::parse(name).ok_or_else(|| anyhow::anyhow!("no such kind: {name}")))
         .collect::<Result<Vec<_>>>()?;
-    let mut searcher = search::Searcher::open(&config::index_path(), Config::load()?.ranking)?;
-    let request = search::Request { q: q.to_string(), kinds, limit, prefix_last: false };
-    let vector = if words_only {
-        None
-    } else {
-        let files = embedder::ModelFiles::in_folder(&config::models_dir())?;
-        let mut encoder = embedder::Embedder::load(&files, true)?;
-        Some(encoder.embed_text(&request.prompt())?)
-    };
-    let response = searcher.search(&request, vector.as_deref())?;
+    let request = search::Request { q: q.to_string(), mode: by, kinds, limit, prefix_last: false };
+    let mut client = client::Client::connect()?;
+    // By meaning, it waits for the engine to load the model if it hasn't yet.
+    let response = client.search(&request, true)?;
     open::remember(q, &response.hits);
     if json {
         println!("{}", serde_json::to_string_pretty(&response)?);
@@ -523,7 +554,7 @@ fn search_once(q: &str, kinds: &[String], limit: usize, words_only: bool, json: 
         }
         return Ok(());
     }
-    present::print(&terminal, &response, q, &searcher)
+    present::print(&terminal, &response, q, &mut client)
 }
 
 fn status(json: bool) -> Result<()> {
@@ -533,6 +564,8 @@ fn status(json: bool) -> Result<()> {
     let models = models::status(&config::models_dir());
     let transcripts = store.transcripts()?;
     let queued = store.queued(5)?;
+    // The engine, if it's running (status doesn't start it): what it holds.
+    let engine = client::Client::running().and_then(|mut engine| engine.request("status", serde_json::json!({})).ok());
     if json {
         println!(
             "{}",
@@ -546,6 +579,7 @@ fn status(json: bool) -> Result<()> {
                     "seconds": transcripts.seconds,
                     "unavailable": speech::unavailable(),
                 },
+                "engine": engine,
                 "config": config,
                 "models": models,
             }))?
@@ -580,6 +614,16 @@ fn status(json: bool) -> Result<()> {
             "not downloaded"
         }
     );
+    let engine = match engine {
+        None => "not running (the next search starts it)".to_string(),
+        Some(engine) => match engine["meaning"].as_str().unwrap_or("") {
+            "ready" => format!("running, {} vectors in memory for search by meaning", engine["vectors"]),
+            "loading" => "running, loading the model and the vectors".to_string(),
+            "unavailable" => format!("running, by words only: {}", engine["error"].as_str().unwrap_or("no model")),
+            _ => "running, nothing loaded (search by meaning loads it)".to_string(),
+        },
+    };
+    println!("engine:  {engine}");
     let speech = match speech::unavailable() {
         Some(why) => why,
         None if transcripts.done < transcripts.total => format!(
@@ -647,11 +691,12 @@ fn bench_search(count: usize) -> Result<()> {
     println!("built an index of {count} vectors in {:.1} s", started.elapsed().as_secs_f64());
     let started = std::time::Instant::now();
     let mut searcher = search::Searcher::open(&path, config::Ranking::default())?;
+    searcher.load_vectors()?;
     println!("loaded it in {:.0} ms", started.elapsed().as_secs_f64() * 1000.0);
     let mut query: Vec<f32> = (0..embedder::DIM).map(|i| ((i * 7919) % 101) as f32 - 50.0).collect();
     embedder::normalize(&mut query);
     for q in ["topic42", "something else entirely"] {
-        let request = search::Request { q: q.into(), kinds: vec![], limit: 40, prefix_last: true };
+        let request = search::Request { q: q.into(), mode: None, kinds: vec![], limit: 40, prefix_last: true };
         searcher.search(&request, Some(&query))?;
         let started = std::time::Instant::now();
         for _ in 0..20 {

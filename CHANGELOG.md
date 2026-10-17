@@ -7,6 +7,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com); versions follow
 
 ## [Unreleased]
 
+### Added
+
+- The engine: one resident process (`sift-it engine`, a LaunchAgent beside the indexer's) answers every search, from
+  the terminal, scripts and front ends, over a Unix socket in the data folder. `sift-it serve` relays to it and makes
+  previews itself; `sift-it search` and the finder ask it directly. A client of another build replaces it.
+- Searches by `words` or by `meaning`, per search (`--by`, or `mode` in a request) with a default in `search.mode`.
+  By words loads nothing. The first search by meaning loads the model and the vectors, and they stay until
+  `sift-it engine unload`.
+- `sift-it status` shows what the engine holds.
+
 ### Changed
 
 - One `config.json` with a section for each part of the work: `sources`, `reading`, `ranking`, `indexing` and `log`.
@@ -23,6 +33,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com); versions follow
   memory doesn't grow with a file, and a search finds the part that's in.
 - The model loads when a file first needs a vector, so indexing at `words` depth never loads it.
 - `sift-it read` recognizes screenshots as the indexer does.
+- `sift-it service install` installs the engine's LaunchAgent with the indexer's.
+- serve's events: `ready` says whether search by meaning is loaded, and `meaning` (loading, ready, unavailable,
+  unloaded) replaces `encoder`.
 - Kinds are plaintext, document (PDFs included), image, screenshot, audio, video and code: `--kind pdf` becomes
   `--kind document`.
 - `sources.ignore` takes patterns for files as well as folders, such as `*.psd` or `**/Exports/**`.
@@ -34,6 +47,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com); versions follow
 - The options `include-code`, `index-on-battery`, `transcribe` and `exclude-ext`: `sources.code`,
   `indexing.on_battery`, `reading.depth` and `sources.ignore` replace them.
 - The limits on file size, PDF pages and recording length.
+- `sift-it search --words-only`: `--by words` replaces it.
 
 ## [0.2.0] — 2026-10-16
 

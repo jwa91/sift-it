@@ -3,16 +3,17 @@
 //! pictures, a recording's waveform with the matched stretch lit, the passage or code with the query's words marked),
 //! and Enter opens it where it matched.
 //!
-//! Three threads keep typing smooth: this one draws and reads keys; a searcher answers the latest query (exact words at
-//! once, meaning as soon as the model has loaded); a previewer fetches what the selected result's preview needs.
+//! Three threads keep typing smooth: this one draws and reads keys; a searcher asks the engine (engine.rs) for the
+//! latest query (by words at once, by meaning as soon as the engine has the model); a previewer fetches what the
+//! selected result's preview needs.
 
-use crate::config;
+use crate::client::Client;
+use crate::config::{self, Mode};
 use crate::crawl::{self, Kind};
-use crate::embedder::{Embedder, ModelFiles};
 use crate::open::{self, Place, timestamp};
 use crate::preview;
-use crate::search::{Hit, Request, Response, Searcher, words_of};
-use crate::store::{Segment, Store};
+use crate::search::{Hit, Request, Response, words_of};
+use crate::store::Segment;
 use crate::term;
 use anyhow::Result;
 use ratatui::Frame;
@@ -43,10 +44,13 @@ const FILTERS: [(&str, &[Kind]); 6] = [
 const ACCENT: Color = Color::Blue;
 const MARK: Color = Color::Yellow;
 
+/// Whether results are by meaning, as the engine says.
 enum Model {
     Loading,
     Ready,
     Missing(String),
+    /// Searches are by words (config.json's `search.mode`).
+    Words,
 }
 
 /// What a result's preview shows, fetched off the drawing thread.
@@ -85,7 +89,8 @@ impl App {
     }
 
     fn request(&self) -> Request {
-        Request { q: self.query.clone(), kinds: FILTERS[self.filter].1.to_vec(), limit: 60, prefix_last: true }
+        let kinds = FILTERS[self.filter].1.to_vec();
+        Request { q: self.query.clone(), mode: None, kinds, limit: 60, prefix_last: true }
     }
 
     fn flash(&mut self, message: impl Into<String>) {
@@ -113,7 +118,7 @@ fn run_app(terminal: &mut ratatui::DefaultTerminal, picker: Picker, initial: &st
     let model = Arc::new(Mutex::new(Model::Loading));
     let (search_tx, search_rx) = channel::<Request>();
     let (results_tx, results_rx) = channel::<(Request, Response)>();
-    let searching = spawn_searcher(search_rx, results_tx, model.clone())?;
+    let searching = spawn_searcher(Client::connect()?, search_rx, results_tx, model.clone());
     let (preview_tx, preview_rx) = channel::<Hit>();
     let (previews_tx, previews_rx) = channel::<(i64, Preview)>();
     spawn_previewer(preview_rx, previews_tx)?;
@@ -193,13 +198,8 @@ fn run_app(terminal: &mut ratatui::DefaultTerminal, picker: Picker, initial: &st
         }
     })();
 
-    // The model goes before the process does: llama.cpp frees its Metal device as the process exits, and aborts if a
-    // model still holds buffers on it. With no more requests the searcher stops, and the model is freed once it and the
-    // loader are done.
     drop(search_tx);
-    for thread in searching {
-        let _ = thread.join();
-    }
+    let _ = searching.join();
     outcome
 }
 
@@ -289,32 +289,38 @@ fn copy(text: &str) -> Result<()> {
     Ok(())
 }
 
-/// The searcher: always answers the latest request, and loads the model meanwhile (exact words work at once).
+/// The searcher: always asks the engine for the latest request. A search by meaning is answered by words while the
+/// engine loads the model, and asked again once it's there.
 fn spawn_searcher(
+    mut client: Client,
     requests: Receiver<Request>,
     results: Sender<(Request, Response)>,
     model: Arc<Mutex<Model>>,
-) -> Result<Vec<std::thread::JoinHandle<()>>> {
-    let mut searcher = Searcher::open(&config::index_path(), config::Config::load()?.ranking)?;
-    let encoder: Arc<Mutex<Option<Embedder>>> = Arc::new(Mutex::new(None));
-    let loader = {
-        let encoder = encoder.clone();
+) -> std::thread::JoinHandle<()> {
+    let by_words = config::Config::load().is_ok_and(|config| config.search.mode == Mode::Words);
+    let set = {
         let model = model.clone();
-        std::thread::spawn(move || {
-            let loaded = ModelFiles::in_folder(&config::models_dir()).and_then(|files| Embedder::load(&files, true));
-            match loaded {
-                Ok(embedder) => {
-                    *encoder.lock().unwrap() = Some(embedder);
-                    *model.lock().unwrap() = Model::Ready;
-                }
-                Err(error) => *model.lock().unwrap() = Model::Missing(format!("{error:#}")),
-            }
-        })
+        move |state: &str, error: Option<&str>| {
+            *model.lock().unwrap() = match state {
+                _ if by_words => Model::Words,
+                "ready" => Model::Ready,
+                "unavailable" => Model::Missing(error.unwrap_or("the model couldn't load").to_string()),
+                _ => Model::Loading,
+            };
+        }
     };
-    let searcher = std::thread::spawn(move || {
+    set(client.ready["meaning"].as_str().unwrap_or(""), None);
+    std::thread::spawn(move || {
         let mut last: Option<Request> = None;
         let mut answered_with_meaning = false;
         loop {
+            // What the engine said meanwhile: the model loaded (ask the last query again, with meaning this time), or
+            // couldn't.
+            while let Ok(Some(event)) = client.event(Duration::ZERO) {
+                if event["event"] == "meaning" {
+                    set(event["state"].as_str().unwrap_or(""), event["error"].as_str());
+                }
+            }
             let request = match requests.recv_timeout(Duration::from_millis(100)) {
                 Ok(mut request) => {
                     // Only the newest matters.
@@ -324,8 +330,7 @@ fn spawn_searcher(
                     request
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                    // The model just arrived: answer the last query again, with meaning this time.
-                    let ready = encoder.lock().unwrap().is_some();
+                    let ready = matches!(*model.lock().unwrap(), Model::Ready);
                     match &last {
                         Some(request) if ready && !answered_with_meaning => request.clone(),
                         _ => continue,
@@ -333,35 +338,23 @@ fn spawn_searcher(
                 }
                 Err(_) => return,
             };
-            let vector = if request.q.trim().is_empty() {
-                None
-            } else {
-                encoder.lock().unwrap().as_mut().and_then(|e| e.embed_text(&request.prompt()).ok())
-            };
-            answered_with_meaning = vector.is_some() || request.q.trim().is_empty();
-            let response = if request.q.trim().is_empty() {
-                searcher.recent(&request)
-            } else {
-                searcher.search(&request, vector.as_deref())
-            };
-            if let Ok(response) = response
-                && results.send((request.clone(), response)).is_err()
-            {
+            let Ok(response) = client.search(&request, false) else { return };
+            answered_with_meaning = response.meaning || request.q.trim().is_empty();
+            if results.send((request.clone(), response)).is_err() {
                 return;
             }
             last = Some(request);
         }
-    });
-    Ok(vec![loader, searcher])
+    })
 }
 
 /// The previewer: what each kind's preview needs, made or read off the drawing thread.
 fn spawn_previewer(hits: Receiver<Hit>, previews: Sender<(i64, Preview)>) -> Result<()> {
-    let store = Store::open_readonly(&config::index_path())?;
+    let mut client = Client::connect()?;
     std::thread::spawn(move || {
         let folder = config::previews_dir();
         for hit in hits {
-            let preview = objc2::rc::autoreleasepool(|_| make_preview(&store, &hit, &folder));
+            let preview = objc2::rc::autoreleasepool(|_| make_preview(&mut client, &hit, &folder));
             if previews.send((hit.segment_id, preview)).is_err() {
                 return;
             }
@@ -370,7 +363,7 @@ fn spawn_previewer(hits: Receiver<Hit>, previews: Sender<(i64, Preview)>) -> Res
     Ok(())
 }
 
-fn make_preview(store: &Store, hit: &Hit, folder: &Path) -> Preview {
+fn make_preview(client: &mut Client, hit: &Hit, folder: &Path) -> Preview {
     let path = Path::new(&hit.path);
     let picture = |kind: &str, loc: Option<f64>| {
         preview::thumbnail(path, kind, loc, 900, folder).ok().and_then(|png| image::open(png).ok())
@@ -381,18 +374,21 @@ fn make_preview(store: &Store, hit: &Hit, folder: &Path) -> Preview {
         let start = hit.loc.unwrap_or(0.0);
         Some((term::stretch(&levels), preview::span(path, columns, start, hit.loc_end.unwrap_or(start + 30.0))))
     };
-    let segment_text = || store.segment_text(hit.segment_id).ok().flatten();
+    let segment_text = |client: &mut Client| client.segment_text(hit.segment_id).ok().flatten();
     let mut preview = Preview::default();
     match hit.kind {
         Kind::Image => preview.picture = picture("image", None),
         Kind::Screenshot => {
             preview.picture = picture("image", None);
-            preview.text =
-                if hit.segment == Segment::Ocr { segment_text() } else { store.file_text(&hit.path).ok().flatten() };
+            preview.text = if hit.segment == Segment::Ocr {
+                segment_text(client)
+            } else {
+                client.file_text(&hit.path).ok().flatten()
+            };
         }
         Kind::Document if crawl::is_pdf(Path::new(&hit.path)) => {
             preview.picture = picture("pdf", Some(hit.loc.unwrap_or(1.0)));
-            preview.text = segment_text();
+            preview.text = segment_text(client);
         }
         Kind::Video => {
             preview.picture = picture("video", hit.loc);
@@ -400,16 +396,16 @@ fn make_preview(store: &Store, hit: &Hit, folder: &Path) -> Preview {
                 preview.levels = levels();
             }
             if hit.segment == Segment::Speech {
-                preview.text = segment_text();
+                preview.text = segment_text(client);
             }
         }
         Kind::Audio => {
             preview.levels = levels();
             if hit.segment == Segment::Speech {
-                preview.text = segment_text();
+                preview.text = segment_text(client);
             }
         }
-        Kind::Plaintext | Kind::Document | Kind::Code => preview.text = segment_text(),
+        Kind::Plaintext | Kind::Document | Kind::Code => preview.text = segment_text(client),
     }
     preview
 }
@@ -434,8 +430,9 @@ fn draw_query(frame: &mut Frame, app: &App, area: Rect) {
             " · exact words only (no model: sift-it model download)".to_string()
         }
         Model::Missing(error) => format!(" · exact words only ({})", error.chars().take(60).collect::<String>()),
-        Model::Ready if app.query.trim().is_empty() => " · recently changed".to_string(),
+        Model::Ready | Model::Words if app.query.trim().is_empty() => " · recently changed".to_string(),
         Model::Ready => String::new(),
+        Model::Words => " · by words".to_string(),
     };
     let right = format!("{}{state} ", FILTERS[app.filter].0);
     let line = Line::from(vec![

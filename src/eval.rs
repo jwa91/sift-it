@@ -4,11 +4,13 @@
 //! must be (a page or a range of seconds). Queries marked "none" have no answer: anything shown among the strong
 //! matches for them is a false alarm.
 
-use crate::embedder::Embedder;
-use crate::search::{Request, Searcher};
+use crate::config::Mode;
+use crate::engine::Core;
+use crate::search::Request;
 use anyhow::Result;
 use serde::Deserialize;
 use std::path::Path;
+use std::sync::Arc;
 
 #[derive(Deserialize)]
 struct Case {
@@ -21,14 +23,17 @@ struct Case {
     none: bool,
 }
 
-pub fn run(file: &Path, searcher: &mut Searcher, encoder: &mut Embedder, verbose: bool) -> Result<()> {
+pub fn run(file: &Path, core: &Arc<Core>, verbose: bool) -> Result<()> {
     let cases: Vec<Case> = serde_json::from_slice(&std::fs::read(file)?)?;
     let (mut answered, mut top1, mut top3, mut reciprocal, mut located, mut with_loc) = (0, 0, 0, 0.0, 0, 0);
     let (mut negatives, mut false_alarms) = (0, 0);
     for case in &cases {
-        let request = Request { q: case.q.clone(), kinds: Vec::new(), limit: 20, prefix_last: false };
-        let vector = encoder.embed_text(&request.prompt())?;
-        let response = searcher.search(&request, Some(&vector))?;
+        let request =
+            Request { q: case.q.clone(), mode: Some(Mode::Meaning), kinds: Vec::new(), limit: 20, prefix_last: false };
+        let response = core.search(&request, true)?;
+        if !response.meaning {
+            anyhow::bail!("search by meaning isn't available: is the model downloaded?");
+        }
         let names: Vec<String> = response.hits.iter().map(|h| h.name.clone()).collect();
         if case.none {
             negatives += 1;

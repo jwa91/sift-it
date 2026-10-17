@@ -12,6 +12,7 @@
 //!   reading    how deep and how files are read, per kind, type and folder         the files it affects are read again
 //!   ranking    how results rank                                                     the next search
 //!   indexing   when the background indexer works                                    at once
+//!   search     how the engine searches                                              the next search
 //!   log        the background indexer's log                                         at once
 //!
 //! Every value is written out, so the file shows all there is to change. One that's left out takes its default.
@@ -62,6 +63,7 @@ pub struct Config {
     pub reading: Reading,
     pub ranking: Ranking,
     pub indexing: Indexing,
+    pub search: Search,
     pub log: Log,
 }
 
@@ -601,6 +603,26 @@ impl Default for Indexing {
     fn default() -> Self {
         Self { on_battery: true, quiet_ms: 1500, full_sync_min: 30, release_model_s: 60 }
     }
+}
+
+/// How the engine searches (engine.rs).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Search {
+    /// What a search is by when it doesn't say.
+    pub mode: Mode,
+}
+
+/// What a search is by.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum Mode {
+    /// The full-text index alone: no model and no vectors, so it holds almost nothing in memory.
+    Words,
+    /// Meaning too: the text model and the vectors, loaded for the first such search. Words still count, since names
+    /// and numbers are found by them.
+    #[default]
+    Meaning,
 }
 
 /// The background indexer's log (indexer.log).

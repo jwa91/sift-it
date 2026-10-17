@@ -2,11 +2,12 @@
 //! it matched, and a body that fits its kind: the passage with the query's words marked, the lines of code, a
 //! recording's waveform with the matched stretch lit, a picture or video frame inline where the terminal shows pictures.
 
+use crate::client::Client;
 use crate::config;
 use crate::crawl::Kind;
 use crate::open::timestamp;
 use crate::preview;
-use crate::search::{Hit, Response, Searcher, words_of};
+use crate::search::{Hit, Response, words_of};
 use crate::store::Segment;
 use crate::term::{self, Images, Terminal};
 use anyhow::Result;
@@ -19,7 +20,7 @@ const PASSAGE_LINES: usize = 3;
 /// Lines of code shown under a result.
 const CODE_LINES: usize = 5;
 
-pub fn print(terminal: &Terminal, response: &Response, query: &str, searcher: &Searcher) -> Result<()> {
+pub fn print(terminal: &Terminal, response: &Response, query: &str, client: &mut Client) -> Result<()> {
     let words = words_of(query.trim_start().strip_prefix("code:").unwrap_or(query));
     if response.hits.is_empty() {
         println!(
@@ -39,7 +40,7 @@ pub fn print(terminal: &Terminal, response: &Response, query: &str, searcher: &S
             weak_header = true;
         }
         println!("{}", header(terminal, index + 1, hit));
-        let body = body(terminal, hit, &words, searcher);
+        let body = body(terminal, hit, &words, client);
         print!("{body}");
         println!();
     }
@@ -121,7 +122,7 @@ fn passage(terminal: &Terminal, text: &str, width: usize, lines: usize, words: &
 }
 
 /// What goes under a result, already indented, ending in a line break.
-fn body(terminal: &Terminal, hit: &Hit, words: &[String], searcher: &Searcher) -> String {
+fn body(terminal: &Terminal, hit: &Hit, words: &[String], client: &mut Client) -> String {
     let width = terminal.width.saturating_sub(INDENT.len() + 2).max(30);
     let mut out = String::new();
     let previews = config::previews_dir();
@@ -150,7 +151,7 @@ fn body(terminal: &Terminal, hit: &Hit, words: &[String], searcher: &Searcher) -
                 push_line(&mut out, &terminal.dim(&about));
             }
             let text = hit.excerpt.clone().or_else(|| {
-                (hit.kind == Kind::Screenshot).then(|| searcher.file_text(&hit.path).ok().flatten()).flatten()
+                (hit.kind == Kind::Screenshot).then(|| client.file_text(&hit.path).ok().flatten()).flatten()
             });
             for text_line in text.map(|t| passage(terminal, &t, width, 2, words)).unwrap_or_default() {
                 push_line(&mut out, &text_line);
@@ -183,7 +184,7 @@ fn body(terminal: &Terminal, hit: &Hit, words: &[String], searcher: &Searcher) -
             }
         }
         Kind::Code => {
-            let text = searcher.segment_text(hit.segment_id).ok().flatten().or_else(|| hit.excerpt.clone());
+            let text = client.segment_text(hit.segment_id).ok().flatten().or_else(|| hit.excerpt.clone());
             for code_line in text.map(|t| code_lines(terminal, &t, hit.loc, words, width)).unwrap_or_default() {
                 push_line(&mut out, &code_line);
             }

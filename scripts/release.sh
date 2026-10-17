@@ -78,17 +78,18 @@ cask "sift-it" do
   binary "sift-it"
   binary "sift-it-transcribe"
 
-  uninstall launchctl: "local.sift-it.indexer"
+  uninstall launchctl: ["local.sift-it.indexer", "local.sift-it.engine"]
 
   zap trash: [
     "~/Library/Application Support/Sift It",
     "~/Library/LaunchAgents/local.sift-it.indexer.plist",
+    "~/Library/LaunchAgents/local.sift-it.engine.plist",
   ]
 
   caveats <<~EOS
     sift-it needs its models once (1.6 GB; 865 MB to search, 740 MB to write down speech):
       sift-it model download
-    Then choose folders, and index in the background from login on:
+    Then choose folders, and index and search in the background from login on:
       sift-it folders add ~/Documents
       sift-it service install
   EOS
