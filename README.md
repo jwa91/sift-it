@@ -277,6 +277,10 @@ make install
 `make build` builds the pinned llama.cpp release and the sift-it binary.
 `make check` runs formatting checks, Clippy, and tests. `make install` installs sift-it into `~/.local/bin`.
 
+[docs/design.md](docs/design.md) says what sift-it does and the order it's built in.
+[docs/architecture.md](docs/architecture.md) says how the code is structured: its parts, their boundaries, and which
+way dependencies point.
+
 After you download the model, `make selftest` checks output against the reference vectors from DigUp.
 `make eval` builds `testbed/` inside this repository and measures search quality. The engine's build and testbed
 commands work independently of the other workspace folders.

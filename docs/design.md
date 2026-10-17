@@ -4,6 +4,11 @@ Status: agreed on 2026-10-17. Steps 1 to 5 of the build order are built: the con
 length limits, the engine, the vector store, search in each of its forms with `auto` choosing, and indexing's memory
 budget. It replaces the earlier design with several indexes.
 
+After step 5 the plan changed. The first release is that core, its code structured as docs/architecture.md describes,
+and text cut by its form. Projects, text detection on every image, the measured ranking values, metadata and result
+units wait until a measurement shows they help: they add parts, and nothing has shown yet that search gets better from
+them. This document keeps their design for then.
+
 The goal is the best search there is for everything on a Mac, by meaning across text, pictures, sound and video, while
 being careful with memory and fast. It has to run well on an 8 GB MacBook and use what a 24 GB M4 has.
 
@@ -70,7 +75,7 @@ vectors/
 ```
 
 - **Partitions.** Everything outside code is one partition, and each project's code is one of its own. The code of an
-  inactive project is never mapped, and removing a project removes its files. Until projects exist (step 6), all code
+  inactive project is never mapped, and removing a project removes its files. Until projects exist (later), all code
   is one partition, `code`.
 - **Three forms, written once.** For every vector the indexer appends the f32 row, the f16 row and the sketch. Every
   value of `search.vectors` then maps a file that's ready to scan, and switching between them costs nothing. The price
@@ -361,6 +366,8 @@ change.
 
 ## Build order
 
+Built:
+
 1. Config: one `config.json` with these sections and the cascade, and depth in place of limits. Constants move in
    with today's values, and `make eval` must still give 44/44.
 2. The engine: socket, `serve` as relay, version check, the two modes, loading on first need, `unload`. CLI and TUI
@@ -369,13 +376,28 @@ change.
    forms, and `bench-search` measuring them.
 4. The sketch search, the median sample, and `auto`. Measure the top-20 overlap on the demo collection.
 5. `indexing.memory_mb`, with embedding and transcription side by side when it allows.
-6. Projects: detection, summaries, active and pinned, code cut at its definitions, code loaded only for code
-   searches.
-7. Text detection on every image, deciding the token budget and OCR.
-8. The measured prior median and length penalty.
-9. Metadata: the table, its weight in ranking, operators.
-10. Structured files.
-11. Result units and chapters.
+
+Next, for the first release. Steps 6 to 12 change no behavior (docs/architecture.md, "The way there"):
+
+6. The protocol: its types in a crate of their own, documented. The engine reports the indexer's progress and takes
+   settings and folders through it.
+7. The query path: understand, retrieve, rank and present as modules, ranking pure.
+8. The index: one facade with a writer and readers over the catalog and the vectors.
+9. Extracting apart from segmenting.
+10. The ingest path: stages with owners, a scheduler, and speech as an extractor on a lane of its own.
+11. Resources: the plans for search and ingest in one module.
+12. Crates where they pay: llama.cpp's binding, and the modules as docs/architecture.md lays them out.
+13. Text cut by its form: prose and Markdown at paragraphs and headings, code at its definitions, structured files
+    (csv, tsv, json, jsonl, yaml, toml) at whole rows, records or top-level keys. Eval questions for code and
+    structured files measure it.
+
+Later, when a measurement shows it helps:
+
+- Projects: detection, summaries, active and pinned, code loaded only for code searches.
+- Text detection on every image, deciding the token budget and OCR. It costs a detection on every picture.
+- The measured prior median and length penalty.
+- Metadata: the table, its weight in ranking, operators.
+- Result units and chapters.
 
 ## Open questions
 

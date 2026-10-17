@@ -59,6 +59,8 @@ These family rules are Go-specific and don't apply here:
 
 ## Working on it
 
+- `docs/design.md` says what sift-it does and the build order; `docs/architecture.md` says where code goes and which
+  way dependencies point. New code follows its rules, and a step on its way changes no behavior.
 - `make check` before every commit. `make selftest` after anything that could change vectors (llama.cpp, the model
   files, image sizing, prompts): every vector must keep cosine ≥ 0.999 with tests/reference.
 - `make eval` (testbed + evals/evals.json) after anything that touches ranking or readers. Currently 44/44 top-1, 9 of
