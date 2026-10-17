@@ -35,15 +35,69 @@ use crate::store::Store;
 use anyhow::{Context, Result, anyhow};
 use serde_json::{Value, json};
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Write};
+use std::ffi::OsString;
+use std::io::{self, BufRead, BufReader, Write};
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::time::SystemTime;
 
+/// The socket's file. It's in the data folder, so there's one engine per data folder.
 pub fn socket_path() -> PathBuf {
     config::home().join("engine.sock")
+}
+
+/// Connects to the engine's socket.
+pub fn connect() -> io::Result<UnixStream> {
+    UnixStream::connect(socket_address(&config::home())?)
+}
+
+/// How long a socket's name can be: sockaddr_un's sun_path, its closing NUL included.
+const SUN_PATH: usize = 104;
+
+/// The name the socket is bound and reached by. A data folder can be too deep for a socket's name: then it's named
+/// through a link to the data folder in this user's temporary folder, made when needed (and again after macOS clears
+/// that folder). The socket stays in the data folder.
+fn socket_address(home: &Path) -> io::Result<PathBuf> {
+    use sha2::{Digest, Sha256};
+    let socket = home.join("engine.sock");
+    if socket.as_os_str().len() < SUN_PATH {
+        return Ok(socket);
+    }
+    let home = std::path::absolute(home)?;
+    let digest = Sha256::digest(home.as_os_str().as_bytes());
+    let hash: String = digest[..8].iter().map(|byte| format!("{byte:02x}")).collect();
+    let link = user_temp_dir()?.join(format!("sift-it-{hash}"));
+    let made = match std::fs::read_link(&link) {
+        Ok(target) if target == home => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => std::os::unix::fs::symlink(&home, &link),
+        // Another data folder's link (their names are a hash), or something else in the way.
+        _ => {
+            let _ = std::fs::remove_file(&link);
+            std::os::unix::fs::symlink(&home, &link)
+        }
+    };
+    match made {
+        Err(error) if error.kind() != io::ErrorKind::AlreadyExists => {
+            Err(io::Error::new(error.kind(), format!("can't link to the data folder from {}: {error}", link.display())))
+        }
+        // Made, or another client made it meanwhile.
+        _ => Ok(link.join("engine.sock")),
+    }
+}
+
+/// This user's temporary folder (/var/folders/…/T/), which only they can write to, whatever TMPDIR says.
+fn user_temp_dir() -> io::Result<PathBuf> {
+    let mut buffer = vec![0u8; libc::PATH_MAX as usize];
+    // Safety: confstr writes at most buffer.len() bytes, a NUL included, and returns the length it needs.
+    let needed = unsafe { libc::confstr(libc::_CS_DARWIN_USER_TEMP_DIR, buffer.as_mut_ptr().cast(), buffer.len()) };
+    if needed == 0 || needed > buffer.len() {
+        return Err(io::Error::last_os_error());
+    }
+    buffer.truncate(needed - 1);
+    Ok(PathBuf::from(OsString::from_vec(buffer)))
 }
 
 /// This build: the version, and the binary it runs from (its path, size and time), so two builds of one version
@@ -349,14 +403,16 @@ fn send(writer: &Writer, value: &Value) -> bool {
 pub fn run(index: &Path, models: &Path) -> Result<()> {
     build();
     let socket = socket_path();
-    if UnixStream::connect(&socket).is_ok() {
+    if connect().is_ok() {
         eprintln!("an engine already answers at {}", socket.display());
         return Ok(());
     }
     std::fs::create_dir_all(config::home())?;
     // A socket file left by an engine that didn't stop cleanly.
     let _ = std::fs::remove_file(&socket);
-    let listener = UnixListener::bind(&socket).with_context(|| format!("can't listen at {}", socket.display()))?;
+    let listener = socket_address(&config::home())
+        .and_then(UnixListener::bind)
+        .with_context(|| format!("can't listen at {}", socket.display()))?;
     std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))?;
     eprintln!("engine {} answering at {}", build(), socket.display());
 
@@ -434,6 +490,29 @@ mod tests {
     use crate::config::Settings;
     use crate::crawl::{Found, Kind};
     use crate::store::{NewSegment, Segment};
+
+    #[test]
+    fn a_deep_data_folder_is_reached_through_a_short_link() {
+        let top = std::env::temp_dir().join(format!("sift-it-socket-{}", std::process::id()));
+        let home = top.join("d".repeat(SUN_PATH));
+        std::fs::create_dir_all(&home).unwrap();
+        let address = socket_address(&home).unwrap();
+        assert!(address.as_os_str().len() < SUN_PATH);
+        let listener = UnixListener::bind(&address).unwrap();
+        assert!(home.join("engine.sock").exists());
+        UnixStream::connect(socket_address(&home).unwrap()).unwrap();
+
+        // The link is made again after it's cleared, and the engine still answers through it.
+        let link = address.parent().unwrap();
+        std::fs::remove_file(link).unwrap();
+        UnixStream::connect(socket_address(&home).unwrap()).unwrap();
+
+        // A shallow one needs no link.
+        assert_eq!(socket_address(Path::new("shallow")).unwrap(), Path::new("shallow/engine.sock"));
+        drop(listener);
+        std::fs::remove_file(link).unwrap();
+        std::fs::remove_dir_all(&top).unwrap();
+    }
 
     #[test]
     fn meaning_loads_on_first_need_and_words_never_wait_for_it() {

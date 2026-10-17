@@ -11,7 +11,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com); versions follow
 
 - The engine: one resident process (`sift-it engine`, a LaunchAgent beside the indexer's) answers every search, from
   the terminal, scripts and front ends, over a Unix socket in the data folder. `sift-it serve` relays to it and makes
-  previews itself; `sift-it search` and the finder ask it directly. A client of another build replaces it.
+  previews itself; `sift-it search` and the finder ask it directly. A client of another build replaces it. A data
+  folder too deep for a socket's name is reached through a short link in the user's temporary folder.
 - Searches by `words` or by `meaning`, per search (`--by`, or `mode` in a request) with a default in `search.mode`.
   By words loads nothing. The first search by meaning loads the model and the vectors, and they stay until
   `sift-it engine unload`.

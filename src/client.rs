@@ -5,7 +5,7 @@
 //! data folder, else as a process of its own. An engine of another build (an upgrade, or a new build while developing)
 //! is stopped first, and this build's started in its place.
 
-use crate::engine::{build, socket_path};
+use crate::engine::{self, build, socket_path};
 use crate::search::{Request, Response};
 use crate::service;
 use anyhow::{Context, Result, anyhow, bail};
@@ -59,7 +59,7 @@ impl Client {
 
     /// The engine, when it's running (it isn't started).
     pub fn running() -> Option<Self> {
-        let stream = UnixStream::connect(socket_path()).ok()?;
+        let stream = engine::connect().ok()?;
         Self::from_stream(stream).ok()
     }
 
@@ -67,7 +67,7 @@ impl Client {
     fn open(patience: Duration) -> Result<Self> {
         let deadline = Instant::now() + patience;
         loop {
-            match UnixStream::connect(socket_path()) {
+            match engine::connect() {
                 Ok(stream) => return Self::from_stream(stream),
                 Err(error) if Instant::now() >= deadline => {
                     return Err(error).context(format!("can't reach the engine at {}", socket_path().display()));

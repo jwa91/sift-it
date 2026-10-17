@@ -221,6 +221,8 @@ Run `sift-it --help` for all commands and options.
 Data lives in `~/Library/Application Support/Sift It`, or the folder specified by `SIFT_IT_HOME`.
 This folder contains `config.json`, `index.sqlite`, `vectors/`, `status.json`, `indexer.log`, `engine.log`,
 `engine.sock`, `models/`, and `previews/`.
+When the folder's path is too long for a socket's name (104 bytes on macOS), the engine's socket is reached through a
+link to the folder in your temporary folder, `sift-it-<hash>`.
 `SIFT_IT_SPEECH_MODEL` points at another copy of the speech model.
 `brew uninstall --zap sift-it` removes the installation and its data.
 
