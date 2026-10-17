@@ -1,80 +1,155 @@
-//! Text files and documents, cut into passages at paragraph boundaries.
+//! Text files and documents, cut into passages at paragraph boundaries. Text is read and cut as it streams in, so a
+//! file of any size takes the memory of a passage or two.
 
-use super::{Payload, Piece, Sink, title_of};
-use crate::embedder::prompts;
+use super::{Piece, Sink, text_payload, title_of};
+use crate::config::Settings;
 use crate::store::Segment;
 use anyhow::{Context, Result, bail};
+use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
-/// A passage aims for this many characters (about 300 tokens of English), and is cut at MAX_PASSAGE at the latest.
-/// Shorter passages point closer to the words that matched; longer ones carry more context per vector.
-pub const TARGET_PASSAGE: usize = 1200;
-pub const MAX_PASSAGE: usize = 2000;
-
-pub fn read_plain(path: &Path, sink: Sink) -> Result<serde_json::Value> {
-    let bytes = std::fs::read(path)?;
-    let text = decode(&bytes);
-    emit_passages(path, &text, sink)
+pub fn read_plain(path: &Path, settings: &Settings, sink: Sink) -> Result<serde_json::Value> {
+    emit_passages(Lines::new(std::fs::File::open(path)?)?, &title_of(path), settings, sink)
 }
 
 /// rtf, doc, docx, odt, html, webarchive: macOS's textutil reads them all.
-pub fn read_document(path: &Path, sink: Sink) -> Result<serde_json::Value> {
-    let output = Command::new("/usr/bin/textutil")
+pub fn read_document(path: &Path, settings: &Settings, sink: Sink) -> Result<serde_json::Value> {
+    let mut child = Command::new("/usr/bin/textutil")
         .args(["-convert", "txt", "-stdout", "-encoding", "UTF-8"])
         .arg(path)
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .context("can't run textutil")?;
+    let stdout = child.stdout.take().expect("piped");
+    // The pipe closes when this returns, so textutil ends even when reading stopped early.
+    let read = Lines::new(stdout)
+        .map_err(anyhow::Error::from)
+        .and_then(|lines| emit_passages(lines, &title_of(path), settings, sink));
+    let output = child.wait_with_output()?;
+    let info = read?;
     if !output.status.success() {
         bail!("textutil couldn't read it: {}", String::from_utf8_lossy(&output.stderr).trim());
     }
-    emit_passages(path, &String::from_utf8_lossy(&output.stdout), sink)
+    Ok(info)
 }
 
-fn emit_passages(path: &Path, text: &str, sink: Sink) -> Result<serde_json::Value> {
-    let title = title_of(path);
-    let passages = passages(text);
-    let count = passages.len();
-    for passage in passages {
-        let payload = if mostly_numbers(&passage.text) {
-            Payload::None
-        } else {
-            Payload::Text(prompts::document(Some(&title), &passage.text))
-        };
-        sink(Piece {
-            segment: Segment::Passage,
-            loc: Some(passage.first_line as f64),
-            loc_end: Some(passage.last_line as f64),
-            text: Some(passage.text),
-            payload,
-        })?;
-    }
-    Ok(serde_json::json!({ "passages": count, "lines": text.lines().count() }))
-}
-
-/// UTF-8, or UTF-16 with a byte order mark, or Latin-1 as the last resort.
-pub fn decode(bytes: &[u8]) -> String {
-    if let Some(rest) = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]) {
-        return String::from_utf8_lossy(rest).into_owned();
-    }
-    let utf16 = |rest: &[u8], big: bool| {
-        let units: Vec<u16> = rest
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|b| if big { u16::from_be_bytes([b[0], b[1]]) } else { u16::from_le_bytes([b[0], b[1]]) })
-            .collect();
-        String::from_utf16_lossy(&units)
+/// Text's passages, as they're cut, each embedded with `title`.
+pub fn emit_passages<R: Read>(
+    mut lines: Lines<R>,
+    title: &str,
+    settings: &Settings,
+    sink: Sink,
+) -> Result<serde_json::Value> {
+    let mut cutter = Cutter::new(settings);
+    let mut count = 0;
+    let mut emit = |cutter: &mut Cutter| -> Result<()> {
+        for passage in cutter.ready() {
+            count += 1;
+            sink(Piece {
+                segment: Segment::Passage,
+                loc: Some(passage.first_line as f64),
+                loc_end: Some(passage.last_line as f64),
+                payload: text_payload(title, &passage.text, settings),
+                text: Some(passage.text),
+            })?;
+        }
+        Ok(())
     };
-    if let Some(rest) = bytes.strip_prefix(&[0xFF, 0xFE]) {
-        return utf16(rest, false);
+    while let Some((line, ended)) = lines.next_line()? {
+        cutter.push(&line, ended);
+        emit(&mut cutter)?;
     }
-    if let Some(rest) = bytes.strip_prefix(&[0xFE, 0xFF]) {
-        return utf16(rest, true);
+    cutter.finish();
+    emit(&mut cutter)?;
+    Ok(serde_json::json!({ "passages": count, "lines": cutter.line }))
+}
+
+/// A text's lines, decoded as they come: UTF-8, or UTF-16 with a byte order mark. A line that isn't UTF-8 is read as
+/// Latin-1. A line longer than LINE_PART comes in parts, so even a file that's one long line streams.
+pub struct Lines<R> {
+    reader: BufReader<R>,
+    /// Some(big endian) for UTF-16.
+    utf16: Option<bool>,
+    /// The start of a character a part ended in the middle of.
+    carry: Vec<u8>,
+}
+
+const LINE_PART: u64 = 64 << 10;
+
+impl<R: Read> Lines<R> {
+    pub fn new(reader: R) -> std::io::Result<Self> {
+        let mut reader = BufReader::with_capacity(LINE_PART as usize, reader);
+        let start = reader.fill_buf()?;
+        let (bom, utf16) = if start.starts_with(&[0xEF, 0xBB, 0xBF]) {
+            (3, None)
+        } else if start.starts_with(&[0xFF, 0xFE]) {
+            (2, Some(false))
+        } else if start.starts_with(&[0xFE, 0xFF]) {
+            (2, Some(true))
+        } else {
+            (0, None)
+        };
+        reader.consume(bom);
+        Ok(Self { reader, utf16, carry: Vec::new() })
     }
-    match std::str::from_utf8(bytes) {
-        Ok(text) => text.to_string(),
-        Err(_) => bytes.iter().map(|&b| b as char).collect(),
+
+    /// The next line or part of one, without its line break, and whether the line ends with it. None at the end.
+    pub fn next_line(&mut self) -> std::io::Result<Option<(String, bool)>> {
+        let (mut text, ended) = match self.utf16 {
+            None => {
+                let mut bytes = std::mem::take(&mut self.carry);
+                let read = (&mut self.reader).take(LINE_PART).read_until(b'\n', &mut bytes)?;
+                if read == 0 && bytes.is_empty() {
+                    return Ok(None);
+                }
+                let newline = bytes.last() == Some(&b'\n');
+                // A line ends at a line break, or where the text does (a read that stops short).
+                let ended = newline || (read as u64) < LINE_PART;
+                if newline {
+                    bytes.pop();
+                } else if !ended
+                    && let Err(error) = std::str::from_utf8(&bytes)
+                    && error.error_len().is_none()
+                {
+                    // A part that ends in the middle of a character: the rest of it comes with the next part.
+                    self.carry = bytes.split_off(error.valid_up_to());
+                }
+                let text = match String::from_utf8(bytes) {
+                    Ok(text) => text,
+                    Err(error) => error.as_bytes().iter().map(|&b| b as char).collect(),
+                };
+                (text, ended)
+            }
+            Some(big) => {
+                let mut units = Vec::new();
+                let mut ended = false;
+                let mut pair = [0u8; 2];
+                while units.len() < LINE_PART as usize / 2 {
+                    match self.reader.read_exact(&mut pair) {
+                        Ok(()) => {}
+                        Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                        Err(error) => return Err(error),
+                    }
+                    let unit = if big { u16::from_be_bytes(pair) } else { u16::from_le_bytes(pair) };
+                    if unit == u16::from(b'\n') {
+                        ended = true;
+                        break;
+                    }
+                    units.push(unit);
+                }
+                if units.is_empty() && !ended {
+                    return Ok(None);
+                }
+                let at_end = !ended && self.reader.fill_buf()?.is_empty();
+                (String::from_utf16_lossy(&units), ended || at_end)
+            }
+        };
+        if ended && text.ends_with('\r') {
+            text.pop();
+        }
+        Ok(Some((text, ended)))
     }
 }
 
@@ -85,85 +160,137 @@ pub struct Passage {
     pub last_line: usize,
 }
 
-/// Cuts text into passages of about TARGET_PASSAGE characters, at blank lines where it can, then at line ends,
-/// sentence ends, and spaces. Lines count from 1.
-pub fn passages(text: &str) -> Vec<Passage> {
-    passages_sized(text, TARGET_PASSAGE)
+/// Cuts text into passages of about `passage_chars` characters and at most `max_passage_chars`, at blank lines where
+/// it can, then at line ends, sentence ends, and spaces. Lines count from 1.
+pub fn passages(text: &str, settings: &Settings) -> Vec<Passage> {
+    let mut cutter = Cutter::new(settings);
+    for line in text.lines() {
+        cutter.push(line, true);
+    }
+    cutter.finish();
+    cutter.ready().collect()
 }
 
-/// The same, aiming for `target` characters a passage.
-pub fn passages_sized(text: &str, target: usize) -> Vec<Passage> {
-    // Paragraphs: runs of non-blank lines, with their line numbers.
-    let mut paragraphs: Vec<Passage> = Vec::new();
-    let mut current: Option<Passage> = None;
-    for (index, line) in text.lines().enumerate() {
-        let number = index + 1;
-        if line.trim().is_empty() {
-            paragraphs.extend(current.take());
-            continue;
+/// Cuts text into passages as its lines come in. A paragraph (a run of non-blank lines) longer than the maximum is cut
+/// as soon as it is, so what's held stays below a passage and a paragraph's piece.
+pub struct Cutter {
+    target: usize,
+    max: usize,
+    /// The line last pushed (from 1), and whether it's still to be continued.
+    line: usize,
+    in_line: bool,
+    /// The paragraph being read: what's left of it after any pieces cut off, the line that starts at, and whether a
+    /// piece was cut off.
+    paragraph: Option<Passage>,
+    cut: bool,
+    /// The passage being joined from paragraphs.
+    open: Option<Passage>,
+    done: Vec<Passage>,
+}
+
+impl Cutter {
+    pub fn new(settings: &Settings) -> Self {
+        let max = settings.max_passage_chars.max(1);
+        let target = settings.passage_chars.min(max);
+        Self { target, max, line: 0, in_line: false, paragraph: None, cut: false, open: None, done: Vec::new() }
+    }
+
+    /// A line, or a part of one: `ended` says whether the line ends with it.
+    pub fn push(&mut self, text: &str, ended: bool) {
+        let continued = std::mem::replace(&mut self.in_line, !ended);
+        if !continued {
+            self.line += 1;
+            if text.trim().is_empty() && ended {
+                self.end_paragraph();
+                return;
+            }
         }
-        match current.as_mut() {
+        let line = self.line;
+        // Lines are kept without their trailing spaces: only a line's last part has them taken off.
+        let text = if ended { text.trim_end() } else { text };
+        match self.paragraph.as_mut() {
             Some(paragraph) => {
-                paragraph.text.push('\n');
-                paragraph.text.push_str(line.trim_end());
-                paragraph.last_line = number;
+                if !continued {
+                    paragraph.text.push('\n');
+                }
+                paragraph.text.push_str(text);
+                paragraph.last_line = line;
             }
-            None => {
-                current = Some(Passage { text: line.trim_end().to_string(), first_line: number, last_line: number })
-            }
+            None => self.paragraph = Some(Passage { text: text.to_string(), first_line: line, last_line: line }),
+        }
+        while self.paragraph.as_ref().is_some_and(|paragraph| paragraph.text.len() > self.max) {
+            self.cut_piece();
         }
     }
-    paragraphs.extend(current);
 
-    let mut passages: Vec<Passage> = Vec::new();
-    let mut open: Option<Passage> = None;
-    for paragraph in paragraphs.into_iter().flat_map(split_long) {
-        // Paragraphs are joined by as many line breaks as are between them in the file: a match's line is the
-        // passage's first line plus its line within the passage.
-        let gap = |passage: &Passage| paragraph.first_line.saturating_sub(passage.last_line).max(1);
-        match open.as_mut() {
-            Some(passage) if passage.text.len() + gap(passage) + paragraph.text.len() <= target => {
-                passage.text.push_str(&"\n".repeat(gap(passage)));
-                passage.text.push_str(&paragraph.text);
-                passage.last_line = paragraph.last_line;
-            }
-            _ => {
-                passages.extend(open.take());
-                open = Some(paragraph);
-            }
-        }
+    /// The end of the text.
+    pub fn finish(&mut self) {
+        self.end_paragraph();
+        self.done.extend(self.open.take());
     }
-    passages.extend(open);
-    passages
-}
 
-/// A paragraph longer than MAX_PASSAGE, cut into pieces of at most that.
-fn split_long(paragraph: Passage) -> Vec<Passage> {
-    if paragraph.text.len() <= MAX_PASSAGE {
-        return vec![paragraph];
+    /// The passages cut so far.
+    pub fn ready(&mut self) -> std::vec::Drain<'_, Passage> {
+        self.done.drain(..)
     }
-    let mut pieces = Vec::new();
-    let mut rest = paragraph.text.as_str();
-    let mut line = paragraph.first_line;
-    while !rest.is_empty() {
-        let cut = if rest.len() <= MAX_PASSAGE { rest.len() } else { cut_point(rest) };
-        let (piece, tail) = rest.split_at(cut);
+
+    /// Cuts the paragraph's first piece off, at most `max` long.
+    fn cut_piece(&mut self) {
+        let paragraph = self.paragraph.as_mut().expect("a paragraph");
+        let cut = cut_point(&paragraph.text, self.max);
+        let rest = paragraph.text.split_off(cut);
+        let piece = std::mem::replace(&mut paragraph.text, rest);
+        let first = paragraph.first_line;
         let lines = piece.matches('\n').count();
+        paragraph.first_line += lines;
+        self.cut = true;
         if !piece.trim().is_empty() {
-            pieces.push(Passage { text: piece.trim().to_string(), first_line: line, last_line: line + lines });
+            self.join(Passage { text: piece.trim().to_string(), first_line: first, last_line: first + lines });
         }
-        line += lines;
-        rest = tail;
     }
-    pieces
+
+    fn end_paragraph(&mut self) {
+        let Some(mut paragraph) = self.paragraph.take() else { return };
+        // The last piece of a paragraph that was cut is trimmed like the others.
+        if std::mem::take(&mut self.cut) {
+            if paragraph.text.trim().is_empty() {
+                return;
+            }
+            paragraph.last_line = paragraph.first_line + paragraph.text.matches('\n').count();
+            paragraph.text = paragraph.text.trim().to_string();
+        }
+        self.join(paragraph);
+    }
+
+    /// Adds a paragraph (or a piece of one) to the open passage, or starts a new one when it doesn't fit. Paragraphs
+    /// are joined by as many line breaks as are between them in the file: a match's line is the passage's first line
+    /// plus its line within the passage.
+    fn join(&mut self, paragraph: Passage) {
+        match self.open.as_mut() {
+            Some(passage) => {
+                let gap = paragraph.first_line.saturating_sub(passage.last_line).max(1);
+                if passage.text.len() + gap + paragraph.text.len() <= self.target {
+                    passage.text.push_str(&"\n".repeat(gap));
+                    passage.text.push_str(&paragraph.text);
+                    passage.last_line = paragraph.last_line;
+                } else {
+                    self.done.push(std::mem::replace(passage, paragraph));
+                }
+            }
+            None => self.open = Some(paragraph),
+        }
+    }
 }
 
-/// Where to cut a long text, at most MAX_PASSAGE in: the last line end in the second half, else the last sentence
-/// end, else the last space, else anywhere (on a character boundary).
-fn cut_point(text: &str) -> usize {
-    let mut limit = MAX_PASSAGE;
+/// Where to cut a long text, at most `max` in: the last line end in the second half, else the last sentence end,
+/// else the last space, else anywhere (on a character boundary, and past the first character).
+fn cut_point(text: &str, max: usize) -> usize {
+    let mut limit = max;
     while !text.is_char_boundary(limit) {
         limit -= 1;
+    }
+    if limit == 0 {
+        return text.chars().next().map_or(text.len(), char::len_utf8);
     }
     let window = &text[..limit];
     let half = limit / 2;
@@ -194,6 +321,23 @@ pub fn mostly_numbers(text: &str) -> bool {
 mod tests {
     use super::*;
 
+    const MAX_PASSAGE: usize = Settings::BASE.max_passage_chars;
+
+    fn passages(text: &str) -> Vec<Passage> {
+        super::passages(text, &Settings::BASE)
+    }
+
+    /// What streaming `bytes` through Lines and a Cutter makes.
+    fn streamed(bytes: &[u8]) -> Vec<Passage> {
+        let mut lines = Lines::new(bytes).unwrap();
+        let mut cutter = Cutter::new(&Settings::BASE);
+        while let Some((line, ended)) = lines.next_line().unwrap() {
+            cutter.push(&line, ended);
+        }
+        cutter.finish();
+        cutter.ready().collect()
+    }
+
     #[test]
     fn short_paragraphs_join_into_one_passage() {
         let text = "First line\nsecond line\n\nAnother paragraph.\n";
@@ -217,11 +361,27 @@ mod tests {
     fn long_text_is_cut_near_the_target() {
         let paragraph = "word ".repeat(100);
         let text = vec![paragraph; 10].join("\n\n");
-        let passages = passages(&text);
-        assert!(passages.len() >= 4);
-        assert!(passages.iter().all(|p| p.text.len() <= MAX_PASSAGE));
+        let cut = passages(&text);
+        assert!(cut.len() >= 4);
+        assert!(cut.iter().all(|p| p.text.len() <= MAX_PASSAGE));
         let one = "x".repeat(5000);
-        assert!(super::passages(&one).iter().all(|p| p.text.len() <= MAX_PASSAGE));
+        assert!(passages(&one).iter().all(|p| p.text.len() <= MAX_PASSAGE));
+        let tiny = Settings { passage_chars: 0, max_passage_chars: 0, ..Settings::BASE };
+        assert_eq!(super::passages("één", &tiny).len(), 3);
+    }
+
+    #[test]
+    fn streamed_text_is_cut_as_a_whole_one() {
+        let text = format!(
+            "Title\r\n\r\n{}\n\n\nx{}\nend  ",
+            "a sentence of words. ".repeat(300),
+            "é".repeat(LINE_PART as usize) // one line longer than a part, split inside a character
+        );
+        assert_eq!(streamed(text.as_bytes()), passages(&text.replace('\r', "")));
+        let utf16: Vec<u8> = [0xFF, 0xFE].into_iter().chain(text.encode_utf16().flat_map(u16::to_le_bytes)).collect();
+        assert_eq!(streamed(&utf16), passages(&text.replace('\r', "")));
+        // A line that isn't UTF-8 is Latin-1.
+        assert_eq!(streamed(b"caf\xe9\nok")[0].text, "café\nok");
     }
 
     #[test]

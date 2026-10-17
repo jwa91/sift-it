@@ -84,7 +84,7 @@ and WezTerm. Recordings show a waveform with the matching time range highlighted
 ```sh
 sift-it search "the diagram of the heating system"
 sift-it open 1
-sift-it search "annual maintenance" --kind pdf -n 10
+sift-it search "annual maintenance" --kind document -n 10
 sift-it search '"SERVICE-2026-042" maintenance'
 sift-it search "the railway bridge at sunset" --json
 sift-it search "annual maintenance" | while IFS= read -r result_path; do open "$result_path"; done
@@ -99,7 +99,7 @@ Text and code results open at their matching line in a supported editor.
 Enable code indexing before a code search:
 
 ```sh
-sift-it config include-code true
+sift-it config sources.code true
 sift-it index
 sift-it search "code: validate a configuration file"
 ```
@@ -116,7 +116,7 @@ Other programs can use `sift-it serve`. It accepts JSON requests through stdin a
 It keeps vectors and the query encoder in memory while the interface remains open.
 See [src/serve.rs](src/serve.rs) for the request and reply formats.
 
-## Supported files and limits
+## Supported files
 
 sift-it reads only the folders you select. It does not change, move, or upload your source files.
 
@@ -144,7 +144,22 @@ recording down a few minutes at a time: any change in your folders comes first, 
 On an Apple silicon Mac it writes down a 30-minute podcast in under half a minute.
 
 Each passage is a sentence or a few, with its time: a search for a word said in a podcast opens it at that moment.
-`sift-it status` shows how far it is; `sift-it config transcribe off` turns it off.
+`sift-it status` shows how far it is; `sift-it config reading.depth meaning` turns it off.
+
+### How deep files are read
+
+`reading.depth` decides how deep a file is read, in three stages that build on each other:
+
+| Depth | A file is found by |
+|---|---|
+| `words` | its name, its tags and the words in it, including text on screenshots and scanned pages. No model needed |
+| `meaning` | also what it means: passages, pictures, video frames and sound |
+| `speech` | also what's said in it, written down (the default) |
+
+There are no size or length limits: a four-hour podcast is read as fully as a short memo. The indexer reads the
+cheapest files first, so most of a folder is searchable soon, and writes a big file in parts as it reads it.
+`sift-it status` shows what's still waiting and the files that take longest. Leave those out with `sources.ignore`,
+give them a lower depth, or let them run.
 
 sift-it skips hidden folders, nested `~/Library` folders, app bundles, packages, dependency folders, and build folders.
 It also skips recognized secret files and iCloud files that exist only in the cloud.
@@ -165,10 +180,37 @@ sift-it selftest
 ```
 
 Run `sift-it --help` for all commands and options.
+
 Data lives in `~/Library/Application Support/Sift It`, or the folder specified by `SIFT_IT_HOME`.
 This folder contains `config.json`, `index.sqlite`, `status.json`, `indexer.log`, `models/`, and `previews/`.
 `SIFT_IT_SPEECH_MODEL` points at another copy of the speech model.
 `brew uninstall --zap sift-it` removes the installation and its data.
+
+### Configuration
+
+`config.json` holds every setting, each with its value written out. `sift-it config` shows it, and
+`sift-it config <key> <value>` sets a value by its dotted name. `null` puts a value back to its default.
+
+```sh
+sift-it config sources.ignore '["*.psd", "~/Documents/Old"]'
+sift-it config reading.video.keep_every_s 10
+sift-it config reading.rules '[{"path": "~/Movies/Footage/**", "depth": "words"}]'
+sift-it config indexing.on_battery false
+```
+
+| Section | Holds | A change counts |
+|---|---|---|
+| `sources` | folders, ignore patterns, the file types of each kind, whether code is read | at the next sync |
+| `reading` | how deep and how files are read, per kind, file type, and folder | the files it affects are read again |
+| `ranking` | the constants search ranks by | at the next search |
+| `indexing` | battery and timing of the background indexer | at once |
+| `log` | the size of the indexer's log | at once |
+
+A reading value resolves in four steps, and the last one that sets it wins: the top of `reading`, the kind
+(`reading.video`), the file type (`reading.types.mov`), then each rule in `reading.rules` whose path matches.
+Ignore patterns and rule paths match a file or folder name anywhere (`*.psd`), or a path when they contain a slash
+(`~/Documents/Old`, `**/Exports/**`). A folder that matches counts for everything in it.
+See [docs/design.md](docs/design.md) for where the configuration is going.
 
 ## Build from source
 

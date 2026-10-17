@@ -17,6 +17,7 @@
 //! note that mentions steam and a train doesn't outrank a photo of a steam train. Words also pick which of a file's
 //! segments a result opens at, between segments the meaning scores about the same.
 
+use crate::config::Ranking;
 use crate::crawl::Kind;
 use crate::embedder::DIM;
 use crate::store::{Segment, Store, blob_to_vector};
@@ -26,37 +27,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
 
-/// Lift (cosine above the query's median) a meaning match needs to be shown at all, and to count as a strong match.
-/// On the testbed (evals/evals.json), answers lift 0.12–0.30 (nearly all above 0.135); the best results for queries
-/// without an answer lift 0.05–0.10, except a near miss at 0.144.
-const SHOWN_LIFT: f32 = 0.09;
-const STRONG_LIFT: f32 = 0.13;
-/// The bonus for containing all of the query's words, in the same units, when one of them is a number or the search
-/// is of code or quoted words: the words decide.
-const WORD_BONUS: f32 = 0.10;
-/// The bonus for containing all of them otherwise: the words only choose between matches the meaning scores about the
-/// same. Any larger, and a passage that only mentions them outranks a better picture or recording of what they
-/// describe.
-const PLAIN_WORD_BONUS: f32 = 0.03;
-/// A file of n segments has its lifts lowered by LENGTH_PENALTY × ln(n / LENGTH_FREE), and one of up to LENGTH_FREE
-/// segments (a photo, a few pages, a minute and a half of sound) not at all. That is about how far the best of n
-/// segments stands above a typical one by chance alone: the expected maximum of n draws, at the usual spread of a
-/// query's scores (0.03), less that of LENGTH_FREE. A 3-minute video loses 0.03, a novel 0.05–0.07. On a folder of 520
-/// mixed files and eight books (docs/ranking.md), a book had come first for 21 of 95 queries about something else;
-/// now 1.
-const LENGTH_PENALTY: f32 = 0.0125;
-const LENGTH_FREE: f32 = 4.0;
-/// Segments of one file within this much of its best are close enough for words to choose between them.
-const CLOSE: f32 = 0.04;
-/// At most this many of one file's segments are candidates, so a long file can't use up what's taken.
-const PER_FILE: usize = 10;
 /// Above this many vectors, the median is taken from a sample (it's the same median, faster).
 const MEDIAN_SAMPLE: usize = 50_000;
-/// A typical median: across the testbed's queries, a query's median segment scores 0.49–0.59. A small index's own
-/// median is pulled toward it (as if it held PRIOR_WEIGHT more segments scoring that), or with a file or two the
-/// median would be the match itself, and nothing could ever stand out.
-const PRIOR_MEDIAN: f32 = 0.55;
-const PRIOR_WEIGHT: f32 = 30.0;
 
 #[link(name = "Accelerate", kind = "framework")]
 unsafe extern "C" {
@@ -137,8 +109,9 @@ pub struct Searcher {
     ids: Vec<i64>,
     rows: HashMap<i64, usize>,
     files: Vec<i64>,
-    /// What each vector's lift is lowered by for the length of its file (LENGTH_PENALTY).
+    /// What each vector's lift is lowered by for the length of its file (`ranking.length_penalty`).
     penalties: Vec<f32>,
+    ranking: Ranking,
     matrix: Vec<f32>,
     file_kinds: HashMap<i64, Kind>,
     data_version: i64,
@@ -201,7 +174,8 @@ struct Candidate {
 }
 
 impl Searcher {
-    pub fn open(path: &Path) -> Result<Self> {
+    /// A searcher of the index at `path`, ranking by `ranking` (config.json's).
+    pub fn open(path: &Path, ranking: Ranking) -> Result<Self> {
         let store = Store::open_readonly(path)?;
         let mut searcher = Self {
             store,
@@ -209,6 +183,7 @@ impl Searcher {
             rows: HashMap::new(),
             files: Vec::new(),
             penalties: Vec::new(),
+            ranking,
             matrix: Vec::new(),
             file_kinds: HashMap::new(),
             data_version: -1,
@@ -217,6 +192,12 @@ impl Searcher {
         };
         searcher.refresh()?;
         Ok(searcher)
+    }
+
+    /// Ranks by these values from the next search on.
+    pub fn set_ranking(&mut self, ranking: Ranking) {
+        self.penalties = length_penalties(&self.files, &ranking);
+        self.ranking = ranking;
     }
 
     pub fn vector_count(&self) -> usize {
@@ -270,7 +251,7 @@ impl Searcher {
             .filter_map(|row| row.ok())
             .filter_map(|(id, kind)| Kind::parse(&kind).map(|kind| (id, kind)))
             .collect();
-        self.penalties = length_penalties(&self.files);
+        self.penalties = length_penalties(&self.files, &self.ranking);
         Ok(true)
     }
 
@@ -300,6 +281,7 @@ impl Searcher {
     pub fn search(&mut self, request: &Request, query: Option<&[f32]>) -> Result<Response> {
         let started = std::time::Instant::now();
         self.refresh()?;
+        let ranking = self.ranking.clone();
         let code = request.is_code();
         let wanted = |kind: Kind| {
             if code {
@@ -316,7 +298,8 @@ impl Searcher {
             Some(query) if !self.ids.is_empty() => {
                 let cosines = self.cosines(query);
                 let n = cosines.len() as f32;
-                let median = (median(&cosines) * n + PRIOR_MEDIAN * PRIOR_WEIGHT) / (n + PRIOR_WEIGHT);
+                let prior = ranking.prior_median * ranking.prior_weight;
+                let median = (median(&cosines) * n + prior) / (n + ranking.prior_weight);
                 (cosines, median)
             }
             _ => (Vec::new(), 0.0),
@@ -330,27 +313,28 @@ impl Searcher {
         let words = words_of(request.text());
         let phrases = request.phrases();
         let exact = request.words_decide();
-        let bonus = if exact { WORD_BONUS } else { PLAIN_WORD_BONUS };
+        let bonus = if exact { ranking.word_bonus } else { ranking.plain_word_bonus };
         if !phrases.is_empty() {
             // Quoted words must be there exactly: only segments with them, ranked by meaning among themselves.
             let matches = self.phrase_matches(&phrases, &wanted_file, 5000)?;
             let count = matches.len().max(1) as f32;
             for (rank, segment) in matches.into_iter().enumerate() {
-                let score = WORD_BONUS + fit_of(segment).unwrap_or(0.0).max(0.0) + 0.02 * (1.0 - rank as f32 / count);
+                let fit = fit_of(segment).unwrap_or(0.0).max(0.0);
+                let score = ranking.word_bonus + fit + 0.02 * (1.0 - rank as f32 / count);
                 candidates.insert(segment, Candidate { segment, score, words: true });
             }
         } else if !cosines.is_empty() {
-            // The kinds asked for, and at most PER_FILE of a file, before the 5000 are taken.
+            // The kinds asked for, and at most `per_file` of a file, before the 5000 are taken.
             let mut shown: Vec<(usize, f32)> = (0..cosines.len())
                 .map(|i| (i, fit_at(i)))
-                .filter(|&(i, fit)| fit >= SHOWN_LIFT && wanted_file(self.files[i]))
+                .filter(|&(i, fit)| fit >= ranking.shown_lift && wanted_file(self.files[i]))
                 .collect();
             shown.sort_by(|a, b| b.1.total_cmp(&a.1));
             let mut per_file: HashMap<i64, usize> = HashMap::new();
             let taken = shown.into_iter().filter(|&(i, _)| {
                 let count = per_file.entry(self.files[i]).or_default();
                 *count += 1;
-                *count <= PER_FILE
+                *count <= ranking.per_file
             });
             for (i, fit) in taken.take(5000) {
                 candidates.insert(self.ids[i], Candidate { segment: self.ids[i], score: fit, words: false });
@@ -385,7 +369,7 @@ impl Searcher {
             .map(|mut segments| {
                 segments.sort_by(|a, b| b.score.total_cmp(&a.score));
                 let best = segments[0].score;
-                segments.retain(|c| c.score >= best - CLOSE);
+                segments.retain(|c| c.score >= best - ranking.close);
                 (best, segments)
             })
             .collect();
@@ -410,10 +394,10 @@ impl Searcher {
             hit.score = score;
             hit.lift = lift;
             hit.cosine = lift.map(|l| l + median);
-            hit.meaning = best_fit >= SHOWN_LIFT;
+            hit.meaning = best_fit >= ranking.shown_lift;
             hit.words = has_words;
-            hit.strong =
-                best_fit >= STRONG_LIFT || (has_words && (exact || score >= STRONG_LIFT || score >= meaning_best));
+            let strong = ranking.strong_lift;
+            hit.strong = best_fit >= strong || (has_words && (exact || score >= strong || score >= meaning_best));
             hits.push(hit);
         }
         // Strong matches first, then the weaker ones, each by score.
@@ -535,7 +519,7 @@ impl Searcher {
         self.text_matches(&query, wanted, limit)
     }
 
-    /// The segments an FTS5 query matches, best first (bm25): only of files `wanted` takes, at most PER_FILE of one,
+    /// The segments an FTS5 query matches, best first (bm25): only of files `wanted` takes, at most `per_file` of one,
     /// `limit` in all. The kinds and the cap come before the limit, or a long file or files of a kind not asked for
     /// could use it up and leave out what was asked for.
     fn text_matches(&self, query: &str, wanted: &dyn Fn(i64) -> bool, limit: usize) -> Result<Vec<i64>> {
@@ -551,7 +535,7 @@ impl Searcher {
         {
             let (segment, file): (i64, i64) = (row.get(0)?, row.get(1)?);
             let count = per_file.entry(file).or_default();
-            if *count < PER_FILE && wanted(file) {
+            if *count < self.ranking.per_file && wanted(file) {
                 *count += 1;
                 ids.push(segment);
             }
@@ -579,7 +563,7 @@ impl Searcher {
                 Ok(Hit {
                     name: Path::new(&path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
                     path,
-                    kind: Kind::parse(&row.get::<_, String>(1)?).unwrap_or(Kind::Text),
+                    kind: Kind::parse(&row.get::<_, String>(1)?).unwrap_or(Kind::Plaintext),
                     modified: row.get(2)?,
                     size: row.get::<_, i64>(3)? as u64,
                     info: row
@@ -604,7 +588,7 @@ impl Searcher {
         // In text and code, open at the first line with one of the query's telling words, not at the passage's top.
         // (A notebook's places are cells, not lines.)
         let notebook = hit.path.ends_with(".ipynb");
-        if let (Segment::Passage, Kind::Code | Kind::Text, Some(first), false) =
+        if let (Segment::Passage, Kind::Code | Kind::Plaintext, Some(first), false) =
             (hit.segment, hit.kind, hit.loc, notebook)
             && let Some(offset) = self.focus_line(segment_id, words)?
         {
@@ -636,14 +620,15 @@ impl Searcher {
     }
 }
 
-/// For each vector, what its lift is lowered by for the length of its file: LENGTH_PENALTY × ln(n / LENGTH_FREE) for a
+/// For each vector, what its lift is lowered by for the length of its file: length_penalty × ln(n / length_free) for a
 /// file of n vectors, nothing for a short one.
-fn length_penalties(files: &[i64]) -> Vec<f32> {
+fn length_penalties(files: &[i64], ranking: &Ranking) -> Vec<f32> {
     let mut lengths: HashMap<i64, usize> = HashMap::new();
     for &file in files {
         *lengths.entry(file).or_default() += 1;
     }
-    files.iter().map(|file| LENGTH_PENALTY * (lengths[file] as f32 / LENGTH_FREE).ln().max(0.0)).collect()
+    let penalty = |n: usize| ranking.length_penalty * (n as f32 / ranking.length_free).ln().max(0.0);
+    files.iter().map(|file| penalty(lengths[file])).collect()
 }
 
 /// The median of the scores (of a sample of them, for a large index).
@@ -737,8 +722,9 @@ mod tests {
 
     /// A file of `kind` whose passages are `texts`, indexed without vectors.
     fn add(store: &mut Store, path: &str, kind: Kind, texts: Vec<String>) {
-        let found = crate::crawl::Found { path: path.into(), kind, size: 1, modified: 1.0 };
-        store.queue(&found, None).unwrap();
+        let settings = crate::config::Settings::BASE;
+        let found = crate::crawl::Found { path: path.into(), kind, size: 1, modified: 1.0, settings };
+        store.queue(&found, None, 0.0).unwrap();
         let row = store.pending(100).unwrap().into_iter().find(|row| row.path == Path::new(path)).unwrap();
         let segments: Vec<NewSegment> = texts
             .into_iter()
@@ -751,22 +737,22 @@ mod tests {
                 vector: None,
             })
             .collect();
-        assert!(store.finish_file(&row, &segments, &serde_json::json!({})).unwrap());
+        assert!(store.finish_file(&row, &segments, &serde_json::json!({}), false).unwrap());
     }
 
     #[test]
     fn a_long_file_or_an_unwanted_kind_doesnt_use_up_the_word_matches() {
         let index = TempIndex::new("budget");
         let mut store = Store::open(&index.0).unwrap();
-        add(&mut store, "/docs/long.html", Kind::Doc, (0..1200).map(|i| format!("needle {i}, needle")).collect());
-        add(&mut store, "/notes/note.txt", Kind::Text, vec!["needle extra context in a note".into()]);
+        add(&mut store, "/docs/long.html", Kind::Document, (0..1200).map(|i| format!("needle {i}, needle")).collect());
+        add(&mut store, "/notes/note.txt", Kind::Plaintext, vec!["needle extra context in a note".into()]);
         drop(store);
-        let mut searcher = Searcher::open(&index.0).unwrap();
+        let mut searcher = Searcher::open(&index.0, Ranking::default()).unwrap();
         let search = |searcher: &mut Searcher, kinds: Vec<Kind>| {
             let request = Request { q: "needle".into(), kinds, limit: 10, prefix_last: false };
             searcher.search(&request, None).unwrap().hits.into_iter().map(|hit| hit.path).collect::<Vec<_>>()
         };
-        assert_eq!(search(&mut searcher, vec![Kind::Text]), vec!["/notes/note.txt"]);
+        assert_eq!(search(&mut searcher, vec![Kind::Plaintext]), vec!["/notes/note.txt"]);
         assert_eq!(search(&mut searcher, vec![]).len(), 2);
     }
 
@@ -793,11 +779,12 @@ mod tests {
     #[test]
     fn long_files_are_lowered_short_ones_not() {
         let files: Vec<i64> = [vec![1; 4], vec![2; 40], vec![3; 400], vec![4]].concat();
-        let penalties = length_penalties(&files);
+        let ranking = Ranking::default();
+        let penalties = length_penalties(&files, &ranking);
         assert_eq!(penalties[0], 0.0);
         assert_eq!(penalties[files.len() - 1], 0.0);
         let (forty, four_hundred) = (penalties[4], penalties[44]);
-        assert!((forty - LENGTH_PENALTY * 10f32.ln()).abs() < 1e-6);
+        assert!((forty - ranking.length_penalty * 10f32.ln()).abs() < 1e-6);
         assert!(four_hundred > forty && four_hundred < 0.06);
     }
 

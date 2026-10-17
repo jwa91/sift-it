@@ -3,7 +3,7 @@
 //! Sound is decoded to 16 kHz mono and handed over in 30-second windows that overlap by 10 seconds (the model listens
 //! to 30 seconds at a time; the overlap keeps a sentence at a window's edge whole in one of them). Silent windows are
 //! skipped. Video is sampled every few seconds, and a frame is kept when the picture changes (a new shot) or every
-//! 30 seconds of the same one.
+//! so often within the same one.
 //!
 //! It uses AVFoundation's synchronous calls (deprecated for the async ones): they block a worker thread, which is what
 //! a reader wants.
@@ -31,11 +31,6 @@ const SILENCE: f32 = 0.003;
 /// Video is sampled at least this often, and at most this many times per file.
 const FRAME_STEP: f64 = 2.0;
 const MAX_SAMPLES: f64 = 900.0;
-/// A sampled frame this different from the last kept one (mean difference of a 16 × 9 grey thumbnail, 0–255)
-/// starts a new shot.
-const SHOT_CHANGE: f64 = 14.0;
-/// Within one shot, a frame is kept at least this often.
-const KEEP_EVERY: f64 = 30.0;
 
 fn asset(path: &Path) -> Retained<AVURLAsset> {
     let url = NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy()));
@@ -330,10 +325,14 @@ pub fn frame_at(path: &Path, seconds: f64, max_side: u32) -> Result<Retained<CGI
         .map_err(|error| anyhow!("AVFoundation: {}", error.localizedDescription()))
 }
 
-/// Walks the video and hands over the frames worth keeping: (time in seconds, frame).
+/// Walks the video and hands over the frames worth keeping: (time in seconds, frame). A sampled frame at least
+/// `shot_change` different from the last one kept (the mean difference of a 16 × 9 grey thumbnail, 0 to 255) starts
+/// a new shot, and within one shot a frame is kept every `keep_every` seconds.
 pub fn read_video(
     path: &Path,
     max_side: u32,
+    shot_change: f64,
+    keep_every: f64,
     on_frame: &mut dyn FnMut(f64, &CGImage) -> Result<()>,
 ) -> Result<VideoInfo> {
     let asset = asset(path);
@@ -362,7 +361,7 @@ pub fn read_video(
             let signature = crate::mac::signature(&frame)?;
             let keep = match &last_kept {
                 None => true,
-                Some((kept_at, kept)) => at - kept_at >= KEEP_EVERY || difference(kept, &signature) >= SHOT_CHANGE,
+                Some((kept_at, kept)) => at - kept_at >= keep_every || difference(kept, &signature) >= shot_change,
             };
             if keep {
                 on_frame(at, &frame)?;

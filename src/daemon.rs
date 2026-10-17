@@ -1,7 +1,7 @@
 //! `sift-it daemon`: the background indexer. It keeps the index in step with the chosen folders: a full sync when it
-//! starts (and every half hour, in case an event was missed), then the paths macOS reports as changed (FSEvents), a
-//! moment after they go quiet. It reads what's new, newest and cheapest first, and lets the model go after a minute
-//! with nothing to do.
+//! starts (and every `indexing.full_sync_min`, in case an event was missed), then the paths macOS reports as changed
+//! (FSEvents), a moment after they go quiet. It reads what's new, newest and cheapest first, and lets the model go
+//! after `indexing.release_model_s` with nothing to do. A change to config.json counts at once, with a full sync.
 //!
 //! Once everything is read, and only then, it writes down what's said in recordings and videos (speech.rs), a chunk
 //! at a time: anything that changes in the folders comes first, and the writing down goes on where it stopped.
@@ -11,7 +11,7 @@
 //!   SIGUSR2  pause or resume
 //!   SIGTERM  stop (what isn't finished stays queued)
 //!
-//! One runs at a time (daemon.lock). With `index_on_battery` off it waits for a charger; in Low Power Mode it always
+//! One runs at a time (daemon.lock). With `indexing.on_battery` off it waits for a charger; in Low Power Mode it always
 //! waits.
 
 use crate::config::{self, Config};
@@ -30,16 +30,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
 use std::time::{Duration, Instant, SystemTime};
 
-/// Changes are handled once a path has been quiet this long (a download, a copy, an export settling).
-const QUIET: Duration = Duration::from_millis(1500);
-/// A full sync, in case an event went missing.
-const FULL_SYNC_EVERY: Duration = Duration::from_secs(30 * 60);
-/// The model is let go after this long with nothing to index.
-const RELEASE_MODEL_AFTER: Duration = Duration::from_secs(60);
 /// While waiting (battery, Low Power Mode), conditions are checked this often.
 const WAIT_CHECK: Duration = Duration::from_secs(10);
-/// The log is cut in half past this size.
-const MAX_LOG: u64 = 4 << 20;
 /// A speech helper that couldn't start is tried again after this long.
 const SPEECH_RETRY: Duration = Duration::from_secs(300);
 
@@ -226,7 +218,7 @@ fn watch(
     events: std::sync::mpsc::Sender<notify::Result<notify::Event>>,
 ) -> Result<RecommendedWatcher> {
     let mut watcher = notify::recommended_watcher(events)?;
-    for folder in &config.folders {
+    for folder in &config.sources.paths {
         if let Err(error) = watcher.watch(folder, RecursiveMode::Recursive) {
             log(&format!("can't watch {}: {error}", folder.display()));
         }
@@ -242,6 +234,8 @@ struct Changes {
     paths: HashMap<PathBuf, Instant>,
     /// The chosen folders: what's below them decides what's worth a look.
     roots: Vec<PathBuf>,
+    /// How long a path must be quiet before it's handed over.
+    quiet: Duration,
     rescan: bool,
 }
 
@@ -286,7 +280,7 @@ impl Changes {
     fn take(&mut self) -> Vec<PathBuf> {
         self.drain();
         let mut settled: Vec<PathBuf> =
-            self.paths.iter().filter(|(_, changed)| changed.elapsed() >= QUIET).map(|(p, _)| p.clone()).collect();
+            self.paths.iter().filter(|(_, changed)| changed.elapsed() >= self.quiet).map(|(p, _)| p.clone()).collect();
         if settled.is_empty() {
             return Vec::new();
         }
@@ -309,7 +303,7 @@ fn reason_to_wait(config: &Config) -> Option<String> {
     if power::low_power_mode() {
         return Some("Waiting: Low Power Mode is on".into());
     }
-    if !config.index_on_battery && power::on_battery() {
+    if !config.indexing.on_battery && power::on_battery() {
         return Some("Waiting for a charger".into());
     }
     None
@@ -318,7 +312,10 @@ fn reason_to_wait(config: &Config) -> Option<String> {
 pub fn run() -> Result<()> {
     let _lock = lock()?;
     install_signal_handlers();
-    trim_log();
+    let config_path = config::config_path();
+    let mut config = Config::load()?;
+    let mut config_time = modified(&config_path);
+    trim_log(config.log.max_mb << 20);
     log(&format!("sift-it daemon started (pid {})", std::process::id()));
     let mut reporter = Reporter {
         status: Status { pid: std::process::id(), state: "starting", ..Default::default() },
@@ -326,14 +323,17 @@ pub fn run() -> Result<()> {
     };
     reporter.write(true);
 
-    let config_path = config::config_path();
-    let mut config = Config::load()?;
-    let mut config_time = modified(&config_path);
     let store = Store::open(&config::index_path()).context("can't open the index")?;
     let mut indexer = Indexer::new(store, config::models_dir())?;
     let (sender, receiver) = channel();
     let mut watcher = watch(&config, sender.clone())?;
-    let mut changes = Changes { receiver, paths: HashMap::new(), roots: config.folders.clone(), rescan: true };
+    let mut changes = Changes {
+        receiver,
+        paths: HashMap::new(),
+        roots: config.sources.paths.clone(),
+        quiet: Duration::from_millis(config.indexing.quiet_ms),
+        rescan: true,
+    };
     let mut last_full = Instant::now();
     let mut idle_since = Instant::now();
     let mut paused = false;
@@ -345,18 +345,19 @@ pub fn run() -> Result<()> {
     let mut speech_failed_at: Option<Instant> = None;
 
     while !SHUTDOWN.load(Ordering::SeqCst) {
-        // Folders chosen or dropped: watch the new set, and sync it all.
+        // The config changed: watch the folders it names now, and sync it all (what's read, and how, may differ).
         if modified(&config_path) != config_time {
             config_time = modified(&config_path);
             match Config::load() {
                 Ok(new) => {
                     config = new;
                     waiting_reason = None;
-                    changes.roots = config.folders.clone();
+                    changes.roots = config.sources.paths.clone();
+                    changes.quiet = Duration::from_millis(config.indexing.quiet_ms);
                     drop(watcher);
                     watcher = watch(&config, sender.clone())?;
                     changes.rescan = true;
-                    log("folders changed");
+                    log("the config changed");
                 }
                 Err(error) => log(&format!("can't read the config: {error:#}")),
             }
@@ -365,7 +366,8 @@ pub fn run() -> Result<()> {
             paused = !paused;
             log(if paused { "paused" } else { "resumed" });
         }
-        if RESYNC.swap(false, Ordering::SeqCst) || last_full.elapsed() > FULL_SYNC_EVERY {
+        let full_sync_every = Duration::from_secs(config.indexing.full_sync_min * 60);
+        if RESYNC.swap(false, Ordering::SeqCst) || last_full.elapsed() > full_sync_every {
             changes.rescan = true;
         }
         changes.drain();
@@ -435,8 +437,7 @@ pub fn run() -> Result<()> {
             }
         } else {
             // Everything is read: what's said in recordings and videos is written down meanwhile.
-            let to_write = config.transcribe
-                && !paused
+            let to_write = !paused
                 && indexer.store.transcripts_pending(1).map(|rows| !rows.is_empty()).unwrap_or(false)
                 && reason_to_wait(&config).is_none();
             let may_start = speech_failed_at.is_none_or(|at| at.elapsed() > SPEECH_RETRY);
@@ -460,7 +461,7 @@ pub fn run() -> Result<()> {
             // A change that's still settling is synced and read first: the helper waits for it, loaded.
             let settling = !changes.paths.is_empty();
             if let (true, Some(running), false) = (to_write, transcriber.as_mut(), settling) {
-                if let Ok((done, total)) = indexer.store.transcript_counts() {
+                if let Ok(store::Transcripts { done, total, .. }) = indexer.store.transcripts() {
                     reporter.status.speech_done = done;
                     reporter.status.speech_total = total;
                     reporter.status.done = done;
@@ -504,11 +505,11 @@ pub fn run() -> Result<()> {
                 transcriber = None;
             }
             reporter.status.current = None;
-            let detail = speech_problem.clone().filter(|_| config.transcribe);
+            let detail = speech_problem.clone().filter(|_| to_write);
             reporter.set("idle", detail);
         }
 
-        if indexer.model_loaded() && idle_since.elapsed() > RELEASE_MODEL_AFTER {
+        if indexer.model_loaded() && idle_since.elapsed() > Duration::from_secs(config.indexing.release_model_s) {
             indexer.release_model();
             log("released the model");
         }
@@ -532,11 +533,11 @@ fn sleep_interruptibly(duration: Duration) {
     }
 }
 
-/// Keeps the log (where launchd sends stderr) from growing without end: past MAX_LOG, its older half goes.
-fn trim_log() {
+/// Keeps the log (where launchd sends stderr) from growing without end: past `max` bytes, its older half goes.
+fn trim_log(max: u64) {
     let path = config::home().join("indexer.log");
     let Ok(metadata) = std::fs::metadata(&path) else { return };
-    if metadata.len() <= MAX_LOG {
+    if metadata.len() <= max {
         return;
     }
     if let Ok(bytes) = std::fs::read(&path) {

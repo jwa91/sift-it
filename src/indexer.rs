@@ -1,9 +1,11 @@
 //! Keeping the index in step with the chosen folders.
 //!
-//! `sync` crawls the folders and compares them with the index: new and changed files are queued, gone files leave.
-//! `sync_paths` does the same for just the paths a file-system event named. `index_pending` then reads the queued files
-//! on a few worker threads, which stream their pieces to this thread, the one that owns the model. Texts are embedded
-//! in batches; each file is written in one transaction once all of it is in, so a search never sees half a file.
+//! `sync` crawls the folders and compares them with the index: new and changed files are queued, each with an estimate
+//! of its work, gone files leave. `sync_paths` does the same for just the paths a file-system event named.
+//! `index_pending` then reads the queued files, cheapest first, on a few worker threads, which stream their pieces to
+//! this thread, the one that owns the model (loaded when a piece first needs a vector). Texts are embedded in batches.
+//! A file is written once all of it is in, or, for a big one, in parts of PART segments as they come: memory doesn't
+//! grow with a file, and a search finds what's in.
 //!
 //! While it runs, files that appear go to the front of the queue (`changes`): a new screenshot is searchable in a
 //! second or two even while a long video is being read.
@@ -87,13 +89,22 @@ enum Message {
     Done(i64, Result<serde_json::Value>),
 }
 
+/// Segments a file keeps before they're written as a part (Store::write_part): about 2.5 MB of vectors.
+const PART: usize = 256;
+
 /// A file being put together from its pieces.
 struct Assembly {
     row: FileRow,
     started: Instant,
+    /// The segments not written yet.
     segments: Vec<NewSegment>,
+    /// Segments written as parts, and how many of them have a vector.
+    written: usize,
+    vectors: usize,
     /// Pieces whose vector failed: they stay in the keyword index.
     failures: usize,
+    /// The file changed (or left) while it was read: what's left of it isn't embedded or written.
+    stale: bool,
 }
 
 pub struct Indexer {
@@ -110,18 +121,6 @@ impl Indexer {
     pub fn new(store: Store, models: PathBuf) -> Result<Self> {
         if store.adopt_vector_source(&crate::embedder::vector_source())? {
             eprintln!("the index was made by another model or pipeline: everything is indexed again");
-        }
-        // An index from before the readers had a version: its failures get a try with these.
-        if store.meta("readers")?.is_none() {
-            store.set_meta("readers", "1")?;
-        }
-        let retried = store.adopt_readers_version(readers::VERSION)?;
-        if retried > 0 {
-            eprintln!("{retried} files that couldn't be read get another try with the improved readers");
-        }
-        let reread = store.adopt_passages_version(readers::PASSAGES)?;
-        if reread > 0 {
-            eprintln!("{reread} text and code files are read again: their passages are cut differently now");
         }
         if store.adopt_speech_source(crate::speech::source())? {
             eprintln!("what's said in recordings was written down by another speech model: it's written down again");
@@ -210,13 +209,14 @@ impl Indexer {
         for file in found {
             match existing.get(&file.path) {
                 None => {
-                    self.store.queue(file, None)?;
+                    self.store.queue(file, None, crate::estimate::cost(file))?;
                     added += 1;
                 }
                 Some(row) if is_changed(row, file) => {
-                    self.store.queue(file, Some(row.id))?;
+                    self.store.queue(file, Some(row.id), crate::estimate::cost(file))?;
                     changed += 1;
                 }
+                Some(row) if row.speech != file.speech() => self.store.set_speech(row.id, file.speech())?,
                 Some(_) => {}
             }
         }
@@ -238,15 +238,10 @@ impl Indexer {
         }
         let started = Instant::now();
         on_event(Event::Started { pending: pending.len() });
-        if self.embedder.is_none() || !self.media {
-            self.embedder = None;
-            let files = ModelFiles::in_folder(&self.models)?;
-            self.embedder = Some(Embedder::load(&files, false)?);
-            self.media = true;
-        }
 
         // The files handed out, by id (workers send only ids).
         let mut known: HashMap<i64, FileRow> = pending.iter().map(|row| (row.id, row.clone())).collect();
+        let reading = Arc::new(config.reading.clone());
         let queue = Arc::new(Mutex::new(VecDeque::from(pending)));
         let finished = Arc::new(AtomicBool::new(false));
         // Each worker has a small channel of its own, and this thread takes from them in turn: a file with hundreds
@@ -261,6 +256,7 @@ impl Indexer {
             let queue = queue.clone();
             let finished = finished.clone();
             let doorbell = doorbell.clone();
+            let reading = reading.clone();
             threads.push(std::thread::spawn(move || {
                 let send = |message: Message| -> Result<()> {
                     sender.send(message).map_err(|_| anyhow!("indexing stopped"))?;
@@ -277,10 +273,12 @@ impl Indexer {
                     if send(Message::Start(id, Instant::now())).is_err() {
                         break;
                     }
+                    // Read with this run's values. A file queued for other ones meanwhile isn't written (Store::write_file).
+                    let settings = reading.resolve(&row.path, row.kind);
                     // A reader that panics (a file no one expected) is a file that couldn't be read, not a lost run.
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         objc2::rc::autoreleasepool(|_| {
-                            readers::read(&row.path, row.kind, &mut |piece| send(Message::Piece(id, piece)))
+                            readers::read(&row.path, row.kind, &settings, &mut |piece| send(Message::Piece(id, piece)))
                         })
                     }))
                     .unwrap_or_else(|_| Err(anyhow!("the reader crashed on it")));
@@ -342,7 +340,7 @@ impl Indexer {
                         return Ok(());
                     }
                     // Nothing waiting: embed what's batched rather than sit on it, then wait for the doorbell.
-                    self.embed_texts(&mut run);
+                    self.embed_texts(&mut run)?;
                     match door.recv_timeout(Duration::from_millis(500)) {
                         Ok(()) | Err(RecvTimeoutError::Timeout) => {}
                         Err(RecvTimeoutError::Disconnected) => workers_gone = true,
@@ -375,34 +373,43 @@ impl Indexer {
             row: known[&id].clone(),
             started,
             segments: Vec::new(),
+            written: 0,
+            vectors: 0,
             failures: 0,
+            stale: false,
         };
         match message {
             Message::Start(id, started) => {
                 run.assemblies.insert(id, assembly(id, started));
             }
             Message::Piece(id, piece) => {
-                run.assemblies.entry(id).or_insert_with(|| assembly(id, Instant::now()));
+                if run.assemblies.entry(id).or_insert_with(|| assembly(id, Instant::now())).stale {
+                    return Ok(());
+                }
                 if matches!(piece.payload, Payload::Text(_)) {
                     run.batch.push((id, piece));
                     if run.batch.len() >= 16 {
-                        self.embed_texts(run);
+                        self.embed_texts(run)?;
                     }
                 } else {
-                    self.embed_texts(run);
+                    self.embed_texts(run)?;
+                    let (segment, failed) = self.embed_piece(piece)?;
                     let assembly = run.assemblies.get_mut(&id).expect("just made");
-                    let segment = self.embed_piece(piece, assembly);
+                    assembly.failures += failed as usize;
                     assembly.segments.push(segment);
                 }
+                self.write_parts(run)?;
             }
             Message::Done(id, result) => {
-                self.embed_texts(run);
+                self.embed_texts(run)?;
                 let assembly = run.assemblies.remove(&id).unwrap_or_else(|| assembly(id, Instant::now()));
                 run.completed += 1;
+                if assembly.stale {
+                    return Ok(());
+                }
                 let path = assembly.row.path.display().to_string();
                 match result {
                     Ok(info) => {
-                        let vectors = assembly.segments.iter().filter(|s| s.vector.is_some()).count();
                         let info = if assembly.failures > 0 {
                             let mut info = info;
                             info["unembedded"] = serde_json::json!(assembly.failures);
@@ -410,14 +417,16 @@ impl Indexer {
                         } else {
                             info
                         };
+                        let parts = assembly.written > 0;
                         // Not written when the file changed (or left) while it was read: it's queued again.
-                        if self.store.finish_file(&assembly.row, &assembly.segments, &info)? {
+                        if self.store.finish_file(&assembly.row, &assembly.segments, &info, parts)? {
                             run.indexed += 1;
                             on_event(Event::File {
                                 path,
                                 kind: assembly.row.kind,
-                                segments: assembly.segments.len(),
-                                vectors,
+                                segments: assembly.written + assembly.segments.len(),
+                                vectors: assembly.vectors
+                                    + assembly.segments.iter().filter(|s| s.vector.is_some()).count(),
                                 ms: assembly.started.elapsed().as_millis() as u64,
                             });
                         }
@@ -520,10 +529,38 @@ impl Indexer {
         Ok(self.embedder.as_mut().expect("just loaded"))
     }
 
+    /// The model with its image and audio encoders: the loaded one, or loaded now.
+    fn media_model(&mut self) -> Result<&mut Embedder> {
+        if self.embedder.is_none() || !self.media {
+            self.embedder = None;
+            let files = ModelFiles::in_folder(&self.models)?;
+            self.embedder = Some(Embedder::load(&files, false)?);
+            self.media = true;
+        }
+        Ok(self.embedder.as_mut().expect("just loaded"))
+    }
+
+    /// Writes the segments of files that have PART of them waiting, as a part.
+    fn write_parts(&mut self, run: &mut Run) -> Result<()> {
+        for assembly in run.assemblies.values_mut().filter(|a| !a.stale && a.segments.len() >= PART) {
+            let first = assembly.written == 0;
+            if self.store.write_part(&assembly.row, &assembly.segments, first)? {
+                assembly.written += assembly.segments.len();
+                assembly.vectors += assembly.segments.iter().filter(|s| s.vector.is_some()).count();
+            } else {
+                // It changed while it was read: it's queued again, and read again from the start.
+                assembly.stale = true;
+            }
+            assembly.segments.clear();
+        }
+        Ok(())
+    }
+
     /// Embeds the batched texts, one model call for up to 16 of them.
-    fn embed_texts(&mut self, run: &mut Run) {
+    fn embed_texts(&mut self, run: &mut Run) -> Result<()> {
+        run.batch.retain(|(id, _)| run.assemblies.get(id).is_some_and(|assembly| !assembly.stale));
         if run.batch.is_empty() {
-            return;
+            return Ok(());
         }
         let pieces = std::mem::take(&mut run.batch);
         let texts: Vec<&str> = pieces
@@ -533,8 +570,7 @@ impl Indexer {
                 _ => "",
             })
             .collect();
-        let embedder = self.embedder.as_mut().expect("model loaded");
-        let vectors = embedder.embed_texts(&texts);
+        let vectors = self.media_model()?.embed_texts(&texts);
         let failed = vectors.is_err();
         let mut vectors = vectors.unwrap_or_default().into_iter();
         for (id, piece) in pieces {
@@ -550,19 +586,23 @@ impl Indexer {
                 vector: vectors.next(),
             });
         }
+        self.write_parts(run)
     }
 
-    fn embed_piece(&mut self, piece: Piece, assembly: &mut Assembly) -> NewSegment {
-        let embedder = self.embedder.as_mut().expect("model loaded");
+    /// A picture or sound embedded (the model loads for the first one), or a piece without a vector (words alone).
+    /// True with it when it couldn't be embedded: it stays in the keyword index.
+    fn embed_piece(&mut self, piece: Piece) -> Result<(NewSegment, bool)> {
         let vector = match &piece.payload {
-            Payload::None | Payload::Text(_) => None,
-            Payload::Image(image) => embedder.embed_image(image).ok(),
-            Payload::Audio(samples) => embedder.embed_audio(samples).ok(),
+            Payload::None | Payload::Text(_) => Ok(None),
+            Payload::Image(image) => self.media_model()?.embed_image(image).map(Some),
+            Payload::Audio(samples) => self.media_model()?.embed_audio(samples).map(Some),
         };
-        if vector.is_none() && !matches!(piece.payload, Payload::None) {
-            assembly.failures += 1;
-        }
-        NewSegment { segment: piece.segment, loc: piece.loc, loc_end: piece.loc_end, text: piece.text, vector }
+        let failed = vector.is_err();
+        let vector = vector.ok().flatten();
+        Ok((
+            NewSegment { segment: piece.segment, loc: piece.loc, loc_end: piece.loc_end, text: piece.text, vector },
+            failed,
+        ))
     }
 }
 
@@ -575,6 +615,10 @@ struct Run {
     completed: usize,
 }
 
+/// Changed, or to be read another way.
 fn is_changed(row: &FileRow, found: &Found) -> bool {
-    row.size != found.size || (row.modified - found.modified).abs() > 0.001 || row.kind != found.kind
+    row.size != found.size
+        || (row.modified - found.modified).abs() > 0.001
+        || row.kind != found.kind
+        || row.reading != found.reading()
 }

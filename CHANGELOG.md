@@ -7,6 +7,34 @@ Format follows [Keep a Changelog](https://keepachangelog.com); versions follow
 
 ## [Unreleased]
 
+### Changed
+
+- One `config.json` with a section for each part of the work: `sources`, `reading`, `ranking`, `indexing` and `log`.
+  Every value is written out, `sift-it config <key> <value>` sets any of them by its dotted name, and a value the file
+  leaves out keeps its default.
+- Reading values (depth, token budgets, passage sizes, video sampling, a video's sound) resolve per file: the values
+  for everything, then the kind, the file type, and rules for paths. A change reads again only the files it affects.
+- `reading.depth` decides how deep a file is read: `words` (its name, tags and words, no model), `meaning` (also
+  embedded) or `speech` (also what's said, written down; the default). Each builds on the one before.
+- Every file is read in full: there are no size, page or length limits. The queue goes from the cheapest file to the
+  dearest, by an estimate made when a file is queued, and `sift-it status` shows what's waiting and the files that take
+  longest.
+- Text files, code and documents are read as a stream, and a big file's segments are written in parts as they come:
+  memory doesn't grow with a file, and a search finds the part that's in.
+- The model loads when a file first needs a vector, so indexing at `words` depth never loads it.
+- `sift-it read` recognizes screenshots as the indexer does.
+- Kinds are plaintext, document (PDFs included), image, screenshot, audio, video and code: `--kind pdf` becomes
+  `--kind document`.
+- `sources.ignore` takes patterns for files as well as folders, such as `*.psd` or `**/Exports/**`.
+  `sift-it folders exclude` adds one.
+- The constants search ranks by move into `ranking`, with the same values.
+
+### Removed
+
+- The options `include-code`, `index-on-battery`, `transcribe` and `exclude-ext`: `sources.code`,
+  `indexing.on_battery`, `reading.depth` and `sources.ignore` replace them.
+- The limits on file size, PDF pages and recording length.
+
 ## [0.2.0] — 2026-10-16
 
 ### Added

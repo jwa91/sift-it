@@ -3,9 +3,9 @@
 //! by Vision; a scanned page with no text on it (a photo, a drawing) is embedded as a picture.
 
 use super::image::{MIN_TEXT, emit_text};
-use super::text::{mostly_numbers, passages};
-use super::{Payload, Piece, Sink, title_of};
-use crate::embedder::prompts;
+use super::text::passages;
+use super::{Payload, Piece, Sink, text_payload, title_of};
+use crate::config::Settings;
 use crate::imaging;
 use crate::mac;
 use crate::store::Segment;
@@ -16,10 +16,6 @@ use objc2_foundation::{NSString, NSURL};
 use objc2_pdf_kit::PDFDocument;
 use std::path::Path;
 
-/// Pages read from one PDF, at most.
-pub const MAX_PAGES: usize = 5000;
-/// Scanned pages read by OCR in one PDF, at most (each takes about half a second).
-pub const MAX_SCANNED: usize = 300;
 /// A page with fewer characters than this has no real text layer: it's a scan.
 pub const SCANNED_BELOW: usize = 40;
 /// Scanned pages are drawn this large for OCR.
@@ -36,29 +32,23 @@ pub fn open(path: &Path) -> Result<objc2::rc::Retained<PDFDocument>> {
     Ok(document)
 }
 
-pub fn read(path: &Path, sink: Sink) -> Result<serde_json::Value> {
+pub fn read(path: &Path, settings: &Settings, sink: Sink) -> Result<serde_json::Value> {
     let document = open(path)?;
     let title = title_of(path);
     let pages = unsafe { document.pageCount() };
     let mut scanned = 0usize;
-    for index in 0..pages.min(MAX_PAGES) {
+    for index in 0..pages {
         let text = autoreleasepool(|_| unsafe {
             document.pageAtIndex(index).and_then(|page| page.string()).map(|s| s.to_string()).unwrap_or_default()
         });
         let number = index + 1;
         if text.trim().chars().count() < SCANNED_BELOW {
-            if scanned < MAX_SCANNED {
-                scanned += 1;
-                read_scanned_page(path, number, sink)?;
-            }
+            scanned += 1;
+            read_scanned_page(path, number, settings, sink)?;
             continue;
         }
-        for passage in passages(&text) {
-            let payload = if mostly_numbers(&passage.text) {
-                Payload::None
-            } else {
-                Payload::Text(prompts::document(Some(&title), &passage.text))
-            };
+        for passage in passages(&text, settings) {
+            let payload = text_payload(&title, &passage.text, settings);
             sink(Piece {
                 segment: Segment::Page,
                 loc: Some(number as f64),
@@ -71,14 +61,17 @@ pub fn read(path: &Path, sink: Sink) -> Result<serde_json::Value> {
     Ok(serde_json::json!({ "pages": pages, "scanned_pages": scanned }))
 }
 
-fn read_scanned_page(path: &Path, number: usize, sink: Sink) -> Result<()> {
+fn read_scanned_page(path: &Path, number: usize, settings: &Settings, sink: Sink) -> Result<()> {
     let page = autoreleasepool(|_| mac::render_pdf_page(path, number, SCAN_SIDE))?;
     let text = autoreleasepool(|_| mac::recognize_text(&page))?;
     if text.chars().count() >= MIN_TEXT {
-        return emit_text(path, &text, Some(number as f64), sink);
+        return emit_text(path, &text, Some(number as f64), settings, sink);
+    }
+    if !settings.embeds() {
+        return emit_text(path, &text, Some(number as f64), settings, sink);
     }
     // Nothing to read: what the page shows, then.
-    let pixels = imaging::fit(&mac::pixels(&page)?, super::image::SCREENSHOT_BUDGET)?;
+    let pixels = imaging::fit(&mac::pixels(&page)?, settings.text_tokens)?;
     sink(Piece {
         segment: Segment::Picture,
         loc: Some(number as f64),

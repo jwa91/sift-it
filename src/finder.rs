@@ -7,7 +7,7 @@
 //! once, meaning as soon as the model has loaded); a previewer fetches what the selected result's preview needs.
 
 use crate::config;
-use crate::crawl::Kind;
+use crate::crawl::{self, Kind};
 use crate::embedder::{Embedder, ModelFiles};
 use crate::open::{self, Place, timestamp};
 use crate::preview;
@@ -33,7 +33,7 @@ use std::time::{Duration, Instant};
 /// The kinds Tab steps through.
 const FILTERS: [(&str, &[Kind]); 6] = [
     ("everything", &[]),
-    ("documents", &[Kind::Text, Kind::Doc, Kind::Pdf]),
+    ("documents", &[Kind::Plaintext, Kind::Document]),
     ("pictures", &[Kind::Image, Kind::Screenshot]),
     ("recordings", &[Kind::Audio]),
     ("videos", &[Kind::Video]),
@@ -295,7 +295,7 @@ fn spawn_searcher(
     results: Sender<(Request, Response)>,
     model: Arc<Mutex<Model>>,
 ) -> Result<Vec<std::thread::JoinHandle<()>>> {
-    let mut searcher = Searcher::open(&config::index_path())?;
+    let mut searcher = Searcher::open(&config::index_path(), config::Config::load()?.ranking)?;
     let encoder: Arc<Mutex<Option<Embedder>>> = Arc::new(Mutex::new(None));
     let loader = {
         let encoder = encoder.clone();
@@ -390,7 +390,7 @@ fn make_preview(store: &Store, hit: &Hit, folder: &Path) -> Preview {
             preview.text =
                 if hit.segment == Segment::Ocr { segment_text() } else { store.file_text(&hit.path).ok().flatten() };
         }
-        Kind::Pdf => {
+        Kind::Document if crawl::is_pdf(Path::new(&hit.path)) => {
             preview.picture = picture("pdf", Some(hit.loc.unwrap_or(1.0)));
             preview.text = segment_text();
         }
@@ -409,7 +409,7 @@ fn make_preview(store: &Store, hit: &Hit, folder: &Path) -> Preview {
                 preview.text = segment_text();
             }
         }
-        Kind::Text | Kind::Doc | Kind::Code => preview.text = segment_text(),
+        Kind::Plaintext | Kind::Document | Kind::Code => preview.text = segment_text(),
     }
     preview
 }
@@ -457,7 +457,9 @@ fn place(hit: &Hit) -> String {
     match (hit.segment, hit.loc) {
         (Segment::Sound | Segment::Speech, Some(start)) => timestamp(start),
         (Segment::Frame, Some(at)) => timestamp(at),
-        (_, Some(page)) if hit.kind == Kind::Pdf => format!("p. {page}"),
+        (Segment::Page | Segment::Ocr | Segment::Picture, Some(page)) if hit.kind == Kind::Document => {
+            format!("p. {page}")
+        }
         (Segment::Passage, Some(cell)) if hit.path.ends_with(".ipynb") => format!("cell {cell}"),
         (Segment::Passage, Some(line)) if line > 1.0 => format!("line {line}"),
         _ => String::new(),
@@ -466,9 +468,8 @@ fn place(hit: &Hit) -> String {
 
 fn kind_label(kind: Kind) -> &'static str {
     match kind {
-        Kind::Text => "text",
-        Kind::Doc => "document",
-        Kind::Pdf => "pdf",
+        Kind::Plaintext => "text",
+        Kind::Document => "document",
         Kind::Image => "picture",
         Kind::Screenshot => "screenshot",
         Kind::Audio => "recording",
@@ -720,8 +721,10 @@ fn draw_keys(frame: &mut Frame, app: &mut App, area: Rect) {
 fn open_label(hit: &Hit) -> String {
     match (hit.kind, hit.loc) {
         (Kind::Audio | Kind::Video, Some(at)) => format!("play from {}", timestamp(at)),
-        (Kind::Pdf, Some(page)) if page > 1.0 => format!("open at page {page}"),
-        (Kind::Text | Kind::Code, Some(line)) if line > 1.0 && !hit.path.ends_with(".ipynb") => {
+        (Kind::Document, Some(page)) if page > 1.0 && crawl::is_pdf(Path::new(&hit.path)) => {
+            format!("open at page {page}")
+        }
+        (Kind::Plaintext | Kind::Code, Some(line)) if line > 1.0 && !hit.path.ends_with(".ipynb") => {
             format!("open at line {line}")
         }
         _ => "open".into(),

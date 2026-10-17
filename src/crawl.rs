@@ -1,40 +1,39 @@
 //! Which files get indexed, and finding them. Only the chosen folders are read, and in them never hidden folders,
-//! app bundles and libraries, build output, dependency folders, keys and other secrets, or iCloud files that are only
-//! in the cloud (reading those would download them).
+//! app bundles and libraries, build output, dependency folders, keys and other secrets, iCloud files that are only
+//! in the cloud (reading those would download them), or what `sources.ignore` leaves out.
 
-use crate::config::Config;
+use crate::config::{Config, Settings};
+use crate::readers;
 use serde::{Deserialize, Serialize};
 use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Kind {
     /// Plain text and Markdown.
-    Text,
-    /// Rich documents: rtf, doc, docx, odt, html, pages.
-    Doc,
-    Pdf,
+    Plaintext,
+    /// PDFs and rich documents: rtf, doc, docx, odt, html, webarchive.
+    Document,
     Image,
-    /// A picture of a screen: read for its text as well as what it shows.
+    /// A picture of a screen: read for its text as well as what it shows. It takes the image kind's settings.
     Screenshot,
     Audio,
     Video,
-    /// Source code (only with `include_code`).
+    /// Source code (only with `sources.code`).
     Code,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 8] =
-        [Kind::Text, Kind::Doc, Kind::Pdf, Kind::Image, Kind::Screenshot, Kind::Audio, Kind::Video, Kind::Code];
+    pub const ALL: [Kind; 7] =
+        [Kind::Plaintext, Kind::Document, Kind::Image, Kind::Screenshot, Kind::Audio, Kind::Video, Kind::Code];
 
     pub fn as_str(self) -> &'static str {
         match self {
-            Kind::Text => "text",
-            Kind::Doc => "doc",
-            Kind::Pdf => "pdf",
+            Kind::Plaintext => "plaintext",
+            Kind::Document => "document",
             Kind::Image => "image",
             Kind::Screenshot => "screenshot",
             Kind::Audio => "audio",
@@ -47,32 +46,11 @@ impl Kind {
         Kind::ALL.into_iter().find(|kind| kind.as_str() == name)
     }
 
-    /// How much indexing a file of this kind costs, for ordering the work: cheap kinds first, so most files are
-    /// searchable soon and the long recordings come last.
-    pub fn cost_rank(self) -> u8 {
-        match self {
-            Kind::Text | Kind::Doc | Kind::Code => 0,
-            Kind::Screenshot | Kind::Image => 1,
-            Kind::Pdf => 2,
-            Kind::Audio => 3,
-            Kind::Video => 4,
-        }
+    /// The kind whose settings it takes in config.json.
+    pub fn config_kind(self) -> Kind {
+        if self == Kind::Screenshot { Kind::Image } else { self }
     }
 }
-
-pub const IMAGE_EXTENSIONS: &[&str] = &[
-    "jpg", "jpeg", "png", "heic", "heif", "webp", "gif", "tif", "tiff", "bmp", "avif", "jxl", "dng", "cr2", "cr3",
-    "nef", "arw", "raf", "orf", "rw2",
-];
-pub const AUDIO_EXTENSIONS: &[&str] = &["mp3", "m4a", "aac", "wav", "aif", "aiff", "flac", "caf", "ogg", "opus", "m4b"];
-pub const VIDEO_EXTENSIONS: &[&str] = &["mp4", "mov", "m4v", "avi", "mkv", "webm", "3gp"];
-pub const TEXT_EXTENSIONS: &[&str] = &["txt", "md", "markdown", "text", "org", "rst", "tex"];
-pub const DOC_EXTENSIONS: &[&str] = &["rtf", "rtfd", "doc", "docx", "odt", "html", "htm", "webarchive", "wordml"];
-pub const CODE_EXTENSIONS: &[&str] = &[
-    "rs", "ts", "tsx", "js", "jsx", "mjs", "py", "go", "swift", "java", "kt", "c", "h", "cc", "cpp", "hpp", "m", "mm",
-    "rb", "php", "cs", "scala", "sh", "zsh", "lua", "sql", "vue", "svelte", "dart", "ex", "exs", "hs", "ml", "zig",
-    "ipynb",
-];
 
 /// Folder names never entered: dependencies, caches, the user's Library.
 const SKIPPED_FOLDERS: &[&str] = &[
@@ -167,6 +145,20 @@ pub struct Found {
     pub size: u64,
     /// Seconds since 1970.
     pub modified: f64,
+    /// What it's read with (config.json's reading values, resolved for it).
+    pub settings: Settings,
+}
+
+impl Found {
+    /// How it's read (readers::fingerprint): when this changes, it's read again.
+    pub fn reading(&self) -> String {
+        readers::fingerprint(&self.path, self.kind, &self.settings)
+    }
+
+    /// What's said in it is to be written down.
+    pub fn speech(&self) -> bool {
+        readers::transcribes(self.kind, &self.settings)
+    }
 }
 
 /// A whole crawl: what was found, and which chosen folders couldn't be read (an unplugged drive). Files indexed from
@@ -179,12 +171,12 @@ pub struct Crawl {
 
 pub fn crawl(config: &Config) -> Crawl {
     let mut crawl = Crawl::default();
-    let excluded_extensions: Vec<String> =
-        config.excluded_extensions.iter().map(|e| e.trim_start_matches('.').to_lowercase()).collect();
-    let rules = Rules { config, excluded_extensions: &excluded_extensions };
-    for root in &config.folders {
+    for root in &config.sources.paths {
+        if config.sources.ignore.iter().any(|pattern| pattern.matches(root)) {
+            continue;
+        }
         match std::fs::read_dir(root) {
-            Ok(_) => walk(root, &rules, false, &mut crawl.found),
+            Ok(_) => walk(root, config, false, &mut crawl.found),
             Err(_) => crawl.unavailable.push(root.clone()),
         }
     }
@@ -194,15 +186,7 @@ pub fn crawl(config: &Config) -> Crawl {
     crawl
 }
 
-struct Rules<'a> {
-    config: &'a Config,
-    excluded_extensions: &'a [String],
-}
-
-fn walk(folder: &Path, rules: &Rules, in_project: bool, found: &mut Vec<Found>) {
-    if rules.config.excluded.iter().any(|excluded| folder.starts_with(excluded)) {
-        return;
-    }
+fn walk(folder: &Path, config: &Config, in_project: bool, found: &mut Vec<Found>) {
     let Ok(entries) = std::fs::read_dir(folder) else { return };
     let entries: Vec<_> = entries.flatten().collect();
     let in_project = in_project
@@ -215,16 +199,16 @@ fn walk(folder: &Path, rules: &Rules, in_project: bool, found: &mut Vec<Found>) 
         }
         let path = entry.path();
         let Ok(file_type) = entry.file_type() else { continue };
-        if file_type.is_symlink() {
+        if file_type.is_symlink() || config.sources.ignore.iter().any(|pattern| pattern.matches_itself(&path)) {
             continue;
         }
         if file_type.is_dir() {
             if is_skipped_folder(&path, in_project) {
                 continue;
             }
-            walk(&path, rules, in_project, found);
+            walk(&path, config, in_project, found);
         } else if file_type.is_file()
-            && let Some(file) = consider(&path, &name, rules, in_project)
+            && let Some(file) = consider(&path, &name, config, in_project)
         {
             found.push(file);
         }
@@ -249,7 +233,7 @@ fn is_project(folder: &Path) -> bool {
 pub enum Rescan {
     /// Not in any chosen folder.
     Outside,
-    /// In a chosen folder, but somewhere never read (a hidden or skipped folder, an excluded one).
+    /// In a chosen folder, but somewhere never read (a hidden or skipped folder, an ignored one).
     Skipped,
     /// In a chosen folder that can't be read now (an unplugged drive): what was indexed from it stays, as in a full
     /// crawl.
@@ -261,14 +245,14 @@ pub enum Rescan {
 /// Looks again at one changed path (a file, or a folder and all in it), by the same rules as a full crawl.
 pub fn rescan(config: &Config, path: &Path) -> Rescan {
     let Some(root) =
-        config.folders.iter().filter(|root| path.starts_with(root)).max_by_key(|root| root.as_os_str().len())
+        config.sources.paths.iter().filter(|root| path.starts_with(root)).max_by_key(|root| root.as_os_str().len())
     else {
         return Rescan::Outside;
     };
     if std::fs::read_dir(root).is_err() {
         return Rescan::Unavailable;
     }
-    if config.excluded.iter().any(|excluded| path.starts_with(excluded)) {
+    if config.sources.ignore.iter().any(|pattern| pattern.matches(path)) {
         return Rescan::Skipped;
     }
     // The folders between the root and the path: none may be skipped or a symlink (a crawl doesn't follow those, and
@@ -286,87 +270,63 @@ pub fn rescan(config: &Config, path: &Path) -> Rescan {
         }
     }
     in_project |= is_project(&folder);
-    let excluded_extensions: Vec<String> =
-        config.excluded_extensions.iter().map(|e| e.trim_start_matches('.').to_lowercase()).collect();
-    let rules = Rules { config, excluded_extensions: &excluded_extensions };
     let Ok(metadata) = std::fs::symlink_metadata(path) else { return Rescan::Found(Vec::new()) };
     let mut found = Vec::new();
     if metadata.is_dir() {
         if path != root.as_path() && is_skipped_folder(path, in_project) {
             return Rescan::Skipped;
         }
-        walk(path, &rules, in_project, &mut found);
+        walk(path, config, in_project, &mut found);
     } else if metadata.is_file() {
         let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
         if name.starts_with('.') {
             return Rescan::Skipped;
         }
-        found.extend(consider(path, &name, &rules, in_project));
+        found.extend(consider(path, &name, config, in_project));
     }
     Rescan::Found(found)
 }
 
 /// The file, if it's one to index.
-fn consider(path: &Path, name: &str, rules: &Rules, in_project: bool) -> Option<Found> {
+fn consider(path: &Path, name: &str, config: &Config, in_project: bool) -> Option<Found> {
     let extension = extension_of(path);
-    if rules.excluded_extensions.contains(&extension) || is_secret(name, &extension) {
+    if is_secret(name, &extension) {
         return None;
     }
-    let mut kind = kind_of(&extension, rules.config.include_code)?;
-    // In a code project only pictures, PDFs and recordings are read, unless code is wanted: its text files are
-    // READMEs, fixtures and data, which would bury everything else.
-    if in_project && matches!(kind, Kind::Text | Kind::Doc) && !rules.config.include_code {
+    let kind = config.sources.kind_of(&extension)?;
+    // In a code project only pictures, PDFs and recordings are read, unless code is: its text files and documents
+    // are READMEs, fixtures and data, which would bury everything else.
+    let prose = kind == Kind::Plaintext || (kind == Kind::Document && !is_pdf(path));
+    if (kind == Kind::Code || (in_project && prose)) && !config.sources.code {
         return None;
     }
     let metadata = std::fs::metadata(path).ok()?;
     if is_cloud_only(&metadata) || metadata.len() == 0 {
         return None;
     }
-    if kind == Kind::Image && is_screenshot(path, name) {
-        kind = Kind::Screenshot;
-    }
-    let limit: u64 = match kind {
-        Kind::Text | Kind::Code => 20 << 20,
-        Kind::Doc => 100 << 20,
-        Kind::Image | Kind::Screenshot => 200 << 20,
-        Kind::Pdf => 1 << 30,
-        Kind::Audio | Kind::Video => u64::MAX,
-    };
-    if metadata.len() > limit {
-        return None;
-    }
+    let kind = if kind == Kind::Image && is_screenshot(path, name) { Kind::Screenshot } else { kind };
     let modified = metadata
         .modified()
         .ok()
         .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
         .map(|duration| duration.as_secs_f64())
         .unwrap_or(0.0);
-    Some(Found { path: path.to_path_buf(), kind, size: metadata.len(), modified })
+    Some(Found {
+        path: path.to_path_buf(),
+        kind,
+        size: metadata.len(),
+        modified,
+        settings: config.reading.resolve(path, kind),
+    })
 }
 
 pub fn extension_of(path: &Path) -> String {
     path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default()
 }
 
-pub fn kind_of(extension: &str, include_code: bool) -> Option<Kind> {
-    let has = |list: &[&str]| list.contains(&extension);
-    if has(TEXT_EXTENSIONS) {
-        Some(Kind::Text)
-    } else if has(DOC_EXTENSIONS) {
-        Some(Kind::Doc)
-    } else if extension == "pdf" {
-        Some(Kind::Pdf)
-    } else if has(IMAGE_EXTENSIONS) {
-        Some(Kind::Image)
-    } else if has(AUDIO_EXTENSIONS) {
-        Some(Kind::Audio)
-    } else if has(VIDEO_EXTENSIONS) {
-        Some(Kind::Video)
-    } else if include_code && has(CODE_EXTENSIONS) {
-        Some(Kind::Code)
-    } else {
-        None
-    }
+/// PDFs are documents read page by page (PDFKit), where other documents are text (textutil).
+pub fn is_pdf(path: &Path) -> bool {
+    extension_of(path) == "pdf"
 }
 
 fn is_secret(name: &str, extension: &str) -> bool {
@@ -387,6 +347,14 @@ fn is_cloud_only(metadata: &std::fs::Metadata) -> bool {
     use std::os::darwin::fs::MetadataExt;
     const SF_DATALESS: u32 = 0x4000_0000;
     metadata.st_flags() & SF_DATALESS != 0
+}
+
+/// A file's kind, by its type (`sources.kinds`), a picture of the screen being a screenshot. None for a type that
+/// isn't read.
+pub fn kind_of(config: &Config, path: &Path) -> Option<Kind> {
+    let kind = config.sources.kind_of(&extension_of(path))?;
+    let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    Some(if kind == Kind::Image && is_screenshot(path, &name) { Kind::Screenshot } else { kind })
 }
 
 /// macOS marks the screenshots it takes (kMDItemIsScreenCapture); other tools name them so.
@@ -429,7 +397,31 @@ mod tests {
     }
 
     fn config(root: &Path) -> Config {
-        Config { folders: vec![root.to_path_buf()], ..Default::default() }
+        let mut config = Config::default();
+        config.sources.paths = vec![root.to_path_buf()];
+        config
+    }
+
+    fn found(config: &Config) -> Vec<String> {
+        let mut names: Vec<String> =
+            crawl(config).found.iter().map(|file| file.path.file_name().unwrap().to_string_lossy().into()).collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn ignored_files_and_folders_are_left_out() {
+        let temp = TempFolder::new("ignore");
+        let root = temp.0.join("root");
+        std::fs::create_dir_all(root.join("Old/2019")).unwrap();
+        std::fs::write(root.join("cover.psd.png"), "x").unwrap();
+        std::fs::write(root.join("note.txt"), "a note").unwrap();
+        std::fs::write(root.join("Old/2019/old.txt"), "an old note").unwrap();
+        let mut config = config(&root);
+        assert_eq!(found(&config), ["cover.psd.png", "note.txt", "old.txt"]);
+        config.set("sources.ignore", r#"["old", "*.psd.*"]"#).unwrap();
+        assert_eq!(found(&config), ["note.txt"]);
+        assert!(matches!(rescan(&config, &root.join("Old/2019/old.txt")), Rescan::Skipped));
     }
 
     #[test]

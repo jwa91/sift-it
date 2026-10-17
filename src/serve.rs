@@ -5,7 +5,7 @@
 //! `id` are events. Previews are made on a thread of their own, so a search never waits behind one: their replies can
 //! come after replies to later requests.
 //!
-//!   {"id":1,"op":"search","q":"…","kinds":["pdf"],"limit":40,"prefix_last":true}
+//!   {"id":1,"op":"search","q":"…","kinds":["document"],"limit":40,"prefix_last":true}
 //!       → {"id":1,"hits":[…],"meaning":true,"ms":3.1}     meaning false: words only (the encoder is still loading)
 //!   {"id":2,"op":"recent","limit":40}                    → {"id":2,"hits":[…]}: recently changed files
 //!   {"id":3,"op":"preview","path":"…","kind":"pdf","loc":3,"size":512} → {"id":3,"image":"/…/preview.jpg"}
@@ -17,10 +17,12 @@
 //!   {"id":5,"op":"quit"}
 //!
 //!   events: {"event":"ready","vectors":n}   {"event":"encoder","state":"ready"|"unavailable","error":…}
+//!           {"event":"config","error":…}: config.json can't be read (the ranking stays as it was)
 //!
-//! It ends when its stdin closes (the front end went away).
+//! A change to config.json's ranking counts from the next search. It ends when its stdin closes (the front end went
+//! away).
 
-use crate::config;
+use crate::config::{self, Config};
 use crate::embedder::{Embedder, ModelFiles};
 use crate::preview;
 use crate::search::{Request, Searcher};
@@ -30,6 +32,7 @@ use std::collections::HashMap;
 use std::io::{BufRead, Write};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
 
 enum Encoder {
     Loading,
@@ -46,7 +49,8 @@ fn emit(out: &Mutex<std::io::Stdout>, value: &Value) {
 pub fn serve(index: &Path, models: &Path) -> Result<()> {
     let out = Arc::new(Mutex::new(std::io::stdout()));
     std::thread::spawn(|| preview::prune(&config::previews_dir()));
-    let mut searcher = Searcher::open(index)?;
+    let mut config_time = config_modified();
+    let mut searcher = Searcher::open(index, Config::load()?.ranking)?;
     emit(&out, &json!({"event": "ready", "vectors": searcher.vector_count(), "index": index.display().to_string()}));
 
     let encoder = Arc::new(Mutex::new(Encoder::Loading));
@@ -96,6 +100,13 @@ pub fn serve(index: &Path, models: &Path) -> Result<()> {
         if op == "preview" {
             let _ = previews.send((id, request));
             continue;
+        }
+        if op == "search" && config_modified() != config_time {
+            config_time = config_modified();
+            match Config::load() {
+                Ok(config) => searcher.set_ranking(config.ranking),
+                Err(error) => emit(&out, &json!({"event": "config", "error": format!("{error:#}")})),
+            }
         }
         let reply = handle(op, &request, &mut searcher, &encoder, &mut cache);
         let mut reply = reply.unwrap_or_else(|error| json!({"ok": false, "error": format!("{error:#}")}));
@@ -147,6 +158,10 @@ fn handle(
         }
         _ => Err(anyhow!("unknown op {op:?}")),
     }
+}
+
+fn config_modified() -> Option<SystemTime> {
+    std::fs::metadata(config::config_path()).and_then(|metadata| metadata.modified()).ok()
 }
 
 /// A preview's picture: a thumbnail, a PDF page, a video frame or a waveform.

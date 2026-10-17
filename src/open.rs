@@ -31,7 +31,8 @@ impl Place {
         if !path.exists() {
             bail!("no such file: {}", path.display());
         }
-        let kind = crawl::kind_of(&crawl::extension_of(path), true).unwrap_or(Kind::Doc);
+        let sources = config::Config::load().unwrap_or_default().sources;
+        let kind = sources.kind_of(&crawl::extension_of(path)).unwrap_or(Kind::Document);
         Ok(Self { path: path.to_path_buf(), kind, segment: None, loc: at })
     }
 }
@@ -81,14 +82,14 @@ pub fn open(place: &Place, reveal: bool) -> Result<String> {
             open_file(&place.path)?;
             Ok(format!("Opened {name}; the match is at {}", timestamp(seconds)))
         }
-        (Kind::Pdf, Some(page)) if page > 1.0 => {
+        (Kind::Document, Some(page)) if page > 1.0 && crawl::is_pdf(&place.path) => {
             if open_pdf_at(&place.path, page as usize).is_ok() {
                 return Ok(format!("Opened {name} at page {page}"));
             }
             run("open", &["-a".as_ref(), "Preview".as_ref(), place.path.as_os_str()])?;
             Ok(format!("Opened {name}; the match is on page {page} (Preview's Go to Page needs Accessibility access)"))
         }
-        (Kind::Text | Kind::Code, Some(line)) if !place.path.to_string_lossy().ends_with(".ipynb") => {
+        (Kind::Plaintext | Kind::Code, Some(line)) if !place.path.to_string_lossy().ends_with(".ipynb") => {
             let line = line.max(1.0) as usize;
             if let Some(editor) = open_in_editor(&place.path, line)? {
                 return Ok(format!("Opened {name} at line {line} in {editor}"));

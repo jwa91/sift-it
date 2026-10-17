@@ -85,8 +85,9 @@ fn place(hit: &Hit) -> Option<String> {
             None => timestamp(start),
         }),
         (Segment::Frame, Some(at)) => Some(timestamp(at)),
-        (Segment::Page | Segment::Ocr, Some(page)) if hit.kind == Kind::Pdf => Some(format!("page {page}")),
-        (Segment::Picture, Some(page)) if hit.kind == Kind::Pdf => Some(format!("page {page}")),
+        (Segment::Page | Segment::Ocr | Segment::Picture, Some(page)) if hit.kind == Kind::Document => {
+            Some(format!("page {page}"))
+        }
         (Segment::Passage, Some(cell)) if notebook => Some(format!("cell {cell}")),
         (Segment::Passage, Some(line)) if line > 1.0 => Some(format!("line {line}")),
         _ => match hit.kind {
@@ -187,7 +188,7 @@ fn body(terminal: &Terminal, hit: &Hit, words: &[String], searcher: &Searcher) -
                 push_line(&mut out, &code_line);
             }
         }
-        Kind::Text | Kind::Doc | Kind::Pdf => {
+        Kind::Plaintext | Kind::Document => {
             for text_line in
                 hit.excerpt.as_deref().map(|t| passage(terminal, t, width, PASSAGE_LINES, words)).unwrap_or_default()
             {

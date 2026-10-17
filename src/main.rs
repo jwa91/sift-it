@@ -46,7 +46,8 @@ enum Command {
         #[command(subcommand)]
         action: Option<FolderAction>,
     },
-    /// Change an option: include-code, index-on-battery, transcribe (true or false), exclude-ext (comma-separated)
+    /// Show config.json or a part of it, or set a value: `sift-it config reading.video.keep_every_s 10` (null puts
+    /// it back to its default)
     Config { key: Option<String>, value: Option<String> },
     /// How many files these folders hold, and about how long indexing them takes
     Estimate {
@@ -66,7 +67,7 @@ enum Command {
     /// Search the index
     Search {
         words: Vec<String>,
-        /// Only these kinds: text, doc, pdf, image, screenshot, audio, video, code
+        /// Only these kinds: plaintext, document, image, screenshot, audio, video, code
         #[arg(long, value_delimiter = ',')]
         kind: Vec<String>,
         #[arg(short = 'n', default_value_t = 10)]
@@ -199,11 +200,11 @@ fn run(cli: Cli) -> Result<()> {
     match command {
         Command::Find { words } => finder::run(&words.join(" ")),
         Command::Folders { action } => folders(action),
-        Command::Config { key, value } => set_option(key, value),
+        Command::Config { key, value } => configure(key, value),
         Command::Estimate { folders, json } => {
             let config = Config::load()?;
             let folders: Vec<PathBuf> = if folders.is_empty() {
-                config.folders.clone()
+                config.sources.paths.clone()
             } else {
                 folders.iter().map(|f| config::expand(f)).collect()
             };
@@ -258,15 +259,17 @@ fn run(cli: Cli) -> Result<()> {
             }),
         },
         Command::Eval { file, verbose } => {
-            let mut searcher = search::Searcher::open(&config::index_path())?;
+            let mut searcher = search::Searcher::open(&config::index_path(), Config::load()?.ranking)?;
             let files = embedder::ModelFiles::in_folder(&config::models_dir())?;
             let mut encoder = embedder::Embedder::load(&files, true)?;
             eval::run(&file, &mut searcher, &mut encoder, verbose)
         }
         Command::Read { path, tokens } => {
             let path = config::expand(&path.to_string_lossy());
-            let kind = crawl::kind_of(&crawl::extension_of(&path), true)
+            let config = Config::load()?;
+            let kind = crawl::kind_of(&config, &path)
                 .ok_or_else(|| anyhow::anyhow!("Sift It doesn't read .{} files", crawl::extension_of(&path)))?;
+            let settings = config.reading.resolve(&path, kind);
             let mut model = if tokens {
                 Some(embedder::Embedder::load(&embedder::ModelFiles::in_folder(&config::models_dir())?, true)?)
             } else {
@@ -275,7 +278,7 @@ fn run(cli: Cli) -> Result<()> {
             let started = std::time::Instant::now();
             let mut count = 0;
             let mut total_tokens = 0;
-            let info = readers::read(&path, kind, &mut |piece| {
+            let info = readers::read(&path, kind, &settings, &mut |piece| {
                 count += 1;
                 let what = match &piece.payload {
                     readers::Payload::None => "words only".to_string(),
@@ -366,6 +369,12 @@ fn run(cli: Cli) -> Result<()> {
 
 fn folders(action: Option<FolderAction>) -> Result<()> {
     let mut config = Config::load()?;
+    // The folder an ignore pattern names by its full path, if it does ("~/Documents/Old").
+    let folder_of = |pattern: &config::Pattern| {
+        let source = pattern.as_str();
+        (source.starts_with('/') || source.starts_with("~/")).then(|| config::expand(source))
+    };
+    let changes = action.is_some();
     match action {
         None => {}
         Some(FolderAction::Add { paths }) => {
@@ -374,73 +383,59 @@ fn folders(action: Option<FolderAction>) -> Result<()> {
                 if !path.is_dir() {
                     bail!("not a folder: {}", path.display());
                 }
-                if !config.folders.contains(&path) {
-                    config.folders.push(path);
+                if !config.sources.paths.contains(&path) {
+                    config.sources.paths.push(path);
                 }
             }
-            config.save()?;
         }
         Some(FolderAction::Remove { paths }) => {
             for path in paths {
                 let path = config::expand(&path);
-                config.folders.retain(|folder| folder != &path);
-                config.excluded.retain(|folder| !folder.starts_with(&path));
+                config.sources.paths.retain(|folder| folder != &path);
+                config.sources.ignore.retain(|pattern| !folder_of(pattern).is_some_and(|f| f.starts_with(&path)));
             }
-            config.save()?;
         }
         Some(FolderAction::Include { paths }) => {
             for path in paths {
                 let path = config::expand(&path);
-                config.excluded.retain(|folder| folder != &path);
+                config.sources.ignore.retain(|pattern| folder_of(pattern).as_ref() != Some(&path));
             }
-            config.save()?;
         }
         Some(FolderAction::Exclude { paths }) => {
             for path in paths {
                 let path = config::expand(&path);
-                if !config.excluded.contains(&path) {
-                    config.excluded.push(path);
+                if !config.sources.ignore.iter().any(|pattern| folder_of(pattern).as_ref() == Some(&path)) {
+                    config.sources.ignore.push(config::Pattern::new(&path.to_string_lossy())?);
                 }
             }
-            config.save()?;
         }
+    }
+    if changes {
+        config.save()?;
     }
     println!("{}", serde_json::to_string_pretty(&config)?);
     Ok(())
 }
 
-fn set_option(key: Option<String>, value: Option<String>) -> Result<()> {
+/// Prints config.json, or the value at a dotted key, after setting it when there's a value.
+fn configure(key: Option<String>, value: Option<String>) -> Result<()> {
     let mut config = Config::load()?;
-    if let (Some(key), Some(value)) = (key.as_deref(), value.as_deref()) {
-        let flag = || match value {
-            "true" | "on" | "yes" | "1" => Ok(true),
-            "false" | "off" | "no" | "0" => Ok(false),
-            _ => Err(anyhow::anyhow!("{key} takes true or false")),
-        };
-        match key {
-            "include-code" => config.include_code = flag()?,
-            "index-on-battery" => config.index_on_battery = flag()?,
-            "transcribe" => config.transcribe = flag()?,
-            "exclude-ext" => {
-                config.excluded_extensions = value
-                    .split(',')
-                    .map(|e| e.trim().trim_start_matches('.').to_lowercase())
-                    .filter(|e| !e.is_empty())
-                    .collect()
-            }
-            _ => bail!("no option {key}: include-code, index-on-battery, transcribe, exclude-ext"),
-        }
+    if let (Some(key), Some(value)) = (&key, &value) {
+        config.set(key, value)?;
         config.save()?;
-    } else if key.is_some() {
-        bail!("which value?");
     }
-    println!("{}", serde_json::to_string_pretty(&config)?);
+    // All of it in config.json's order; a part through JSON values, which sort their keys.
+    let shown = match key.as_deref() {
+        None => serde_json::to_string_pretty(&config)?,
+        Some(key) => serde_json::to_string_pretty(&config.get(Some(key))?)?,
+    };
+    println!("{shown}");
     Ok(())
 }
 
 fn index(json: bool, reindex: bool) -> Result<()> {
     let config = Config::load()?;
-    if config.folders.is_empty() {
+    if config.sources.paths.is_empty() {
         bail!("no folders to index: add some with `sift-it folders add <folder>`");
     }
     // Two indexers would read the same files: let the running one do it.
@@ -486,7 +481,7 @@ fn index(json: bool, reindex: bool) -> Result<()> {
     report(sync);
     indexer.index_pending(&config, &mut report, &|| false, &mut Vec::new)?;
     // Then what's said in recordings and videos, when the speech model is there.
-    if config.transcribe && !indexer.store.transcripts_pending(1)?.is_empty() {
+    if !indexer.store.transcripts_pending(1)?.is_empty() {
         match speech::Transcriber::start() {
             Ok(mut transcriber) => {
                 if !json {
@@ -505,7 +500,7 @@ fn search_once(q: &str, kinds: &[String], limit: usize, words_only: bool, json: 
         .iter()
         .map(|name| Kind::parse(name).ok_or_else(|| anyhow::anyhow!("no such kind: {name}")))
         .collect::<Result<Vec<_>>>()?;
-    let mut searcher = search::Searcher::open(&config::index_path())?;
+    let mut searcher = search::Searcher::open(&config::index_path(), Config::load()?.ranking)?;
     let request = search::Request { q: q.to_string(), kinds, limit, prefix_last: false };
     let vector = if words_only {
         None
@@ -536,14 +531,21 @@ fn status(json: bool) -> Result<()> {
     let stats = store.stats()?;
     let config = Config::load()?;
     let models = models::status(&config::models_dir());
-    let (spoken, recordings) = store.transcript_counts()?;
+    let transcripts = store.transcripts()?;
+    let queued = store.queued(5)?;
     if json {
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
                 "index": config::index_path().display().to_string(),
                 "stats": stats,
-                "speech": {"done": spoken, "total": recordings, "unavailable": speech::unavailable()},
+                "queued": queued,
+                "speech": {
+                    "done": transcripts.done,
+                    "total": transcripts.total,
+                    "seconds": transcripts.seconds,
+                    "unavailable": speech::unavailable(),
+                },
                 "config": config,
                 "models": models,
             }))?
@@ -556,10 +558,18 @@ fn status(json: bool) -> Result<()> {
         stats.files, stats.done, stats.pending, stats.failed
     );
     println!("vectors: {} in {} segments", stats.vectors, stats.segments);
+    if queued.files > 0 {
+        // The work still to do, and where most of it is: what `ignore` or a lower depth could leave out.
+        println!("waiting: {} files, {} of reading", queued.files, estimate::describe(queued.seconds));
+        for heavy in queued.heaviest.iter().filter(|heavy| heavy.seconds >= 60.0) {
+            println!("         {} ({})", heavy.path, estimate::describe(heavy.seconds));
+        }
+    }
     let mut kinds: Vec<_> = stats.by_kind.iter().collect();
     kinds.sort();
     println!("kinds:   {}", kinds.iter().map(|(k, n)| format!("{k} {n}")).collect::<Vec<_>>().join(", "));
-    println!("folders: {}", config.folders.iter().map(|f| f.display().to_string()).collect::<Vec<_>>().join(", "));
+    let folders: Vec<String> = config.sources.paths.iter().map(|f| f.display().to_string()).collect();
+    println!("folders: {}", folders.join(", "));
     println!(
         "model:   {}",
         if models.media {
@@ -571,9 +581,14 @@ fn status(json: bool) -> Result<()> {
         }
     );
     let speech = match speech::unavailable() {
-        _ if !config.transcribe => "off (sift-it config transcribe on)".to_string(),
         Some(why) => why,
-        None => format!("{spoken} of {recordings} recordings and videos written down"),
+        None if transcripts.done < transcripts.total => format!(
+            "{} of {} recordings and videos written down, {} of sound to go",
+            transcripts.done,
+            transcripts.total,
+            estimate::describe(transcripts.seconds).trim_start_matches("about ")
+        ),
+        None => format!("{} of {} recordings and videos written down", transcripts.done, transcripts.total),
     };
     println!("speech:  {speech}");
     Ok(())
@@ -596,9 +611,14 @@ fn bench_search(count: usize) -> Result<()> {
         };
         let per_file = 10;
         for file in 0..count.div_ceil(per_file) {
-            let found =
-                crawl::Found { path: folder.join(format!("file{file}.txt")), kind: Kind::Text, size: 1, modified: 0.0 };
-            let id = store.queue(&found, None)?;
+            let found = crawl::Found {
+                path: folder.join(format!("file{file}.txt")),
+                kind: Kind::Plaintext,
+                size: 1,
+                modified: 0.0,
+                settings: config::Settings::BASE,
+            };
+            let id = store.queue(&found, None, 0.0)?;
             let segments: Vec<store::NewSegment> = (0..per_file)
                 .map(|n| {
                     let mut vector: Vec<f32> = (0..embedder::DIM).map(|_| random()).collect();
@@ -612,13 +632,21 @@ fn bench_search(count: usize) -> Result<()> {
                     }
                 })
                 .collect();
-            let row = store::FileRow { id, path: found.path.clone(), kind: Kind::Text, size: 1, modified: 0.0 };
-            store.finish_file(&row, &segments, &serde_json::json!({}))?;
+            let row = store::FileRow {
+                id,
+                path: found.path.clone(),
+                kind: Kind::Plaintext,
+                size: 1,
+                modified: 0.0,
+                reading: found.reading(),
+                speech: false,
+            };
+            store.finish_file(&row, &segments, &serde_json::json!({}), false)?;
         }
     }
     println!("built an index of {count} vectors in {:.1} s", started.elapsed().as_secs_f64());
     let started = std::time::Instant::now();
-    let mut searcher = search::Searcher::open(&path)?;
+    let mut searcher = search::Searcher::open(&path, config::Ranking::default())?;
     println!("loaded it in {:.0} ms", started.elapsed().as_secs_f64() * 1000.0);
     let mut query: Vec<f32> = (0..embedder::DIM).map(|i| ((i * 7919) % 101) as f32 - 50.0).collect();
     embedder::normalize(&mut query);
