@@ -9,10 +9,11 @@ pub mod pdf;
 pub mod text;
 
 use crate::config::{Depth, Settings};
-use crate::crawl::{Kind, is_pdf};
+use crate::crawl::is_pdf;
 use crate::imaging::Image;
-use crate::store::Segment;
 use anyhow::Result;
+use protocol::Kind;
+use protocol::Segment;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::path::Path;

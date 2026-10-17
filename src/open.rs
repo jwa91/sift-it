@@ -4,10 +4,11 @@
 //! `sift-it open 2` opens the second.
 
 use crate::config;
-use crate::crawl::{self, Kind};
-use crate::search::Hit;
-use crate::store::Segment;
+use crate::crawl;
 use anyhow::{Context, Result, bail};
+use protocol::Hit;
+use protocol::Kind;
+use protocol::Segment;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Command;

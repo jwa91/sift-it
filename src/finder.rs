@@ -8,14 +8,17 @@
 //! selected result's preview needs.
 
 use crate::client::Client;
-use crate::config::{self, Mode};
-use crate::crawl::{self, Kind};
+use crate::config;
+use crate::crawl;
 use crate::open::{self, Place, timestamp};
 use crate::preview;
-use crate::search::{Hit, Request, Response, words_of};
-use crate::store::Segment;
+use crate::search::words_of;
 use crate::term;
 use anyhow::Result;
+use protocol::Kind;
+use protocol::Mode;
+use protocol::Segment;
+use protocol::{Hit, MeaningState, Results, Search};
 use ratatui::Frame;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -88,9 +91,9 @@ impl App {
         self.list.selected().and_then(|i| self.hits.get(i))
     }
 
-    fn request(&self) -> Request {
+    fn request(&self) -> Search {
         let kinds = FILTERS[self.filter].1.to_vec();
-        Request { q: self.query.clone(), mode: None, kinds, limit: 60, prefix_last: true }
+        Search { q: self.query.clone(), kinds, limit: 60, prefix_last: true, ..Default::default() }
     }
 
     fn flash(&mut self, message: impl Into<String>) {
@@ -116,8 +119,8 @@ pub fn run(initial: &str) -> Result<()> {
 
 fn run_app(terminal: &mut ratatui::DefaultTerminal, picker: Picker, initial: &str) -> Result<Option<Place>> {
     let model = Arc::new(Mutex::new(Model::Loading));
-    let (search_tx, search_rx) = channel::<Request>();
-    let (results_tx, results_rx) = channel::<(Request, Response)>();
+    let (search_tx, search_rx) = channel::<Search>();
+    let (results_tx, results_rx) = channel::<(Search, Results)>();
     let searching = spawn_searcher(Client::connect()?, search_rx, results_tx, model.clone());
     let (preview_tx, preview_rx) = channel::<Hit>();
     let (previews_tx, previews_rx) = channel::<(i64, Preview)>();
@@ -293,32 +296,32 @@ fn copy(text: &str) -> Result<()> {
 /// engine loads the model, and asked again once it's there.
 fn spawn_searcher(
     mut client: Client,
-    requests: Receiver<Request>,
-    results: Sender<(Request, Response)>,
+    requests: Receiver<Search>,
+    results: Sender<(Search, Results)>,
     model: Arc<Mutex<Model>>,
 ) -> std::thread::JoinHandle<()> {
     let by_words = config::Config::load().is_ok_and(|config| config.search.mode == Mode::Words);
     let set = {
         let model = model.clone();
-        move |state: &str, error: Option<&str>| {
+        move |state: MeaningState, error: Option<&str>| {
             *model.lock().unwrap() = match state {
                 _ if by_words => Model::Words,
-                "ready" => Model::Ready,
-                "unavailable" => Model::Missing(error.unwrap_or("the model couldn't load").to_string()),
+                MeaningState::Ready => Model::Ready,
+                MeaningState::Unavailable => Model::Missing(error.unwrap_or("the model couldn't load").to_string()),
                 _ => Model::Loading,
             };
         }
     };
-    set(client.ready["meaning"].as_str().unwrap_or(""), None);
+    set(client.meaning, None);
     std::thread::spawn(move || {
-        let mut last: Option<Request> = None;
+        let mut last: Option<Search> = None;
         let mut answered_with_meaning = false;
         loop {
             // What the engine said meanwhile: the model loaded (ask the last query again, with meaning this time), or
             // couldn't.
             while let Ok(Some(event)) = client.event(Duration::ZERO) {
-                if event["event"] == "meaning" {
-                    set(event["state"].as_str().unwrap_or(""), event["error"].as_str());
+                if let protocol::Event::Meaning { state, error } = event {
+                    set(state, error.as_deref());
                 }
             }
             let request = match requests.recv_timeout(Duration::from_millis(100)) {
@@ -338,7 +341,7 @@ fn spawn_searcher(
                 }
                 Err(_) => return,
             };
-            let Ok(response) = client.search(&request, false) else { return };
+            let Ok(response) = client.search(&request) else { return };
             answered_with_meaning = response.meaning || request.q.trim().is_empty();
             if results.send((request.clone(), response)).is_err() {
                 return;

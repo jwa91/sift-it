@@ -18,8 +18,8 @@
 //!
 //! Every value is written out, so the file shows all there is to change. One that's left out takes its default.
 
-use crate::crawl::Kind;
 use anyhow::{Context, Result, anyhow, bail};
+use protocol::{FolderAction, Folders, Kind, Mode, Scan};
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map, Value, json};
@@ -122,6 +122,42 @@ impl Config {
         let mut updated: Config = serde_json::from_value(tree).with_context(|| format!("can't set {key}"))?;
         updated.check()?;
         *self = updated;
+        Ok(())
+    }
+
+    /// The folders indexed, and the folders inside them left out (ignore patterns that name a folder by its path).
+    pub fn folders(&self) -> Folders {
+        Folders {
+            folders: self.sources.paths.iter().map(|path| path.display().to_string()).collect(),
+            excluded: self.sources.ignore.iter().filter_map(Pattern::folder).map(|f| f.display().to_string()).collect(),
+        }
+    }
+
+    /// Changes which folders are indexed (save it after).
+    pub fn change_folders(&mut self, action: FolderAction, paths: &[String]) -> Result<()> {
+        for path in paths.iter().map(|path| expand(path)) {
+            let sources = &mut self.sources;
+            match action {
+                FolderAction::Add => {
+                    if !path.is_dir() {
+                        bail!("not a folder: {}", path.display());
+                    }
+                    if !sources.paths.contains(&path) {
+                        sources.paths.push(path);
+                    }
+                }
+                FolderAction::Remove => {
+                    sources.paths.retain(|folder| folder != &path);
+                    sources.ignore.retain(|pattern| !pattern.folder().is_some_and(|folder| folder.starts_with(&path)));
+                }
+                FolderAction::Include => sources.ignore.retain(|pattern| pattern.folder().as_ref() != Some(&path)),
+                FolderAction::Exclude => {
+                    if !sources.ignore.iter().any(|pattern| pattern.folder().as_ref() == Some(&path)) {
+                        sources.ignore.push(Pattern::new(&path.to_string_lossy())?);
+                    }
+                }
+            }
+        }
         Ok(())
     }
 
@@ -235,6 +271,11 @@ pub struct Pattern {
 }
 
 impl Pattern {
+    /// The folder the pattern names by its full path ("~/Documents/Old"), if it does.
+    fn folder(&self) -> Option<PathBuf> {
+        (self.source.starts_with('/') || self.source.starts_with("~/")).then(|| expand(&self.source))
+    }
+
     pub fn new(source: &str) -> Result<Self> {
         let trimmed = source.trim();
         if trimmed.is_empty() {
@@ -255,10 +296,6 @@ impl Pattern {
             parts.insert(0, "**".into());
         }
         Ok(Self { source: source.to_string(), parts, name_only })
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.source
     }
 
     /// The path matches, or a folder it's in does.
@@ -436,7 +473,7 @@ impl Reading {
     pub fn resolve(&self, path: &Path, kind: Kind) -> Settings {
         let mut settings = Settings::BASE;
         settings.apply(&self.all);
-        if let Some(values) = self.kinds.get(&kind.config_kind()) {
+        if let Some(values) = self.kinds.get(&settings_kind(kind)) {
             settings.apply(values);
         }
         if let Some(values) = self.types.get(&crate::crawl::extension_of(path)) {
@@ -623,23 +660,20 @@ pub struct Search {
     pub memory_mb: Budget,
 }
 
-/// Which form of the vectors a search by meaning scans. Every form is written for every vector and mapped (vectors.rs),
-/// so a change costs nothing.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Scan {
-    /// The most precise form whose scan fits `search.memory_mb`.
-    #[default]
-    #[serde(rename = "auto")]
-    Auto,
-    /// Every vector as it was made: exact scores.
-    #[serde(rename = "exact-f32")]
-    ExactF32,
-    /// Every vector at half precision: half the memory, and nearly exact scores.
-    #[serde(rename = "exact-f16")]
-    ExactF16,
-    /// Every vector's sketch, then the closest few thousand exactly: the least memory, exact scores for what's found.
-    #[serde(rename = "sketch")]
-    Sketch,
+/// Sets the value at a dotted key in config.json when there's a value, and gives the settings: `sift-it config`, and
+/// the protocol's `config`.
+pub fn configure(key: Option<&str>, value: Option<&str>) -> Result<Config> {
+    let mut config = Config::load()?;
+    if let (Some(key), Some(value)) = (key, value) {
+        config.set(key, value)?;
+        config.save()?;
+    }
+    Ok(config)
+}
+
+/// The kind whose settings a kind takes: a screenshot takes the image kind's.
+fn settings_kind(kind: Kind) -> Kind {
+    if kind == Kind::Screenshot { Kind::Image } else { kind }
 }
 
 /// An amount of memory in MB, or `auto`: what it is then depends on the Mac.
@@ -679,18 +713,6 @@ impl<'de> Deserialize<'de> for Budget {
                 .ok_or_else(|| D::Error::custom(format!("{other}: a number of MB, or \"auto\""))),
         }
     }
-}
-
-/// What a search is by.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
-#[serde(rename_all = "lowercase")]
-pub enum Mode {
-    /// The full-text index alone: no model and no vectors, so it holds almost nothing in memory.
-    Words,
-    /// Meaning too: the text model and the vectors, loaded for the first such search. Words still count, since names
-    /// and numbers are found by them.
-    #[default]
-    Meaning,
 }
 
 /// The background indexer's log (indexer.log).
@@ -821,6 +843,26 @@ mod tests {
         let words = before(&config, Kind::Video);
         config.set("reading.keep_every_s", "20").unwrap();
         assert_eq!(before(&config, Kind::Video), words);
+    }
+
+    #[test]
+    fn folders_are_added_left_out_and_removed() {
+        let top = std::env::temp_dir().join(format!("sift-it-folders-{}", std::process::id()));
+        let inner = top.join("Old");
+        std::fs::create_dir_all(&inner).unwrap();
+        let (top_s, inner_s) = (top.display().to_string(), inner.display().to_string());
+        let mut config = Config::default();
+        config.change_folders(FolderAction::Add, std::slice::from_ref(&top_s)).unwrap();
+        config.change_folders(FolderAction::Exclude, std::slice::from_ref(&inner_s)).unwrap();
+        assert_eq!(config.folders(), Folders { folders: vec![top_s.clone()], excluded: vec![inner_s.clone()] });
+        config.change_folders(FolderAction::Include, std::slice::from_ref(&inner_s)).unwrap();
+        assert!(config.folders().excluded.is_empty());
+        // Removing a folder forgets what was left out of it.
+        config.change_folders(FolderAction::Exclude, std::slice::from_ref(&inner_s)).unwrap();
+        config.change_folders(FolderAction::Remove, &[top_s]).unwrap();
+        assert_eq!(config.folders(), Folders::default());
+        assert!(config.change_folders(FolderAction::Add, &["/no/such/folder".into()]).is_err());
+        std::fs::remove_dir_all(&top).unwrap();
     }
 
     #[test]

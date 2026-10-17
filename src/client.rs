@@ -6,10 +6,11 @@
 //! is stopped first, and this build's started in its place.
 
 use crate::engine::{self, build, socket_path};
-use crate::search::{Request, Response};
 use crate::service;
 use anyhow::{Context, Result, anyhow, bail};
-use serde_json::{Value, json};
+use protocol::{Event, MeaningState, Op, Request, Results, Search, Text};
+use serde::de::DeserializeOwned;
+use serde_json::Value;
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -23,10 +24,13 @@ pub struct Client {
     reader: BufReader<UnixStream>,
     writer: UnixStream,
     next_id: u64,
-    /// The engine's `ready` event: its build, and the state of search by meaning when this client connected.
-    pub ready: Value,
+    /// The engine's build, and the state of search by meaning when this client connected (its `ready` event).
+    pub build: String,
+    pub meaning: MeaningState,
+    /// The `ready` event, as it came.
+    ready: String,
     /// Events that came while waiting for a reply, oldest first.
-    events: VecDeque<Value>,
+    events: VecDeque<Event>,
     /// What's read of a line that hasn't ended yet (a wait for events can end in the middle of one).
     partial: String,
 }
@@ -40,10 +44,10 @@ impl Client {
             match Self::open(if started { START } else { Duration::ZERO }) {
                 // Once this build was started, whatever answers is kept: another client may have started its own
                 // meanwhile, and taking turns stopping each other would never end.
-                Ok(client) if client.ready["build"] == ours || started => return Ok(client),
+                Ok(client) if client.build == ours || started => return Ok(client),
                 Ok(mut client) => {
                     // Another build: it goes, and this one takes its place.
-                    let _ = client.send("stop", json!({}));
+                    let _ = client.send(Op::Stop);
                     client.wait_closed();
                 }
                 Err(error) if started => {
@@ -84,40 +88,38 @@ impl Client {
         let mut line = String::new();
         reader.read_line(&mut line)?;
         reader.get_ref().set_read_timeout(None)?;
-        let ready: Value = serde_json::from_str(&line).context("the engine didn't say it was ready")?;
-        if ready["event"] != "ready" {
-            bail!("the engine said {line}");
-        }
-        Ok(Self { reader, writer, next_id: 1, ready, events: VecDeque::new(), partial: String::new() })
+        let Ok(Event::Ready { build, meaning, .. }) = serde_json::from_str(&line) else {
+            bail!("the engine didn't say it was ready: {line}");
+        };
+        let ready = line.trim_end().to_string();
+        Ok(Self { reader, writer, next_id: 1, build, meaning, ready, events: VecDeque::new(), partial: String::new() })
     }
 
-    /// The streams, for relaying (serve.rs).
-    pub fn into_parts(self) -> (BufReader<UnixStream>, UnixStream, Value) {
+    /// The streams, and the `ready` line, for relaying (serve.rs).
+    pub fn into_parts(self) -> (BufReader<UnixStream>, UnixStream, String) {
         (self.reader, self.writer, self.ready)
     }
 
-    fn send(&mut self, op: &str, mut params: Value) -> Result<u64> {
+    fn send(&mut self, op: Op) -> Result<u64> {
         let id = self.next_id;
         self.next_id += 1;
-        params["op"] = json!(op);
-        params["id"] = json!(id);
-        writeln!(self.writer, "{params}")?;
+        writeln!(self.writer, "{}", serde_json::to_string(&Request { id: id.into(), op })?)?;
         Ok(id)
     }
 
     /// Sends a request and waits for its reply. Events that come meanwhile wait in `events`.
-    pub fn request(&mut self, op: &str, params: Value) -> Result<Value> {
-        let id = self.send(op, params)?;
+    pub fn request<T: DeserializeOwned>(&mut self, op: Op) -> Result<T> {
+        let id = self.send(op)?;
         loop {
             let message = self.read()?.ok_or_else(|| anyhow!("the engine stopped"))?;
             if message["id"] == id {
                 if message["ok"] == false {
                     bail!("{}", message["error"].as_str().unwrap_or("the engine failed"));
                 }
-                return Ok(message);
+                return Ok(serde_json::from_value(message)?);
             }
-            if message.get("event").is_some() {
-                self.events.push_back(message);
+            if let Ok(event) = serde_json::from_value(message) {
+                self.events.push_back(event);
             }
         }
     }
@@ -132,7 +134,7 @@ impl Client {
     }
 
     /// The next event: one that came with a reply, or one that comes within `timeout`.
-    pub fn event(&mut self, timeout: Duration) -> Result<Option<Value>> {
+    pub fn event(&mut self, timeout: Duration) -> Result<Option<Event>> {
         if let Some(event) = self.events.pop_front() {
             return Ok(Some(event));
         }
@@ -141,8 +143,7 @@ impl Client {
         let message = self.read();
         self.reader.get_ref().set_read_timeout(None)?;
         match message {
-            Ok(Some(message)) if message.get("event").is_some() => Ok(Some(message)),
-            Ok(Some(_)) => Ok(None),
+            Ok(Some(message)) => Ok(serde_json::from_value(message).ok()),
             Ok(None) => Err(anyhow!("the engine stopped")),
             Err(error)
                 if error.downcast_ref::<std::io::Error>().is_some_and(|error| {
@@ -155,20 +156,17 @@ impl Client {
         }
     }
 
-    /// A search (`wait`: by meaning even if the model has to load first). An empty query lists recent files.
-    pub fn search(&mut self, request: &Request, wait: bool) -> Result<Response> {
-        let mut params = serde_json::to_value(request)?;
-        params["wait"] = json!(wait);
-        let op = if request.q.trim().is_empty() { "recent" } else { "search" };
-        Ok(serde_json::from_value(self.request(op, params)?)?)
+    /// A search. An empty query lists recent files.
+    pub fn search(&mut self, request: &Search) -> Result<Results> {
+        self.request(Op::Search(request.clone()))
     }
 
     pub fn segment_text(&mut self, segment_id: i64) -> Result<Option<String>> {
-        Ok(serde_json::from_value(self.request("text", json!({"segment_id": segment_id}))?["text"].take())?)
+        Ok(self.request::<Text>(Op::Text { segment_id: Some(segment_id), path: None })?.text)
     }
 
     pub fn file_text(&mut self, path: &str) -> Result<Option<String>> {
-        Ok(serde_json::from_value(self.request("text", json!({"path": path}))?["text"].take())?)
+        Ok(self.request::<Text>(Op::Text { segment_id: None, path: Some(path.into()) })?.text)
     }
 
     /// Waits until the engine has closed the connection (it stopped), for at most a few seconds.

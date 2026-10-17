@@ -29,8 +29,8 @@ mod vectors;
 
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
-use config::{Config, Mode};
-use crawl::Kind;
+use config::Config;
+use protocol::{Kind, MeaningState, Mode, Search};
 use std::path::PathBuf;
 
 /// Sift It: search your files by what's in them, with EmbeddingGemma 2 on this Mac.
@@ -256,10 +256,10 @@ fn run(cli: Cli) -> Result<()> {
                 return Ok(());
             };
             let op = match action {
-                EngineAction::Stop => "stop",
-                EngineAction::Unload => "unload",
+                EngineAction::Stop => protocol::Op::Stop,
+                EngineAction::Unload => protocol::Op::Unload,
             };
-            engine.request(op, serde_json::json!({}))?;
+            engine.request::<protocol::Done>(op)?;
             Ok(())
         }
         Command::Daemon => daemon::run(),
@@ -290,9 +290,9 @@ fn run(cli: Cli) -> Result<()> {
             .and_then(|()| {
                 // An engine that couldn't load the model tries again on its next search by meaning.
                 if let Some(mut engine) = client::Client::running()
-                    && engine.request("status", serde_json::json!({}))?["meaning"] == "unavailable"
+                    && engine.request::<protocol::Status>(protocol::Op::Status)?.meaning == MeaningState::Unavailable
                 {
-                    engine.request("unload", serde_json::json!({}))?;
+                    engine.request::<protocol::Done>(protocol::Op::Unload)?;
                 }
                 Ok(())
             }),
@@ -393,7 +393,7 @@ fn run(cli: Cli) -> Result<()> {
             let files = embedder::ModelFiles::in_folder(&config::models_dir())?;
             let mut encoder = embedder::Embedder::load(&files, true)?;
             for query in queries {
-                let prompt = search::Request { q: query, ..Default::default() }.prompt();
+                let prompt = search::prompt(&Search { q: query, ..Default::default() });
                 println!("{}", serde_json::to_string(&encoder.embed_text(&prompt)?)?);
             }
             Ok(())
@@ -410,48 +410,14 @@ fn run(cli: Cli) -> Result<()> {
 
 fn folders(action: Option<FolderAction>) -> Result<()> {
     let mut config = Config::load()?;
-    // The folder an ignore pattern names by its full path, if it does ("~/Documents/Old").
-    let folder_of = |pattern: &config::Pattern| {
-        let source = pattern.as_str();
-        (source.starts_with('/') || source.starts_with("~/")).then(|| config::expand(source))
-    };
-    let changes = action.is_some();
-    match action {
-        None => {}
-        Some(FolderAction::Add { paths }) => {
-            for path in paths {
-                let path = config::expand(&path);
-                if !path.is_dir() {
-                    bail!("not a folder: {}", path.display());
-                }
-                if !config.sources.paths.contains(&path) {
-                    config.sources.paths.push(path);
-                }
-            }
-        }
-        Some(FolderAction::Remove { paths }) => {
-            for path in paths {
-                let path = config::expand(&path);
-                config.sources.paths.retain(|folder| folder != &path);
-                config.sources.ignore.retain(|pattern| !folder_of(pattern).is_some_and(|f| f.starts_with(&path)));
-            }
-        }
-        Some(FolderAction::Include { paths }) => {
-            for path in paths {
-                let path = config::expand(&path);
-                config.sources.ignore.retain(|pattern| folder_of(pattern).as_ref() != Some(&path));
-            }
-        }
-        Some(FolderAction::Exclude { paths }) => {
-            for path in paths {
-                let path = config::expand(&path);
-                if !config.sources.ignore.iter().any(|pattern| folder_of(pattern).as_ref() == Some(&path)) {
-                    config.sources.ignore.push(config::Pattern::new(&path.to_string_lossy())?);
-                }
-            }
-        }
-    }
-    if changes {
+    if let Some(action) = action {
+        let (action, paths) = match action {
+            FolderAction::Add { paths } => (protocol::FolderAction::Add, paths),
+            FolderAction::Remove { paths } => (protocol::FolderAction::Remove, paths),
+            FolderAction::Include { paths } => (protocol::FolderAction::Include, paths),
+            FolderAction::Exclude { paths } => (protocol::FolderAction::Exclude, paths),
+        };
+        config.change_folders(action, &paths)?;
         config.save()?;
     }
     println!("{}", serde_json::to_string_pretty(&config)?);
@@ -460,11 +426,7 @@ fn folders(action: Option<FolderAction>) -> Result<()> {
 
 /// Prints config.json, or the value at a dotted key, after setting it when there's a value.
 fn configure(key: Option<String>, value: Option<String>) -> Result<()> {
-    let mut config = Config::load()?;
-    if let (Some(key), Some(value)) = (&key, &value) {
-        config.set(key, value)?;
-        config.save()?;
-    }
+    let config = config::configure(key.as_deref(), value.as_deref())?;
     // All of it in config.json's order; a part through JSON values, which sort their keys.
     let shown = match key.as_deref() {
         None => serde_json::to_string_pretty(&config)?,
@@ -559,10 +521,10 @@ fn search_once(q: &str, kinds: &[String], limit: usize, by: Option<Mode>, json: 
         .iter()
         .map(|name| Kind::parse(name).ok_or_else(|| anyhow::anyhow!("no such kind: {name}")))
         .collect::<Result<Vec<_>>>()?;
-    let request = search::Request { q: q.to_string(), mode: by, kinds, limit, prefix_last: false };
-    let mut client = client::Client::connect()?;
     // By meaning, it waits for the engine to load the model if it hasn't yet.
-    let response = client.search(&request, true)?;
+    let request = Search { q: q.to_string(), mode: by, kinds, limit, wait: true, ..Default::default() };
+    let mut client = client::Client::connect()?;
+    let response = client.search(&request)?;
     open::remember(q, &response.hits);
     if json {
         println!("{}", serde_json::to_string_pretty(&response)?);
@@ -588,7 +550,8 @@ fn status(json: bool) -> Result<()> {
     let queued = store.queued(5)?;
     let plan = indexer::Plan::of(&config.indexing);
     // The engine, if it's running (status doesn't start it): what it holds.
-    let engine = client::Client::running().and_then(|mut engine| engine.request("status", serde_json::json!({})).ok());
+    let engine =
+        client::Client::running().and_then(|mut engine| engine.request::<protocol::Status>(protocol::Op::Status).ok());
     if json {
         println!(
             "{}",
@@ -640,16 +603,18 @@ fn status(json: bool) -> Result<()> {
     );
     let engine = match engine {
         None => "not running (the next search starts it)".to_string(),
-        Some(engine) => match engine["meaning"].as_str().unwrap_or("") {
-            "ready" => format!(
+        Some(engine) => match engine.meaning {
+            MeaningState::Ready => format!(
                 "running, {} vectors mapped for search by meaning ({}, {} MB of them in memory)",
-                engine["vectors"],
-                engine["scan"].as_str().unwrap_or("?"),
-                engine["resident"].as_u64().unwrap_or(0) >> 20
+                engine.vectors,
+                serde_json::json!(engine.scan).as_str().unwrap_or("?"),
+                engine.resident >> 20
             ),
-            "loading" => "running, loading the model and the vectors".to_string(),
-            "unavailable" => format!("running, by words only: {}", engine["error"].as_str().unwrap_or("no model")),
-            _ => "running, nothing loaded (search by meaning loads it)".to_string(),
+            MeaningState::Loading => "running, loading the model and the vectors".to_string(),
+            MeaningState::Unavailable => {
+                format!("running, by words only: {}", engine.error.as_deref().unwrap_or("no model"))
+            }
+            MeaningState::Unloaded => "running, nothing loaded (search by meaning loads it)".to_string(),
         },
     };
     println!("engine:  {engine}");
@@ -715,7 +680,7 @@ fn bench_search(count: usize) -> Result<()> {
             let id = store.queue(&found, None, 0.0)?;
             let segments: Vec<store::NewSegment> = (0..per_file)
                 .map(|n| store::NewSegment {
-                    segment: store::Segment::Passage,
+                    segment: protocol::Segment::Passage,
                     loc: Some(n as f64),
                     loc_end: None,
                     text: Some(format!("passage {n} of file {file} about topic{}", file % 97)),
@@ -736,10 +701,10 @@ fn bench_search(count: usize) -> Result<()> {
     }
     println!("built an index of {count} vectors around {TOPICS} topics in {:.1} s", started.elapsed().as_secs_f64());
     let queries: Vec<Vec<f32>> = (0..20).map(|i| near(&topics[i * 37 % TOPICS])).collect();
-    let request = |q: &str| search::Request { q: q.into(), mode: None, kinds: vec![], limit: 20, prefix_last: true };
+    let request = |q: &str| Search { q: q.into(), limit: 20, prefix_last: true, ..Default::default() };
     let ms = |started: std::time::Instant| started.elapsed().as_secs_f64() * 1000.0;
     let mut exact: Vec<Vec<String>> = Vec::new();
-    for scan in [config::Scan::ExactF32, config::Scan::ExactF16, config::Scan::Sketch] {
+    for scan in [protocol::Scan::ExactF32, protocol::Scan::ExactF16, protocol::Scan::Sketch] {
         let started = std::time::Instant::now();
         let search = config::Search { vectors: scan, ..Default::default() };
         let mut searcher = search::Searcher::open(&path, config::Ranking::default(), search)?;

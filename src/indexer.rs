@@ -19,12 +19,13 @@
 //! does it once everything is read.
 
 use crate::config::{self, Config};
-use crate::crawl::{self, Found, Kind, Rescan};
+use crate::crawl::{self, Found, Rescan};
 use crate::embedder::{Embedder, ModelFiles};
 use crate::readers::{self, Payload, Piece};
 use crate::speech::{Gone, Outcome, Spoken, Transcriber};
 use crate::store::{FileRow, NewSegment, Store};
 use anyhow::{Result, anyhow};
+use protocol::Kind;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
@@ -720,7 +721,7 @@ impl Indexer {
         let segments: Vec<NewSegment> = passages
             .into_iter()
             .map(|p| NewSegment {
-                segment: crate::store::Segment::Speech,
+                segment: protocol::Segment::Speech,
                 loc: Some(p.start),
                 loc_end: Some(p.end),
                 text: Some(p.text),

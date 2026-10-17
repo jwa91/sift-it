@@ -279,7 +279,7 @@ make install
 
 [docs/design.md](docs/design.md) says what sift-it does and the order it's built in.
 [docs/architecture.md](docs/architecture.md) says how the code is structured: its parts, their boundaries, and which
-way dependencies point.
+way dependencies point. [docs/protocol.md](docs/protocol.md) is what front ends say to the engine.
 
 After you download the model, `make selftest` checks output against the reference vectors from DigUp.
 `make eval` builds `testbed/` inside this repository and measures search quality. The engine's build and testbed

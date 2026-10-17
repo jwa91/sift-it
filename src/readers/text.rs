@@ -3,8 +3,8 @@
 
 use super::{Piece, Sink, text_payload, title_of};
 use crate::config::Settings;
-use crate::store::Segment;
 use anyhow::{Context, Result, bail};
+use protocol::Segment;
 use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
 use std::process::{Command, Stdio};

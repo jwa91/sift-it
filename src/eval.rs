@@ -8,11 +8,10 @@
 //! when it scores 256 to 8192 candidates exactly, and where the segments the exact top 20 found by meaning come by
 //! their sketches' estimates.
 
-use crate::config::Mode;
 use crate::engine::Core;
-use crate::search::Request;
 use crate::vectors::Form;
 use anyhow::Result;
+use protocol::{Mode, Search};
 use serde::Deserialize;
 use std::path::Path;
 use std::sync::Arc;
@@ -37,8 +36,8 @@ pub fn run(file: &Path, core: &Arc<Core>, verbose: bool, compare: bool) -> Resul
     let (mut negatives, mut false_alarms) = (0, 0);
     for case in &cases {
         let request =
-            Request { q: case.q.clone(), mode: Some(Mode::Meaning), kinds: Vec::new(), limit: 20, prefix_last: false };
-        let response = core.search(&request, true)?;
+            Search { q: case.q.clone(), mode: Some(Mode::Meaning), limit: 20, wait: true, ..Default::default() };
+        let response = core.search(&request)?;
         if !response.meaning {
             anyhow::bail!("search by meaning isn't available: is the model downloaded?");
         }
@@ -116,12 +115,11 @@ fn compare_forms(cases: &[Case], core: &Arc<Core>) -> Result<()> {
     let (mut found, mut kept, mut whole, mut fractions) = (0, [0; COUNTS.len()], [0; COUNTS.len()], Vec::new());
     println!("{:<52} {:>5}  {}", "", "", COUNTS.map(|count| format!("{count:>5}")).join(""));
     for case in cases {
-        let request =
-            Request { q: case.q.clone(), mode: Some(Mode::Meaning), kinds: Vec::new(), limit: TOP, prefix_last: false };
+        let request = Search { q: case.q.clone(), mode: Some(Mode::Meaning), limit: TOP, ..Default::default() };
         let (exact, sketched, (ranks, of)) = core.with_query(&request, |searcher, query| {
             let query =
                 query.ok_or_else(|| anyhow::anyhow!("search by meaning isn't available: is the model downloaded?"))?;
-            let paths = |response: crate::search::Response| -> Vec<String> {
+            let paths = |response: protocol::Results| -> Vec<String> {
                 response.hits.into_iter().map(|hit| hit.path).collect()
             };
             let exact = searcher.search_in(&request, Some(query), Form::F32, 0)?;

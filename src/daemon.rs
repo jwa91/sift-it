@@ -24,7 +24,7 @@ use crate::speech::Transcriber;
 use crate::store::{self, Store};
 use anyhow::{Context, Result, bail};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
-use serde::Serialize;
+use protocol::{IndexerState, IndexerStatus};
 use std::collections::HashMap;
 use std::fs::File;
 use std::os::fd::AsRawFd;
@@ -58,29 +58,14 @@ fn install_signal_handlers() {
     }
 }
 
-/// What status.json says (see the extension's IndexerStatus).
-#[derive(Serialize, Default, Clone)]
-struct Status {
-    pid: u32,
-    state: &'static str,
-    detail: Option<String>,
-    done: usize,
-    total: usize,
-    current: Option<String>,
-    updated: f64,
-    last_error: Option<String>,
-    /// Recordings and videos with what's said in them written down, and how many there are.
-    speech_done: usize,
-    speech_total: usize,
-}
-
+/// Says what the daemon does in status.json, which the engine passes on (protocol::IndexerStatus).
 struct Reporter {
-    status: Status,
+    status: IndexerStatus,
     last_write: Instant,
 }
 
 impl Reporter {
-    fn set(&mut self, state: &'static str, detail: Option<String>) {
+    fn set(&mut self, state: IndexerState, detail: Option<String>) {
         if self.status.state != state || self.status.detail != detail {
             self.status.state = state;
             self.status.detail = detail;
@@ -97,7 +82,7 @@ impl Reporter {
             Event::Started { pending } => {
                 self.status.done = 0;
                 self.status.total = *pending;
-                self.set("indexing", None);
+                self.set(IndexerState::Indexing, None);
             }
             Event::Queued { count } => self.status.total += count,
             Event::File { path, .. } => {
@@ -116,14 +101,14 @@ impl Reporter {
                 ));
             }
             // Beside the reading, the reading's progress is what's shown.
-            Event::Transcribing { path, at, duration } if self.status.state == "transcribing" => {
+            Event::Transcribing { path, at, duration } if self.status.state == IndexerState::Transcribing => {
                 self.status.current = Some(path.clone());
                 self.status.detail = Some(format!("{} of {}", clock(*at), clock(*duration)));
             }
             Event::Transcribing { .. } => {}
             Event::Transcribed { path, passages, seconds, ms } => {
                 self.status.speech_done += 1;
-                if self.status.state == "transcribing" {
+                if self.status.state == IndexerState::Transcribing {
                     self.status.done = self.status.speech_done;
                 }
                 log(&format!(
@@ -133,7 +118,7 @@ impl Reporter {
             }
             Event::TranscribeFailed { path, error } => {
                 self.status.speech_done += 1;
-                if self.status.state == "transcribing" {
+                if self.status.state == IndexerState::Transcribing {
                     self.status.done = self.status.speech_done;
                 }
                 self.status.last_error = Some(format!("{}: {error}", file_name(path)));
@@ -332,7 +317,7 @@ pub fn run() -> Result<()> {
     trim_log(config.log.max_mb << 20);
     log(&format!("sift-it daemon started (pid {})", std::process::id()));
     let mut reporter = Reporter {
-        status: Status { pid: std::process::id(), state: "starting", ..Default::default() },
+        status: IndexerStatus { pid: std::process::id(), ..Default::default() },
         last_write: Instant::now(),
     };
     reporter.write(true);
@@ -391,7 +376,7 @@ pub fn run() -> Result<()> {
         if changes.rescan {
             changes.rescan = false;
             changes.paths.clear();
-            reporter.set("syncing", None);
+            reporter.set(IndexerState::Syncing, None);
             match indexer.sync(&config) {
                 Ok(event) => reporter.event(&event),
                 Err(error) => log(&format!("sync failed: {error:#}")),
@@ -413,7 +398,7 @@ pub fn run() -> Result<()> {
 
         let pending = indexer.store.pending_count().unwrap_or(0);
         if pending > 0 && paused {
-            reporter.set("paused", Some(format!("Paused, {pending} files waiting")));
+            reporter.set(IndexerState::Paused, Some(format!("Paused, {pending} files waiting")));
         } else if pending > 0 {
             // Conditions are checked every few seconds, not on every pass.
             let reason = match &waiting_reason {
@@ -425,12 +410,12 @@ pub fn run() -> Result<()> {
                 }
             };
             if let Some(reason) = reason {
-                reporter.set("waiting", Some(reason));
+                reporter.set(IndexerState::Waiting, Some(reason));
                 indexer.release_model();
             } else {
                 waiting_reason = None;
                 if !crate::models::status(&config::models_dir()).media {
-                    reporter.set("waiting", Some("Waiting for the model to download".into()));
+                    reporter.set(IndexerState::Waiting, Some("Waiting for the model to download".into()));
                 } else {
                     let stop = || {
                         SHUTDOWN.load(Ordering::SeqCst)
@@ -451,7 +436,7 @@ pub fn run() -> Result<()> {
                         if error.is::<Stuck>() {
                             // The stuck thread can't be stopped, and what it's stuck in stays stuck in this process:
                             // it ends, and launchd starts a new daemon (KeepAlive), which goes on with the rest.
-                            reporter.set("stopped", None);
+                            reporter.set(IndexerState::Stopped, None);
                             return Err(error);
                         }
                         changes.rescan = true;
@@ -494,7 +479,7 @@ pub fn run() -> Result<()> {
                     reporter.status.done = done;
                     reporter.status.total = total;
                 }
-                reporter.set("transcribing", reporter.status.detail.clone());
+                reporter.set(IndexerState::Transcribing, reporter.status.detail.clone());
                 // Between chunks it makes way for anything that changes in the folders (synced, and read first).
                 let arrived = std::cell::RefCell::new(Vec::new());
                 let stop = || {
@@ -546,7 +531,7 @@ pub fn run() -> Result<()> {
                 }
             }
             let detail = speech_problem.clone().filter(|_| to_write);
-            reporter.set("idle", detail);
+            reporter.set(IndexerState::Idle, detail);
         }
 
         if indexer.model_loaded() && idle_since.elapsed() > Duration::from_secs(config.indexing.release_model_s) {
@@ -560,7 +545,7 @@ pub fn run() -> Result<()> {
             Err(RecvTimeoutError::Disconnected) => bail!("the file watcher stopped"),
         }
     }
-    reporter.set("stopped", None);
+    reporter.set(IndexerState::Stopped, None);
     log("sift-it daemon stopped");
     drop(watcher);
     Ok(())

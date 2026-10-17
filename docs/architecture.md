@@ -67,8 +67,9 @@ adapters    index (SQLite and vector files) · embedder (llama.cpp) · transcrib
 - **Resources:** the Mac's facts (memory, cores, power) go in, plans come out: the form a search scans and its
   candidates, the readers and speech of ingest. Pure functions, in one place.
 - **Config:** the schema and the cascade. Each part gets its own typed section, not the whole config.
-- **Protocol:** the requests, responses and events every client uses, documented and versioned. The engine is the one
-  place a client talks to, for searching and for control: the indexer's progress, the settings, the folders.
+- **Protocol:** the requests, responses and events every client uses (`crates/protocol`, `docs/protocol.md`). Its
+  first event carries the engine's build, so a client of another build notices; nothing is negotiated. The engine is
+  the one place a client talks to, for searching and for control: the indexer's progress, the settings, the folders.
 
 ### Services
 
@@ -158,7 +159,7 @@ transcribe/              sift-it-transcribe
 | Index | `store.rs`, `vectors.rs` | its rules are spread over both |
 | Query | `search.rs` | retrieving and ranking in one function |
 | Resources | `config.rs`, `indexer::Plan`, `search.rs`, `mac.rs` | four places |
-| Protocol | `engine.rs`, `client.rs`, `search::{Request, Hit}` | implicit JSON; progress and settings outside it |
+| Protocol | `crates/protocol`, `docs/protocol.md` | done (step 1 below) |
 | Clients | `finder.rs`, `term.rs`, `present.rs`, `preview.rs`, `open.rs`, `serve.rs` | beside the core, in one namespace |
 
 ## The way there

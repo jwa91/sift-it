@@ -5,11 +5,11 @@
 use super::text::passages;
 use super::{Payload, Piece, Sink, text_payload, title_of};
 use crate::config::Settings;
-use crate::crawl::Kind;
 use crate::imaging;
 use crate::mac;
-use crate::store::Segment;
 use anyhow::Result;
+use protocol::Kind;
+use protocol::Segment;
 use std::path::Path;
 
 /// Pictures are decoded at most this large: plenty for any token budget, and a 48-megapixel photo decodes quickly.

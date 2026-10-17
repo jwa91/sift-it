@@ -4,36 +4,26 @@
 //! the finder talk to it directly (client.rs). Results carry a path, kind and place; opening them, and previews, are the
 //! front end's.
 //!
-//! JSON lines: one request per line, one reply per line carrying the request's `id`, and events (lines without an
-//! `id`) to every client.
-//!
-//!   {"id":1,"op":"search","q":"…","mode":"meaning","kinds":["document"],"limit":40,"prefix_last":true}
-//!       → {"id":1,"hits":[…],"meaning":true,"ms":3.1}
-//!       `mode` is words or meaning (config.json's `search.mode` when left out). While the model and the vectors load,
-//!       a search by meaning is answered by words ("meaning":false), unless it says "wait":true.
-//!   {"id":2,"op":"recent","limit":40}                    → {"id":2,"hits":[…]}: recently changed files
-//!   {"id":3,"op":"text","segment_id":12} or {"op":"text","path":"…"} → {"text":…}: a segment's whole text, or a
-//!       file's (its text segments in order)
-//!   {"id":4,"op":"status"}                               → {"meaning":"ready","vectors":n,"scan":"exact-f32",
-//!       "resident":bytes,"stats":{…}}: how many vectors are mapped, which form searches scan (what `auto` picked),
-//!       and how much of them is in memory
-//!   {"id":5,"op":"unload"}                               → {"ok":true}: the model and the vectors go
-//!   {"id":6,"op":"stop"}                                 → {"ok":true}, and the engine exits
-//!
-//!   events: {"event":"ready","version":…,"build":…,"meaning":…}: on connecting
-//!           {"event":"meaning","state":"loading"|"ready"|"unavailable"|"unloaded","error":…}
-//!           {"event":"config","error":…}: config.json can't be read (the ranking stays as it was)
+//! What clients and the engine say to each other is the protocol (crates/protocol, docs/protocol.md): JSON lines, one
+//! request per line and one reply per line carrying the request's `id`, and events (lines without an `id`) to every
+//! client. The engine is a client's one way in: it searches, and it passes on the indexer's progress (from status.json,
+//! as the indexer writes it) and changes the settings and the folders (config.json, which the indexer follows).
 //!
 //! Nothing loads before it's needed: a search by words uses SQLite's full-text index alone. The first search by meaning
 //! loads the text model and maps the vectors (vectors.rs), off the searching threads. What's loaded stays until `unload`
 //! or the engine stopping. There are no idle timers.
 
-use crate::config::{self, Config, Mode};
+use crate::config::{self, Config};
 use crate::embedder::{Embedder, ModelFiles};
-use crate::search::{Request, Searcher, Vectors};
+use crate::search::{Searcher, Vectors};
 use crate::store::Store;
-use anyhow::{Context, Result, anyhow};
-use serde_json::{Value, json};
+use anyhow::{Context, Result, bail};
+use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+use protocol::{
+    Done, Event, Failure, IndexerStatus, MeaningState, Mode, Op, Request, Results, Search, Settings, Status, Text,
+};
+use serde::Serialize;
+use serde_json::Value;
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::io::{self, BufRead, BufReader, Write};
@@ -131,17 +121,17 @@ enum Meaning {
 }
 
 impl Meaning {
-    fn name(&self) -> &'static str {
+    fn state(&self) -> MeaningState {
         match self {
-            Meaning::Unloaded => "unloaded",
-            Meaning::Loading => "loading",
-            Meaning::Ready(_) => "ready",
-            Meaning::Unavailable(_) => "unavailable",
+            Meaning::Unloaded => MeaningState::Unloaded,
+            Meaning::Loading => MeaningState::Loading,
+            Meaning::Ready(_) => MeaningState::Ready,
+            Meaning::Unavailable(_) => MeaningState::Unavailable,
         }
     }
 }
 
-struct MeaningState {
+struct Loaded {
     meaning: Meaning,
     /// Counts unloads, so a load that an unload overtook isn't installed.
     generation: u64,
@@ -153,23 +143,23 @@ pub struct Core {
     index: PathBuf,
     models: PathBuf,
     searcher: Mutex<Option<Searcher>>,
-    meaning: Mutex<MeaningState>,
+    meaning: Mutex<Loaded>,
     /// Signalled when a load ends.
     loaded: Condvar,
     /// Query vectors by prompt: typing back and forth embeds each prefix once.
     cache: Mutex<HashMap<String, Vec<f32>>>,
     config: Mutex<(Option<SystemTime>, Config)>,
     /// Events go to every client (a no-op in a process of its own).
-    events: Box<dyn Fn(&Value) + Send + Sync>,
+    events: Box<dyn Fn(&Event) + Send + Sync>,
 }
 
 impl Core {
-    pub fn new(index: &Path, models: &Path, events: Box<dyn Fn(&Value) + Send + Sync>) -> Result<Arc<Self>> {
+    pub fn new(index: &Path, models: &Path, events: Box<dyn Fn(&Event) + Send + Sync>) -> Result<Arc<Self>> {
         Ok(Arc::new(Self {
             index: index.to_path_buf(),
             models: models.to_path_buf(),
             searcher: Mutex::new(None),
-            meaning: Mutex::new(MeaningState { meaning: Meaning::Unloaded, generation: 0 }),
+            meaning: Mutex::new(Loaded { meaning: Meaning::Unloaded, generation: 0 }),
             loaded: Condvar::new(),
             cache: Mutex::new(HashMap::new()),
             config: Mutex::new((config_modified(), Config::load()?)),
@@ -177,70 +167,75 @@ impl Core {
         }))
     }
 
-    pub fn meaning_state(&self) -> &'static str {
-        self.meaning.lock().unwrap().meaning.name()
+    pub fn meaning_state(&self) -> MeaningState {
+        self.meaning.lock().unwrap().meaning.state()
     }
 
-    /// Answers a request (anything but `stop`, which the server handles).
-    pub fn handle(self: &Arc<Self>, op: &str, request: &Value) -> Result<Value> {
+    /// Answers a request (anything but `stop`, which the server handles) with its reply.
+    pub fn handle(self: &Arc<Self>, op: &Op) -> Result<Value> {
         match op {
-            "search" | "recent" => {
-                let search: Request = serde_json::from_value(request.clone())?;
-                let wait = request.get("wait").and_then(Value::as_bool).unwrap_or(false);
-                let response = if op == "recent" || search.q.trim().is_empty() {
-                    self.with_searcher(|searcher| searcher.recent(&search))?
-                } else {
-                    self.search(&search, wait)?
-                };
-                Ok(serde_json::to_value(response)?)
+            Op::Search(search) if !search.q.trim().is_empty() => reply(self.search(search)?),
+            Op::Search(search) | Op::Recent(search) => reply(self.with_searcher(|searcher| searcher.recent(search))?),
+            Op::Text { segment_id: Some(id), .. } => {
+                reply(Text { text: self.with_searcher(|searcher| searcher.segment_text(*id))? })
             }
-            "text" => {
-                let text = match (
-                    request.get("segment_id").and_then(Value::as_i64),
-                    request.get("path").and_then(Value::as_str),
-                ) {
-                    (Some(id), _) => self.with_searcher(|searcher| searcher.segment_text(id))?,
-                    (None, Some(path)) => self.with_searcher(|searcher| searcher.file_text(path))?,
-                    _ => return Err(anyhow!("which segment or file?")),
-                };
-                Ok(json!({"text": text}))
+            Op::Text { path: Some(path), .. } => {
+                reply(Text { text: self.with_searcher(|searcher| searcher.file_text(path))? })
             }
-            "status" => {
-                let (vectors, scan, resident, stats) = self.with_searcher(|searcher| {
-                    searcher.refresh()?;
-                    let stats = searcher.store().stats()?;
-                    Ok((searcher.vector_count(), searcher.scan(), searcher.vectors_resident(), stats))
-                })?;
-                let meaning = self.meaning.lock().unwrap();
-                let error = match &meaning.meaning {
-                    Meaning::Unavailable(error) => Some(error.clone()),
-                    _ => None,
-                };
-                Ok(json!({
-                    "meaning": meaning.meaning.name(),
-                    "error": error,
-                    "vectors": vectors,
-                    "scan": scan,
-                    "resident": resident,
-                    "stats": stats,
-                }))
+            Op::Text { .. } => bail!("which segment or file?"),
+            Op::Status => reply(self.status()?),
+            Op::Config { key, value } => {
+                let config = config::configure(key.as_deref(), value.as_deref())?;
+                reply(Settings { config: config.get(key.as_deref())? })
             }
-            "unload" => {
+            Op::Folders { action, paths } => {
+                let mut config = Config::load()?;
+                if let Some(action) = action {
+                    config.change_folders(*action, paths)?;
+                    config.save()?;
+                }
+                reply(config.folders())
+            }
+            Op::Unload => {
                 self.unload();
-                Ok(json!({"ok": true}))
+                reply(Done::OK)
             }
-            "preview" => Err(anyhow!("previews are made by the front end (sift-it serve makes them)")),
-            _ => Err(anyhow!("unknown op {op:?}")),
+            Op::Stop => bail!("the server stops the engine"),
+            Op::Preview(_) => bail!("previews are made by the front end (sift-it serve makes them)"),
+            Op::Quit => bail!("quit ends sift-it serve, not the engine"),
         }
     }
 
+    /// What the engine holds, and the indexer's progress.
+    fn status(self: &Arc<Self>) -> Result<Status> {
+        let (vectors, scan, resident, stats) = self.with_searcher(|searcher| {
+            searcher.refresh()?;
+            let stats = searcher.store().stats()?;
+            Ok((searcher.vector_count(), searcher.scan(), searcher.vectors_resident(), stats))
+        })?;
+        let meaning = self.meaning.lock().unwrap();
+        let error = match &meaning.meaning {
+            Meaning::Unavailable(error) => Some(error.clone()),
+            _ => None,
+        };
+        Ok(Status {
+            meaning: meaning.meaning.state(),
+            error,
+            vectors,
+            scan,
+            resident,
+            stats,
+            indexer: indexer_status(),
+        })
+    }
+
     /// A search, by meaning when it asks for it (or config.json does) and the model is there.
-    pub fn search(self: &Arc<Self>, request: &Request, wait: bool) -> Result<crate::search::Response> {
+    pub fn search(self: &Arc<Self>, request: &Search) -> Result<Results> {
         let mode = request.mode.unwrap_or(self.config.lock().unwrap().1.search.mode);
         // The searcher first: an index that isn't there yet is an error, with nothing loaded for it.
         self.with_searcher(|_| Ok(()))?;
         let vector = match mode {
-            Mode::Meaning => self.query_vector(&request.prompt(), wait),
+            Mode::Meaning => self.query_vector(&crate::search::prompt(request), request.wait),
             Mode::Words => None,
         };
         self.with_searcher(|searcher| searcher.search(request, vector.as_deref()))
@@ -250,11 +245,11 @@ impl Core {
     /// measuring search (`sift-it eval --compare`).
     pub fn with_query<T>(
         self: &Arc<Self>,
-        request: &Request,
+        request: &Search,
         work: impl FnOnce(&mut Searcher, Option<&[f32]>) -> Result<T>,
     ) -> Result<T> {
         self.with_searcher(|_| Ok(()))?;
-        let vector = self.query_vector(&request.prompt(), true);
+        let vector = self.query_vector(&crate::search::prompt(request), true);
         self.with_searcher(|searcher| work(searcher, vector.as_deref()))
     }
 
@@ -292,7 +287,7 @@ impl Core {
                 true
             }
             Err(error) => {
-                (self.events)(&json!({"event": "config", "error": format!("{error:#}")}));
+                (self.events)(&Event::Config { error: format!("{error:#}") });
                 false
             }
         }
@@ -329,7 +324,7 @@ impl Core {
             state.meaning = Meaning::Loading;
             state.generation
         };
-        (self.events)(&json!({"event": "meaning", "state": "loading"}));
+        (self.events)(&Event::Meaning { state: MeaningState::Loading, error: None });
         let core = self.clone();
         std::thread::spawn(move || core.load(generation));
     }
@@ -351,17 +346,17 @@ impl Core {
                 match installed {
                     Ok(()) => {
                         state.meaning = Meaning::Ready(embedder);
-                        json!({"event": "meaning", "state": "ready"})
+                        Event::Meaning { state: MeaningState::Ready, error: None }
                     }
                     Err(error) => {
                         state.meaning = Meaning::Unavailable(format!("{error:#}"));
-                        json!({"event": "meaning", "state": "unavailable", "error": format!("{error:#}")})
+                        Event::Meaning { state: MeaningState::Unavailable, error: Some(format!("{error:#}")) }
                     }
                 }
             }
             Err(error) => {
                 state.meaning = Meaning::Unavailable(format!("{error:#}"));
-                json!({"event": "meaning", "state": "unavailable", "error": format!("{error:#}")})
+                Event::Meaning { state: MeaningState::Unavailable, error: Some(format!("{error:#}")) }
             }
         };
         drop(state);
@@ -383,7 +378,7 @@ impl Core {
             searcher.unload();
         }
         self.cache.lock().unwrap().clear();
-        (self.events)(&json!({"event": "meaning", "state": "unloaded"}));
+        (self.events)(&Event::Meaning { state: MeaningState::Unloaded, error: None });
     }
 }
 
@@ -393,9 +388,20 @@ fn config_modified() -> Option<SystemTime> {
 
 type Writer = Mutex<UnixStream>;
 
+/// A reply, as the JSON it goes out as.
+fn reply(reply: impl Serialize) -> Result<Value> {
+    Ok(serde_json::to_value(reply)?)
+}
+
+/// The indexer's progress as it last wrote it, if it ever ran for this data folder.
+fn indexer_status() -> Option<IndexerStatus> {
+    serde_json::from_slice(&std::fs::read(config::status_path()).ok()?).ok()
+}
+
 /// Writes a line in one go, so a reader never waits on half of one.
-fn send(writer: &Writer, value: &Value) -> bool {
-    writer.lock().unwrap().write_all(format!("{value}\n").as_bytes()).is_ok()
+fn send(writer: &Writer, message: &impl Serialize) -> bool {
+    let Ok(line) = serde_json::to_string(message) else { return false };
+    writer.lock().unwrap().write_all(format!("{line}\n").as_bytes()).is_ok()
 }
 
 /// `sift-it engine`: answers clients on the socket until a `stop` request. Exits at once when another engine already
@@ -417,14 +423,15 @@ pub fn run(index: &Path, models: &Path) -> Result<()> {
     eprintln!("engine {} answering at {}", build(), socket.display());
 
     let clients: Arc<Mutex<Vec<Weak<Writer>>>> = Arc::new(Mutex::new(Vec::new()));
-    let events = {
+    let broadcast: Arc<dyn Fn(&Event) + Send + Sync> = {
         let clients = clients.clone();
-        Box::new(move |event: &Value| {
+        Arc::new(move |event: &Event| {
             let mut clients = clients.lock().unwrap();
             clients.retain(|client| client.upgrade().is_some_and(|writer| send(&writer, event)));
         })
     };
-    let core = Core::new(index, models, events)?;
+    let _indexer = watch_indexer(broadcast.clone())?;
+    let core = Core::new(index, models, Box::new(move |event| broadcast(event)))?;
     for stream in listener.incoming() {
         let Ok(stream) = stream else { continue };
         let core = core.clone();
@@ -438,19 +445,31 @@ pub fn run(index: &Path, models: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Passes the indexer's progress on to every client each time it writes it (status.json).
+fn watch_indexer(broadcast: Arc<dyn Fn(&Event) + Send + Sync>) -> Result<RecommendedWatcher> {
+    let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+        let written = event
+            .is_ok_and(|event| event.paths.iter().any(|path| path.file_name() == config::status_path().file_name()));
+        if let Some(status) = indexer_status().filter(|_| written) {
+            broadcast(&Event::Indexer(status));
+        }
+    })?;
+    watcher.watch(&config::home(), RecursiveMode::NonRecursive)?;
+    Ok(watcher)
+}
+
 fn serve_client(core: &Arc<Core>, stream: UnixStream, clients: &Mutex<Vec<Weak<Writer>>>) -> Result<()> {
     let writer = Arc::new(Mutex::new(stream.try_clone()?));
     {
         // Ready goes first, and events only after it (they wait for the list): the client checks the build on it, and
         // takes the state of meaning from it, then follows the events.
         let mut clients = clients.lock().unwrap();
-        let ready = json!({
-            "event": "ready",
-            "version": env!("CARGO_PKG_VERSION"),
-            "build": build(),
-            "index": core.index.display().to_string(),
-            "meaning": core.meaning_state(),
-        });
+        let ready = Event::Ready {
+            version: env!("CARGO_PKG_VERSION").into(),
+            build: build().into(),
+            index: core.index.display().to_string(),
+            meaning: core.meaning_state(),
+        };
         if !send(&writer, &ready) {
             return Ok(());
         }
@@ -458,14 +477,16 @@ fn serve_client(core: &Arc<Core>, stream: UnixStream, clients: &Mutex<Vec<Weak<W
     }
     for line in BufReader::new(stream).lines() {
         let Ok(line) = line else { break };
-        let Ok(request) = serde_json::from_str::<Value>(&line) else { continue };
-        let id = request.get("id").cloned().unwrap_or(Value::Null);
-        let op = request.get("op").and_then(Value::as_str).unwrap_or("");
-        if op == "stop" {
+        // The id first, so a request that doesn't read is answered as failed rather than not at all.
+        let Ok(message) = serde_json::from_str::<Value>(&line) else { continue };
+        let id = message.get("id").cloned().unwrap_or(Value::Null);
+        let request = serde_json::from_value::<Request>(message).map_err(anyhow::Error::from);
+        if let Ok(Request { op: Op::Stop, .. }) = request {
             stop(core, &writer, id);
         }
-        let mut reply =
-            core.handle(op, &request).unwrap_or_else(|error| json!({"ok": false, "error": format!("{error:#}")}));
+        let mut reply = request
+            .and_then(|request| core.handle(&request.op))
+            .unwrap_or_else(|error| serde_json::to_value(Failure::new(format!("{error:#}"))).unwrap_or_default());
         reply["id"] = id;
         if !send(&writer, &reply) {
             break;
@@ -479,7 +500,9 @@ fn serve_client(core: &Arc<Core>, stream: UnixStream, clients: &Mutex<Vec<Weak<W
 fn stop(core: &Arc<Core>, writer: &Writer, id: Value) -> ! {
     core.unload();
     let _ = std::fs::remove_file(socket_path());
-    send(writer, &json!({"id": id, "ok": true}));
+    let mut done = serde_json::to_value(Done::OK).unwrap_or_default();
+    done["id"] = id;
+    send(writer, &done);
     eprintln!("engine stopped");
     std::process::exit(0)
 }
@@ -488,8 +511,10 @@ fn stop(core: &Arc<Core>, writer: &Writer, id: Value) -> ! {
 mod tests {
     use super::*;
     use crate::config::Settings;
-    use crate::crawl::{Found, Kind};
-    use crate::store::{NewSegment, Segment};
+    use crate::crawl::Found;
+    use crate::store::NewSegment;
+    use protocol::{Kind, Segment};
+    use serde_json::json;
 
     #[test]
     fn a_deep_data_folder_is_reached_through_a_short_link() {
@@ -539,24 +564,37 @@ mod tests {
         )
         .unwrap();
         let request =
-            |mode| Request { q: "pancakes".into(), mode: Some(mode), kinds: vec![], limit: 5, prefix_last: false };
+            |mode| Search { q: "pancakes".into(), mode: Some(mode), limit: 5, wait: true, ..Default::default() };
 
         // By words: nothing loads.
-        let response = core.search(&request(Mode::Words), true).unwrap();
+        let response = core.search(&request(Mode::Words)).unwrap();
         assert_eq!(response.hits[0].name, "pancakes.txt");
-        assert_eq!(core.meaning_state(), "unloaded");
+        assert_eq!(core.meaning_state(), MeaningState::Unloaded);
+        // The same through a request, as a client gets it.
+        let reply = core.handle(&Op::Search(request(Mode::Words))).unwrap();
+        let results: Results = serde_json::from_value(reply).unwrap();
+        assert_eq!(results.hits[0].name, "pancakes.txt");
+        assert!(core.handle(&Op::Text { segment_id: None, path: None }).is_err());
 
         // By meaning: the model loads (here it can't), and the search is answered by words meanwhile.
-        let response = core.search(&request(Mode::Meaning), true).unwrap();
+        let response = core.search(&request(Mode::Meaning)).unwrap();
         assert!(!response.meaning);
         assert_eq!(response.hits[0].name, "pancakes.txt");
-        assert_eq!(core.meaning_state(), "unavailable");
-        let states: Vec<Value> = events.lock().unwrap().iter().map(|event| event["state"].clone()).collect();
-        assert_eq!(states, [json!("loading"), json!("unavailable")]);
+        assert_eq!(core.meaning_state(), MeaningState::Unavailable);
+        let states: Vec<MeaningState> = events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|event| match event {
+                Event::Meaning { state, .. } => Some(*state),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(states, [MeaningState::Loading, MeaningState::Unavailable]);
 
         // Unloading lets it be tried again.
         core.unload();
-        assert_eq!(core.meaning_state(), "unloaded");
+        assert_eq!(core.meaning_state(), MeaningState::Unloaded);
         std::fs::remove_dir_all(&folder).unwrap();
     }
 }

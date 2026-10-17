@@ -1,6 +1,6 @@
 [workspace]
-members = ["transcribe"]
-default-members = [".", "transcribe"]
+members = ["crates/protocol", "transcribe"]
+default-members = [".", "crates/protocol", "transcribe"]
 
 [package]
 name = "sift-it"
@@ -25,6 +25,7 @@ objc2-foundation = "0.3.2"
 objc2-image-io = "0.3.2"
 objc2-pdf-kit = "0.3.2"
 objc2-vision = "0.3.2"
+protocol = { package = "sift-it-protocol", path = "crates/protocol", features = ["clap"] }
 ratatui = "0.30.2"
 ratatui-image = { version = "11.1.0", default-features = false, features = ["crossterm"] }
 rusqlite = { version = "0.40.2", features = ["bundled"] }

@@ -22,7 +22,7 @@ install: build
 dev: install
 
 check: $(LLAMA)
-	cargo fmt --check
+	cargo fmt --all --check
 	cargo clippy --release -- -D warnings
 	cargo test --release
 

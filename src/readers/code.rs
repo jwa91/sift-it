@@ -7,8 +7,8 @@
 use super::text::{Lines, emit_passages, passages};
 use super::{Piece, Sink, text_payload};
 use crate::config::Settings;
-use crate::store::Segment;
 use anyhow::{Context, Result};
+use protocol::Segment;
 use serde::Deserialize;
 use std::path::Path;
 

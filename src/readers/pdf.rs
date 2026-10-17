@@ -8,12 +8,12 @@ use super::{Payload, Piece, Sink, text_payload, title_of};
 use crate::config::Settings;
 use crate::imaging;
 use crate::mac;
-use crate::store::Segment;
 use anyhow::{Result, bail};
 use objc2::AllocAnyThread;
 use objc2::rc::autoreleasepool;
 use objc2_foundation::{NSString, NSURL};
 use objc2_pdf_kit::PDFDocument;
+use protocol::Segment;
 use std::path::Path;
 
 /// A page with fewer characters than this has no real text layer: it's a scan.

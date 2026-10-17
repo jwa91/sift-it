@@ -17,6 +17,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com); versions follow
   By words loads nothing. The first search by meaning loads the model and the vectors, and they stay until
   `sift-it engine unload`.
 - `sift-it status` shows what the engine holds, and how the indexer uses its memory.
+- The protocol front ends speak has a crate of its own (`sift-it-protocol`) and a description (`docs/protocol.md`).
+  Through it the engine also changes the settings (`config`) and the folders (`folders`), reports the indexer's
+  progress in `status`, and says when it changes (an `indexer` event). A web UI or an app needs nothing else.
 - `indexing.memory_mb` decides how fast indexing goes, never what it writes: how many files are read at once, and
   whether what's said in recordings is written down beside the reading or after it. At `auto` it's a quarter of the
   Mac's memory: on 8 GB the embedding and speech models take turns, on 24 GB they run together.

@@ -19,9 +19,9 @@
 //! writes the partition's next generation from the live rows, moves their segments to their new rows in one transaction,
 //! and removes the old files. A reader that still maps them keeps them until it lets go.
 
-use crate::crawl::Kind;
 use crate::embedder::DIM;
 use anyhow::{Context, Result, bail};
+use protocol::Kind;
 use rusqlite::{Connection, TransactionBehavior, params};
 use std::collections::HashSet;
 use std::fs::File;

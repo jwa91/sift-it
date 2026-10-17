@@ -3,7 +3,8 @@
 //! 10,000 tokens a second, a photo in 0.15 s, a screenshot (picture, text and OCR) in 0.5 s, 30 s of sound in 0.25 s.
 
 use crate::config::Config;
-use crate::crawl::{self, Found, Kind};
+use crate::crawl::{self, Found};
+use protocol::Kind;
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::PathBuf;

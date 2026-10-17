@@ -19,14 +19,13 @@
 //! note that mentions steam and a train doesn't outrank a photo of a steam train. Words also pick which of a file's
 //! segments a result opens at, between segments the meaning scores about the same.
 
-use crate::config::{self, Mode, Ranking, Scan};
-use crate::crawl::Kind;
+use crate::config::{self, Ranking};
 use crate::embedder::DIM;
-use crate::store::{Segment, Store};
+use crate::store::Store;
 use crate::vectors::{self, Form, Map, SketchQuery};
 use anyhow::Result;
+use protocol::{Hit, Kind, Results, Scan, Search, Segment};
 use rusqlite::OptionalExtension;
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -40,63 +39,6 @@ const CANDIDATES: usize = 4096;
 
 /// The share of the Mac's memory searches may read with `search.memory_mb` at auto.
 const MEMORY_SHARE: f64 = 0.1;
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct Request {
-    #[serde(default)]
-    pub q: String,
-    /// By words or by meaning (config.json's `search.mode` when not said).
-    #[serde(default)]
-    pub mode: Option<Mode>,
-    /// Only these kinds of file (all when empty).
-    #[serde(default)]
-    pub kinds: Vec<Kind>,
-    #[serde(default = "default_limit")]
-    pub limit: usize,
-    /// Match the last word as a prefix (the user is still typing it).
-    #[serde(default)]
-    pub prefix_last: bool,
-}
-
-fn default_limit() -> usize {
-    40
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Hit {
-    pub path: String,
-    pub name: String,
-    pub kind: Kind,
-    /// The segment that matched best: where the result opens.
-    pub segment: Segment,
-    pub segment_id: i64,
-    pub loc: Option<f64>,
-    pub loc_end: Option<f64>,
-    /// What it's ranked by: its best segment's lift, less what the length of the file explains, plus any bonus for
-    /// the query's words.
-    pub score: f32,
-    /// How far the segment's meaning stands above the query's median (None without a query vector, or for a segment
-    /// without one).
-    pub lift: Option<f32>,
-    pub cosine: Option<f32>,
-    /// It matched by meaning (its lift clears the bar).
-    pub meaning: bool,
-    /// All of the query's words are in it.
-    pub words: bool,
-    pub strong: bool,
-    pub excerpt: Option<String>,
-    pub modified: f64,
-    pub size: u64,
-    pub info: serde_json::Value,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct Response {
-    pub hits: Vec<Hit>,
-    /// Meaning was part of this search (false: words only).
-    pub meaning: bool,
-    pub ms: f64,
-}
 
 pub struct Searcher {
     store: Store,
@@ -450,53 +392,47 @@ fn is_gone(error: &anyhow::Error) -> bool {
 /// never shows code: a project's thousands of stretches would bury everything else.
 pub const CODE_PREFIX: &str = "code:";
 
-impl Request {
-    /// Which kinds of file it shows: only code in a search of code, else the kinds asked for, never code.
-    fn wanted(&self) -> impl Fn(Kind) -> bool + use<> {
-        let (code, kinds) = (self.is_code(), self.kinds.clone());
-        move |kind| {
-            if code { kind == Kind::Code } else { kind != Kind::Code && (kinds.is_empty() || kinds.contains(&kind)) }
-        }
+/// Which kinds of file a search shows: only code in a search of code, else the kinds asked for, never code.
+fn wanted(request: &Search) -> impl Fn(Kind) -> bool + use<> {
+    let (code, kinds) = (is_code(request), request.kinds.clone());
+    move |kind| {
+        if code { kind == Kind::Code } else { kind != Kind::Code && (kinds.is_empty() || kinds.contains(&kind)) }
     }
+}
 
-    /// A search of code: the prefix, or the code filter alone.
-    pub fn is_code(&self) -> bool {
-        self.has_prefix() || self.kinds == [Kind::Code]
-    }
+/// A search of code: the prefix, or the code filter alone.
+pub fn is_code(request: &Search) -> bool {
+    has_prefix(request) || request.kinds == [Kind::Code]
+}
 
-    fn has_prefix(&self) -> bool {
-        self.q.trim_start().get(..CODE_PREFIX.len()).is_some_and(|start| start.eq_ignore_ascii_case(CODE_PREFIX))
-    }
+fn has_prefix(request: &Search) -> bool {
+    request.q.trim_start().get(..CODE_PREFIX.len()).is_some_and(|start| start.eq_ignore_ascii_case(CODE_PREFIX))
+}
 
-    /// The words searched for, without the prefix.
-    pub fn text(&self) -> &str {
-        if self.has_prefix() { self.q.trim_start()[CODE_PREFIX.len()..].trim() } else { self.q.trim() }
-    }
+/// The words searched for, without the prefix.
+pub fn text(request: &Search) -> &str {
+    if has_prefix(request) { request.q.trim_start()[CODE_PREFIX.len()..].trim() } else { request.q.trim() }
+}
 
-    /// Parts in quotes ("INV-2024-0113", or curly quotes): words that must be there, in that order.
-    pub fn phrases(&self) -> Vec<Vec<String>> {
-        let text = self.text().replace(['“', '”', '„'], "\"");
-        text.split('"').skip(1).step_by(2).map(words_of).filter(|words| !words.is_empty()).collect()
-    }
+/// Parts in quotes ("INV-2024-0113", or curly quotes): words that must be there, in that order.
+pub fn phrases(request: &Search) -> Vec<Vec<String>> {
+    let text = text(request).replace(['“', '”', '„'], "\"");
+    text.split('"').skip(1).step_by(2).map(words_of).filter(|words| !words.is_empty()).collect()
+}
 
-    /// The query's words decide where they're found: it has words the model can't read (a number or a code such as
-    /// INV-2024-0113), it's a search of code, or words are in quotes. Other words the model reads, so where they're
-    /// found only breaks near-ties.
-    pub fn words_decide(&self) -> bool {
-        self.is_code()
-            || !self.phrases().is_empty()
-            || words_of(self.text()).iter().any(|word| word.chars().any(char::is_numeric))
-    }
+/// The query's words decide where they're found: it has words the model can't read (a number or a code such as
+/// INV-2024-0113), it's a search of code, or words are in quotes. Other words the model reads, so where they're found
+/// only breaks near-ties.
+pub fn words_decide(request: &Search) -> bool {
+    is_code(request)
+        || !phrases(request).is_empty()
+        || words_of(text(request)).iter().any(|word| word.chars().any(char::is_numeric))
+}
 
-    /// The prompt the query is embedded with (quotes don't mean anything to the model).
-    pub fn prompt(&self) -> String {
-        let text = self.text().replace(['"', '“', '”', '„'], "");
-        if self.is_code() {
-            crate::embedder::prompts::code_query(&text)
-        } else {
-            crate::embedder::prompts::query(&text)
-        }
-    }
+/// The prompt a search is embedded with (quotes don't mean anything to the model).
+pub fn prompt(request: &Search) -> String {
+    let text = text(request).replace(['"', '“', '”', '„'], "");
+    if is_code(request) { crate::embedder::prompts::code_query(&text) } else { crate::embedder::prompts::query(&text) }
 }
 
 /// A segment in the running for its file.
@@ -622,7 +558,7 @@ impl Searcher {
     }
 
     /// A search, scanning the vectors in the form `search.vectors` says.
-    pub fn search(&mut self, request: &Request, query: Option<&[f32]>) -> Result<Response> {
+    pub fn search(&mut self, request: &Search, query: Option<&[f32]>) -> Result<Results> {
         let (form, candidates) = (self.form(), self.candidates());
         self.search_in(request, query, form, candidates)
     }
@@ -637,20 +573,20 @@ impl Searcher {
     /// A search, scanning the vectors in `form` (with sketches, scoring the `candidates` closest exactly).
     pub fn search_in(
         &mut self,
-        request: &Request,
+        request: &Search,
         query: Option<&[f32]>,
         form: Form,
         candidates: usize,
-    ) -> Result<Response> {
+    ) -> Result<Results> {
         let started = std::time::Instant::now();
         self.refresh()?;
         let ranking = self.ranking.clone();
-        let wanted = request.wanted();
+        let wanted = wanted(request);
         let wanted_file = |file: i64| self.file_kinds.get(&file).is_some_and(|&kind| wanted(kind));
 
         // Words: the segments with all of them, or with the quoted ones.
-        let words = words_of(request.text());
-        let phrases = request.phrases();
+        let words = words_of(text(request));
+        let phrases = phrases(request);
         let matches = if !phrases.is_empty() {
             self.phrase_matches(&phrases, &wanted_file, 5000)?
         } else if !words.is_empty() {
@@ -684,7 +620,7 @@ impl Searcher {
         };
 
         let mut candidates: HashMap<i64, Candidate> = HashMap::new();
-        let exact = request.words_decide();
+        let exact = words_decide(request);
         let bonus = if exact { ranking.word_bonus } else { ranking.plain_word_bonus };
         if !phrases.is_empty() {
             // Quoted words must be there exactly: only segments with them, ranked by meaning among themselves.
@@ -772,19 +708,19 @@ impl Searcher {
         }
         // Strong matches first, then the weaker ones, each by score.
         hits.sort_by(|a, b| b.strong.cmp(&a.strong).then(b.score.total_cmp(&a.score)));
-        Ok(Response { hits, meaning: query.is_some(), ms: started.elapsed().as_secs_f64() * 1000.0 })
+        Ok(Results { hits, meaning: query.is_some(), ms: started.elapsed().as_secs_f64() * 1000.0 })
     }
 
     /// Where each of these segments comes by its sketch's estimate for the query, among the vectors the request wants
     /// (from 0; None for a segment without a vector), and how many vectors it wants.
     pub fn sketch_ranks(
         &mut self,
-        request: &Request,
+        request: &Search,
         query: &[f32],
         segments: &[i64],
     ) -> Result<(Vec<Option<usize>>, usize)> {
         self.refresh()?;
-        Ok(self.vectors.sketch_ranks(query, &request.wanted(), segments))
+        Ok(self.vectors.sketch_ranks(query, &wanted(request), segments))
     }
 
     /// A segment's whole text.
@@ -823,7 +759,7 @@ impl Searcher {
     }
 
     /// Recently changed files, for an empty query.
-    pub fn recent(&self, request: &Request) -> Result<Response> {
+    pub fn recent(&self, request: &Search) -> Result<Results> {
         // The kinds go into the query itself (kind names are fixed words, safe to inline): filtering after the limit
         // could leave nothing.
         let kinds = if request.kinds.is_empty() {
@@ -845,7 +781,7 @@ impl Searcher {
                 hits.push(hit);
             }
         }
-        Ok(Response { hits, meaning: false, ms: 0.0 })
+        Ok(Results { hits, meaning: false, ms: 0.0 })
     }
 
     /// Segments with every word, best first (FTS5's bm25).
@@ -1108,7 +1044,7 @@ mod tests {
         let mut searcher = Searcher::open(&index.0, Ranking::default(), scanning(Scan::ExactF32)).unwrap();
         searcher.load_vectors().unwrap();
         let best = |searcher: &mut Searcher, seed| {
-            let request = Request { q: "zebra".into(), limit: 1, ..Default::default() };
+            let request = Search { q: "zebra".into(), limit: 1, ..Default::default() };
             let hit = searcher.search(&request, Some(&unit(seed))).unwrap().hits.remove(0);
             (hit.name, hit.cosine.unwrap())
         };
@@ -1157,7 +1093,7 @@ mod tests {
         add_segments(&mut store, "/a/code.rs", Kind::Code, vec![("fn".into(), Some(unit(7 * 100 + 3)))]);
         let mut searcher = Searcher::open(&index.0, Ranking::default(), scanning(Scan::Sketch)).unwrap();
         searcher.load_vectors().unwrap();
-        let request = Request { q: "zebra".into(), limit: 1, ..Default::default() };
+        let request = Search { q: "zebra".into(), limit: 1, ..Default::default() };
         let hits = searcher.search(&request, Some(&unit(7 * 100 + 3))).unwrap().hits;
         assert_eq!((hits[0].name.as_str(), hits[0].loc), ("7.txt", Some(4.0)));
         assert!((hits[0].cosine.unwrap() - 1.0).abs() < 1e-5);
@@ -1223,7 +1159,7 @@ mod tests {
         drop(store);
         let mut searcher = Searcher::open(&index.0, Ranking::default(), config::Search::default()).unwrap();
         let search = |searcher: &mut Searcher, kinds: Vec<Kind>| {
-            let request = Request { q: "needle".into(), mode: None, kinds, limit: 10, prefix_last: false };
+            let request = Search { q: "needle".into(), kinds, limit: 10, ..Default::default() };
             searcher.search(&request, None).unwrap().hits.into_iter().map(|hit| hit.path).collect::<Vec<_>>()
         };
         assert_eq!(search(&mut searcher, vec![Kind::Plaintext]), vec!["/notes/note.txt"]);
@@ -1232,16 +1168,16 @@ mod tests {
 
     #[test]
     fn quoted_parts_are_phrases() {
-        let request = Request { q: r#"invoice "INV-2024-0113" from “Altink Design”"#.into(), ..Default::default() };
-        assert_eq!(request.phrases(), vec![vec!["inv", "2024", "0113"], vec!["altink", "design"]]);
-        assert!(!request.prompt().contains('"'));
-        let plain = Request { q: "no quotes here".into(), ..Default::default() };
-        assert!(plain.phrases().is_empty());
+        let request = Search { q: r#"invoice "INV-2024-0113" from “Altink Design”"#.into(), ..Default::default() };
+        assert_eq!(phrases(&request), vec![vec!["inv", "2024", "0113"], vec!["altink", "design"]]);
+        assert!(!prompt(&request).contains('"'));
+        let plain = Search { q: "no quotes here".into(), ..Default::default() };
+        assert!(phrases(&plain).is_empty());
     }
 
     #[test]
     fn numbers_codes_and_quotes_decide() {
-        let decides = |q: &str| Request { q: q.into(), ..Default::default() }.words_decide();
+        let decides = |q: &str| words_decide(&Search { q: q.into(), ..Default::default() });
         assert!(decides("INV-2024-0113"));
         assert!(decides("tax return 2023"));
         assert!(decides(r#"the "Altink Design" invoice"#));

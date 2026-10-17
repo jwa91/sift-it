@@ -4,53 +4,11 @@
 
 use crate::config::{Config, Settings};
 use crate::readers;
-use serde::{Deserialize, Serialize};
+use protocol::Kind;
 use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Kind {
-    /// Plain text and Markdown.
-    Plaintext,
-    /// PDFs and rich documents: rtf, doc, docx, odt, html, webarchive.
-    Document,
-    Image,
-    /// A picture of a screen: read for its text as well as what it shows. It takes the image kind's settings.
-    Screenshot,
-    Audio,
-    Video,
-    /// Source code (only with `sources.code`).
-    Code,
-}
-
-impl Kind {
-    pub const ALL: [Kind; 7] =
-        [Kind::Plaintext, Kind::Document, Kind::Image, Kind::Screenshot, Kind::Audio, Kind::Video, Kind::Code];
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Kind::Plaintext => "plaintext",
-            Kind::Document => "document",
-            Kind::Image => "image",
-            Kind::Screenshot => "screenshot",
-            Kind::Audio => "audio",
-            Kind::Video => "video",
-            Kind::Code => "code",
-        }
-    }
-
-    pub fn parse(name: &str) -> Option<Kind> {
-        Kind::ALL.into_iter().find(|kind| kind.as_str() == name)
-    }
-
-    /// The kind whose settings it takes in config.json.
-    pub fn config_kind(self) -> Kind {
-        if self == Kind::Screenshot { Kind::Image } else { self }
-    }
-}
 
 /// Folder names never entered: dependencies, caches, the user's Library.
 const SKIPPED_FOLDERS: &[&str] = &[

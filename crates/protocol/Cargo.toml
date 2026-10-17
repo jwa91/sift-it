@@ -1,0 +1,16 @@
+[package]
+name = "sift-it-protocol"
+version = "0.2.0"
+edition = "2024"
+description = "What sift-it's clients and its engine say to each other: requests, replies, events and their types"
+license = "MIT"
+publish = false
+
+[features]
+# Lets the CLI take a mode as an argument.
+clap = ["dep:clap"]
+
+[dependencies]
+clap = { version = "4.6.7", features = ["derive"], optional = true }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"

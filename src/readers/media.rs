@@ -9,8 +9,8 @@ use crate::av;
 use crate::config::Settings;
 use crate::imaging;
 use crate::mac;
-use crate::store::Segment;
 use anyhow::Result;
+use protocol::Segment;
 use serde_json::json;
 use std::path::Path;
 

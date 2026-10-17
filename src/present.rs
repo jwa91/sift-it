@@ -4,13 +4,14 @@
 
 use crate::client::Client;
 use crate::config;
-use crate::crawl::Kind;
 use crate::open::timestamp;
 use crate::preview;
-use crate::search::{Hit, Response, words_of};
-use crate::store::Segment;
+use crate::search::words_of;
 use crate::term::{self, Images, Terminal};
 use anyhow::Result;
+use protocol::Kind;
+use protocol::Segment;
+use protocol::{Hit, Results};
 use std::path::Path;
 
 /// Pictures are shown this many lines tall.
@@ -20,7 +21,7 @@ const PASSAGE_LINES: usize = 3;
 /// Lines of code shown under a result.
 const CODE_LINES: usize = 5;
 
-pub fn print(terminal: &Terminal, response: &Response, query: &str, client: &mut Client) -> Result<()> {
+pub fn print(terminal: &Terminal, response: &Results, query: &str, client: &mut Client) -> Result<()> {
     let words = words_of(query.trim_start().strip_prefix("code:").unwrap_or(query));
     if response.hits.is_empty() {
         println!(

@@ -5,65 +5,17 @@
 //! The indexer is the only writer; searchers read alongside it (WAL), and notice its changes through SQLite's
 //! data_version.
 
-use crate::crawl::{Found, Kind};
+use crate::crawl::Found;
 use crate::embedder::DIM;
 use crate::vectors;
 use anyhow::{Context, Result, bail};
+use protocol::{Kind, Segment, Stats};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, TransactionBehavior, params};
 use serde::Serialize;
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// An index of another version is dropped and made again.
 const SCHEMA_VERSION: i64 = 6;
-
-/// What a segment is, which also says which of the model's inputs made its vector.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Segment {
-    /// A stretch of a text file or document.
-    Passage,
-    /// A PDF page's text (or, for a scanned page, the text read from it).
-    Page,
-    /// A picture, as a picture.
-    Picture,
-    /// The text in a picture or a scanned page (Apple's text recognition).
-    Ocr,
-    /// 30 s of sound.
-    Sound,
-    /// A video frame.
-    Frame,
-    /// What's said in a recording or video, written down (speech.rs): a sentence or a few, with their time.
-    Speech,
-}
-
-impl Segment {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Segment::Passage => "passage",
-            Segment::Page => "page",
-            Segment::Picture => "picture",
-            Segment::Ocr => "ocr",
-            Segment::Sound => "sound",
-            Segment::Frame => "frame",
-            Segment::Speech => "speech",
-        }
-    }
-
-    pub fn parse(name: &str) -> Option<Segment> {
-        [
-            Segment::Passage,
-            Segment::Page,
-            Segment::Picture,
-            Segment::Ocr,
-            Segment::Sound,
-            Segment::Frame,
-            Segment::Speech,
-        ]
-        .into_iter()
-        .find(|segment| segment.as_str() == name)
-    }
-}
 
 /// A segment to write.
 #[derive(Debug, Clone)]
@@ -106,18 +58,6 @@ fn file_row(row: &Row) -> rusqlite::Result<FileRow> {
         reading: row.get(5)?,
         speech: row.get(6)?,
     })
-}
-
-#[derive(Debug, Default, Serialize)]
-pub struct Stats {
-    pub files: i64,
-    pub done: i64,
-    pub pending: i64,
-    pub failed: i64,
-    pub segments: i64,
-    pub vectors: i64,
-    pub by_kind: HashMap<String, i64>,
-    pub bytes: u64,
 }
 
 /// The work still queued (Store::queued).

@@ -1,8 +1,8 @@
 # Design: indexing and search
 
-Status: agreed on 2026-10-17. Steps 1 to 5 of the build order are built: the config, with depth in place of size and
-length limits, the engine, the vector store, search in each of its forms with `auto` choosing, and indexing's memory
-budget. It replaces the earlier design with several indexes.
+Status: agreed on 2026-10-17. Steps 1 to 6 of the build order are built: the config, with depth in place of size and
+length limits, the engine, the vector store, search in each of its forms with `auto` choosing, indexing's memory budget,
+and the protocol. It replaces the earlier design with several indexes.
 
 After step 5 the plan changed. The first release is that core, its code structured as docs/architecture.md describes,
 and text cut by its form. Projects, text detection on every image, the measured ranking values, metadata and result
@@ -376,11 +376,11 @@ Built:
    forms, and `bench-search` measuring them.
 4. The sketch search, the median sample, and `auto`. Measure the top-20 overlap on the demo collection.
 5. `indexing.memory_mb`, with embedding and transcription side by side when it allows.
+6. The protocol: its types in a crate of their own (`crates/protocol`), documented (`docs/protocol.md`). The engine
+   reports the indexer's progress and takes settings and folders through it.
 
-Next, for the first release. Steps 6 to 12 change no behavior (docs/architecture.md, "The way there"):
+Next, for the first release. Steps 7 to 12 change no behavior (docs/architecture.md, "The way there"):
 
-6. The protocol: its types in a crate of their own, documented. The engine reports the indexer's progress and takes
-   settings and folders through it.
 7. The query path: understand, retrieve, rank and present as modules, ranking pure.
 8. The index: one facade with a writer and readers over the catalog and the vectors.
 9. Extracting apart from segmenting.
