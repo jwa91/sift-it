@@ -52,6 +52,7 @@ pub const SCHEMA: &str = "
 
 #[link(name = "Accelerate", kind = "framework")]
 unsafe extern "C" {
+    fn cblas_sdot(n: i32, x: *const f32, incx: i32, y: *const f32, incy: i32) -> f32;
     fn cblas_sgemv(
         order: i32,
         trans: i32,
@@ -80,7 +81,7 @@ pub enum Form {
 }
 
 impl Form {
-    const ALL: [Form; 3] = [Form::F32, Form::F16, Form::Sketch];
+    pub const ALL: [Form; 3] = [Form::F32, Form::F16, Form::Sketch];
 
     pub fn row_bytes(self) -> usize {
         match self {
@@ -124,6 +125,16 @@ pub struct Partition {
 impl Partition {
     pub fn path(&self, folder: &Path, form: Form) -> PathBuf {
         folder.join(format!("{}.{}.{}", self.name, self.generation, form.extension()))
+    }
+
+    /// The mean its sketches are made against (none while it's empty).
+    pub fn mean(&self) -> Option<&[f32]> {
+        self.mean.as_deref()
+    }
+
+    /// How far its rows spread around their mean, per dimension (the standard deviation).
+    pub fn spread(&self) -> Vec<f32> {
+        self.sums.spread(self.rows)
     }
 
     /// The partition called `name`, made when it isn't there yet.
@@ -194,6 +205,20 @@ impl Sums {
         self.values.iter().map(|&sum| (sum / rows.max(1) as f64) as f32).collect()
     }
 
+    /// The standard deviation of `rows` rows, per dimension.
+    fn spread(&self, rows: i64) -> Vec<f32> {
+        if self.values.is_empty() {
+            return vec![0.0; DIM];
+        }
+        let n = rows.max(1) as f64;
+        (0..DIM)
+            .map(|d| {
+                let centre = self.values[d] / n;
+                (self.squares[d] / n - centre * centre).max(0.0).sqrt() as f32
+            })
+            .collect()
+    }
+
     /// About the share of the bits of `rows` rows' sketches that would come out differently against their mean than
     /// against `mean`. Per dimension, the rows between the two flip: for values spread like a normal distribution
     /// that's 0.4 of the distance in standard deviations, at most half of them.
@@ -202,10 +227,10 @@ impl Sums {
             return 0.0;
         }
         let n = rows as f64;
+        let spread = self.spread(rows);
         let flipped: f64 = (0..DIM)
             .map(|d| {
-                let centre = self.values[d] / n;
-                let spread = (self.squares[d] / n - centre * centre).max(0.0).sqrt();
+                let (centre, spread) = (self.values[d] / n, spread[d] as f64);
                 if spread > 0.0 { (0.4 * (centre - mean[d] as f64).abs() / spread).min(0.5) } else { 0.0 }
             })
             .sum();
@@ -450,10 +475,16 @@ impl Map {
         &self.all()[row * form.row_bytes()..(row + 1) * form.row_bytes()]
     }
 
-    fn f32_row(&self, row: usize) -> &[f32] {
-        let bytes = self.bytes(Form::F32, row);
-        // Safety: the mapping starts at a page, and rows are whole floats.
-        unsafe { std::slice::from_raw_parts(bytes.as_ptr() as *const f32, DIM) }
+    /// Row `row` of a file of f32 rows.
+    pub fn f32_row(&self, row: usize) -> &[f32] {
+        &self.f32_rows()[row * DIM..(row + 1) * DIM]
+    }
+
+    /// All of a file of f32 rows.
+    fn f32_rows(&self) -> &[f32] {
+        let bytes = self.all();
+        // Safety: the mapping starts at a page, and holds whole floats.
+        unsafe { std::slice::from_raw_parts(bytes.as_ptr() as *const f32, bytes.len() / 4) }
     }
 
     /// How much of it is in memory now.
@@ -478,22 +509,30 @@ impl Drop for Map {
     }
 }
 
-/// The query's dot product with each of the first `rows` rows of `map`, which holds rows in `form` (cosines: vectors
-/// are normalized).
-pub fn scores(map: &Map, form: Form, rows: usize, query: &[f32]) -> Vec<f32> {
-    let mut scores = vec![0.0f32; rows];
-    if rows == 0 {
-        return scores;
-    }
+/// The query's dot product with each of the rows of `map`, which holds rows in `form` (cosines: vectors are
+/// normalized).
+pub fn scores(map: &Map, form: Form, query: &[f32]) -> Vec<f32> {
     match form {
-        Form::F32 => unsafe {
+        Form::F32 => dots(map.f32_rows(), query),
+        Form::F16 => map.all().chunks_exact(Form::F16.row_bytes()).map(|row| dot_half(row, query)).collect(),
+        Form::Sketch => unreachable!("a sketch only estimates its score (SketchQuery)"),
+    }
+}
+
+/// The query's dot product with each row of `matrix` (rows of DIM floats, one after the other).
+pub fn dots(matrix: &[f32], query: &[f32]) -> Vec<f32> {
+    let rows = matrix.len() / DIM;
+    let mut scores = vec![0.0f32; rows];
+    if rows > 0 {
+        // Safety: `matrix` has `rows` rows of DIM, `query` DIM values, `scores` room for `rows`.
+        unsafe {
             cblas_sgemv(
                 ROW_MAJOR,
                 NO_TRANS,
                 rows as i32,
                 DIM as i32,
                 1.0,
-                map.all().as_ptr() as *const f32,
+                matrix.as_ptr(),
                 DIM as i32,
                 query.as_ptr(),
                 1,
@@ -501,15 +540,89 @@ pub fn scores(map: &Map, form: Form, rows: usize, query: &[f32]) -> Vec<f32> {
                 scores.as_mut_ptr(),
                 1,
             )
-        },
-        Form::F16 => {
-            for (row, score) in map.all().chunks_exact(Form::F16.row_bytes()).zip(&mut scores) {
-                *score = dot_half(row, query);
-            }
-        }
-        Form::Sketch => unreachable!("sketches are compared, not scored"),
+        };
     }
     scores
+}
+
+/// The query's dot product with one row.
+pub fn dot(row: &[f32], query: &[f32]) -> f32 {
+    // Safety: both have DIM values.
+    unsafe { cblas_sdot(DIM as i32, row.as_ptr(), 1, query.as_ptr(), 1) }
+}
+
+/// A query, ready to compare with the sketches of one partition.
+///
+/// A sketch keeps each dimension's side of the partition's mean m: s = +1 above it, -1 below. The query q's dot product
+/// with a row x is q·m + q·(x - m), and on its side of the mean a value is about √(2/π) of a standard deviation σ away
+/// from it. So the sketch's estimate is q·m + √(2/π) Σ q σ s, which weighs every dimension by how much of the query is
+/// in it and by how far rows spread in it. With the weights w = qσ that's q·m + √(2/π) (2 Σ w over the set bits - Σ w).
+/// The weights go into four bit planes (each rounded to one of 16 steps between the least and the most), so the sum
+/// over the set bits is five counts of bits per sketch.
+pub struct SketchQuery {
+    planes: [[u8; DIM / 8]; 4],
+    /// The least weight, and the step between two of the 16.
+    low: f32,
+    step: f32,
+    /// The estimate is base + scale × (the sum of the weights of the set bits).
+    base: f32,
+    scale: f32,
+}
+
+impl SketchQuery {
+    pub fn new(query: &[f32], mean: &[f32], spread: &[f32]) -> Self {
+        let weights: Vec<f32> = query.iter().zip(spread).map(|(q, s)| q * s).collect();
+        let low = weights.iter().copied().fold(f32::INFINITY, f32::min);
+        let high = weights.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        let step = if high > low { (high - low) / 15.0 } else { 1.0 };
+        let mut planes = [[0u8; DIM / 8]; 4];
+        for (d, weight) in weights.iter().enumerate() {
+            let level = ((weight - low) / step).round() as u8;
+            for (plane, bits) in planes.iter_mut().enumerate() {
+                if level >> plane & 1 == 1 {
+                    bits[d / 8] |= 1 << (d % 8);
+                }
+            }
+        }
+        let side = (2.0 / std::f32::consts::PI).sqrt();
+        let centre: f32 = query.iter().zip(mean).map(|(q, m)| q * m).sum();
+        Self { planes, low, step, base: centre - side * weights.iter().sum::<f32>(), scale: 2.0 * side }
+    }
+
+    /// Each sketch's estimate of its row's cosine with the query.
+    pub fn estimates(&self, sketches: &Map) -> Vec<f32> {
+        self.estimate_all(sketches.all())
+    }
+
+    fn estimate_all(&self, sketches: &[u8]) -> Vec<f32> {
+        use std::arch::aarch64::*;
+        const CHUNKS: usize = DIM / 128;
+        let mut estimates = Vec::with_capacity(sketches.len() / (DIM / 8));
+        // Safety: a sketch and each plane are DIM / 8 bytes, CHUNKS times 16.
+        unsafe {
+            let planes: [[uint8x16_t; CHUNKS]; 4] =
+                std::array::from_fn(|k| std::array::from_fn(|c| vld1q_u8(self.planes[k].as_ptr().add(c * 16))));
+            for sketch in sketches.as_chunks::<{ DIM / 8 }>().0 {
+                let mut ones = vdupq_n_u8(0);
+                let mut counts = [vdupq_n_u8(0); 4];
+                for (c, chunk) in sketch.as_chunks::<16>().0.iter().enumerate() {
+                    let bits = vld1q_u8(chunk.as_ptr());
+                    ones = vaddq_u8(ones, vcntq_u8(bits));
+                    for (count, plane) in counts.iter_mut().zip(&planes) {
+                        *count = vaddq_u8(*count, vcntq_u8(vandq_u8(bits, plane[c])));
+                    }
+                }
+                // A lane counts at most 8 bits a chunk: 48 fits a byte, but not once weighed by its plane.
+                let levels = vaddq_u16(
+                    vaddq_u16(vpaddlq_u8(counts[0]), vshlq_n_u16::<1>(vpaddlq_u8(counts[1]))),
+                    vaddq_u16(vshlq_n_u16::<2>(vpaddlq_u8(counts[2])), vshlq_n_u16::<3>(vpaddlq_u8(counts[3]))),
+                );
+                let (ones, levels) = (vaddlvq_u8(ones) as f32, vaddvq_u16(levels) as f32);
+                estimates.push(self.base + self.scale * (self.low * ones + self.step * levels));
+            }
+        }
+        estimates
+    }
 }
 
 /// A row at half precision (DIM halves, as bytes) dotted with a query.
@@ -587,6 +700,41 @@ mod tests {
         row[9] = 0.2;
         let bits = sketch(&row, &mean);
         assert_eq!((bits[0], bits[1], bits[2]), (0b1, 0b10, 0));
+    }
+
+    #[test]
+    fn sketches_estimate_the_cosine() {
+        // Rows around a common direction, as a model's are: a mean that isn't zero, and spreads that differ.
+        let base = unit(1000);
+        let rows: Vec<Vec<f32>> = (0..500)
+            .map(|seed| {
+                let mut row: Vec<f32> = unit(seed)
+                    .iter()
+                    .zip(&base)
+                    .enumerate()
+                    .map(|(d, (x, b))| x * (1 + d % 3) as f32 + 2.0 * b)
+                    .collect();
+                crate::embedder::normalize(&mut row);
+                row
+            })
+            .collect();
+        let mut sums = Sums::default();
+        rows.iter().for_each(|row| sums.add(row));
+        let (mean, spread) = (sums.mean(rows.len() as i64), sums.spread(rows.len() as i64));
+        let sketches: Vec<u8> = rows.iter().flat_map(|row| sketch(row, &mean)).collect();
+        let query = &rows[7];
+        let estimates = SketchQuery::new(query, &mean, &spread).estimate_all(&sketches);
+        let exact: Vec<f32> = rows.iter().map(|row| dot(row, query)).collect();
+        // The row itself comes out best, and the estimates follow the cosines.
+        let best = (0..rows.len()).max_by(|&a, &b| estimates[a].total_cmp(&estimates[b])).unwrap();
+        assert_eq!(best, 7);
+        let others = (0..rows.len()).filter(|&row| row != 7);
+        let error = others.clone().map(|row| (estimates[row] - exact[row]).abs()).sum::<f32>() / 499.0;
+        let spread_of_exact = {
+            let centre = others.clone().map(|row| exact[row]).sum::<f32>() / 499.0;
+            others.map(|row| (exact[row] - centre).abs()).sum::<f32>() / 499.0
+        };
+        assert!(error < spread_of_exact, "{error} {spread_of_exact}");
     }
 
     #[test]

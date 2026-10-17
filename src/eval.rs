@@ -3,10 +3,15 @@
 //! Each query names the files that count as the answer (by file name) and, optionally, where in the file the match
 //! must be (a page or a range of seconds). Queries marked "none" have no answer: anything shown among the strong
 //! matches for them is a false alarm.
+//!
+//! `--compare` measures the search with sketches against the exact one instead: how much of the exact top 20 it keeps
+//! when it scores 256 to 8192 candidates exactly, and where the segments the exact top 20 found by meaning come by
+//! their sketches' estimates.
 
 use crate::config::Mode;
 use crate::engine::Core;
 use crate::search::Request;
+use crate::vectors::Form;
 use anyhow::Result;
 use serde::Deserialize;
 use std::path::Path;
@@ -23,8 +28,11 @@ struct Case {
     none: bool,
 }
 
-pub fn run(file: &Path, core: &Arc<Core>, verbose: bool) -> Result<()> {
+pub fn run(file: &Path, core: &Arc<Core>, verbose: bool, compare: bool) -> Result<()> {
     let cases: Vec<Case> = serde_json::from_slice(&std::fs::read(file)?)?;
+    if compare {
+        return compare_forms(&cases, core);
+    }
     let (mut answered, mut top1, mut top3, mut reciprocal, mut located, mut with_loc) = (0, 0, 0, 0.0, 0, 0);
     let (mut negatives, mut false_alarms) = (0, 0);
     for case in &cases {
@@ -97,6 +105,72 @@ pub fn run(file: &Path, core: &Arc<Core>, verbose: bool) -> Result<()> {
     println!(
         "top 1: {top1}/{answered}   top 3: {top3}/{answered}   MRR: {:.3}   right place: {located}/{with_loc}   false alarms: {false_alarms}/{negatives}",
         reciprocal / answered.max(1) as f64
+    );
+    Ok(())
+}
+
+/// The search with sketches against the exact one, for each query, at several numbers of candidates.
+fn compare_forms(cases: &[Case], core: &Arc<Core>) -> Result<()> {
+    const TOP: usize = 20;
+    const COUNTS: [usize; 6] = [256, 512, 1024, 2048, 4096, 8192];
+    let (mut found, mut kept, mut whole, mut fractions) = (0, [0; COUNTS.len()], [0; COUNTS.len()], Vec::new());
+    println!("{:<52} {:>5}  {}", "", "", COUNTS.map(|count| format!("{count:>5}")).join(""));
+    for case in cases {
+        let request =
+            Request { q: case.q.clone(), mode: Some(Mode::Meaning), kinds: Vec::new(), limit: TOP, prefix_last: false };
+        let (exact, sketched, (ranks, of)) = core.with_query(&request, |searcher, query| {
+            let query =
+                query.ok_or_else(|| anyhow::anyhow!("search by meaning isn't available: is the model downloaded?"))?;
+            let paths = |response: crate::search::Response| -> Vec<String> {
+                response.hits.into_iter().map(|hit| hit.path).collect()
+            };
+            let exact = searcher.search_in(&request, Some(query), Form::F32, 0)?;
+            let by_meaning: Vec<i64> = exact.hits.iter().filter(|hit| !hit.words).map(|hit| hit.segment_id).collect();
+            let sketched = COUNTS
+                .iter()
+                .map(|&count| Ok(paths(searcher.search_in(&request, Some(query), Form::Sketch, count)?)))
+                .collect::<Result<Vec<_>>>()?;
+            Ok((paths(exact), sketched, searcher.sketch_ranks(&request, query, &by_meaning)?))
+        })?;
+        found += exact.len();
+        let same: Vec<usize> =
+            sketched.iter().map(|paths| exact.iter().filter(|path| paths.contains(path)).count()).collect();
+        for (at, &same) in same.iter().enumerate() {
+            kept[at] += same;
+            whole[at] += usize::from(same == exact.len());
+        }
+        let needed = ranks.iter().flatten().max().map(|rank| rank + 1);
+        if let Some(needed) = needed {
+            fractions.push(needed as f64 / of.max(1) as f64);
+        }
+        println!(
+            "{:<52} {:>2}/{:<2}  {}   {}",
+            truncate(&case.q, 52),
+            exact.len(),
+            TOP,
+            same.iter().map(|same| format!("{same:>5}")).collect::<String>(),
+            needed.map(|n| format!("needs {n} of {of}")).unwrap_or_default()
+        );
+    }
+    println!();
+    for (at, count) in COUNTS.iter().enumerate() {
+        println!(
+            "{count:>5} candidates: sketches keep {}/{found} of the exact top {TOP} ({:.1}%), all of it for {}/{} queries",
+            kept[at],
+            100.0 * kept[at] as f64 / found.max(1) as f64,
+            whole[at],
+            cases.len()
+        );
+    }
+    fractions.sort_by(f64::total_cmp);
+    let at = |share: f64| fractions.get(((fractions.len() as f64 * share) as usize).min(fractions.len().max(1) - 1));
+    let percent = |fraction: Option<&f64>| fraction.map(|f| format!("{:.1}%", 100.0 * f)).unwrap_or("-".into());
+    println!(
+        "What the exact top {TOP} found by meaning comes within the first {} of the vectors by sketch for half the \
+         queries, {} for 90%, {} for all",
+        percent(at(0.5)),
+        percent(at(0.9)),
+        percent(fractions.last())
     );
     Ok(())
 }

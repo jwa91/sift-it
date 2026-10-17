@@ -127,6 +127,9 @@ enum Command {
         /// Show each query's top results with their scores
         #[arg(short, long)]
         verbose: bool,
+        /// Compare the search with sketches with the exact one instead (search.vectors)
+        #[arg(long)]
+        compare: bool,
     },
     /// Show what Sift It reads from a file: its pieces, without the model
     Read {
@@ -294,10 +297,10 @@ fn run(cli: Cli) -> Result<()> {
                 Ok(())
             }),
         },
-        Command::Eval { file, verbose } => {
+        Command::Eval { file, verbose, compare } => {
             // The engine's own answers, in this process: what's measured is what front ends get.
             let core = engine::Core::new(&config::index_path(), &config::models_dir(), Box::new(|_| {}))?;
-            let outcome = eval::run(&file, &core, verbose);
+            let outcome = eval::run(&file, &core, verbose, compare);
             // The model goes before the process does (llama.cpp aborts when its Metal device is freed under one).
             core.unload();
             outcome
@@ -654,23 +657,35 @@ fn status(json: bool) -> Result<()> {
     Ok(())
 }
 
-/// An index of random unit vectors (and words), then searches over it in each form of the vectors: how long mapping
-/// them takes, the first search (its rows come into memory) and the ones after, and what's in memory then. Mapped rows
-/// aren't in the footprint: macOS can drop them under pressure and read them again.
+/// An index of random vectors around topics (and words), then searches over it in each form of the vectors: how long
+/// mapping them takes, the first search (its rows come into memory) and the ones after, what's in memory then, and how
+/// much of the exact top 20 the others keep. Mapped rows aren't in the footprint: macOS can drop them under pressure
+/// and read them again.
 fn bench_search(count: usize) -> Result<()> {
+    const TOPICS: usize = 1000;
     let folder = std::env::temp_dir().join(format!("sift-it-bench-{}", std::process::id()));
     std::fs::create_dir_all(&folder)?;
     let path = folder.join("index.sqlite");
+    let mut seed = 0x2545F4914F6CDD1Du64;
+    let mut random = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        (seed >> 11) as f32 / (1u64 << 53) as f32 - 0.5
+    };
+    // A vector near a topic: as close to it as to everything else.
+    let mut near = |topic: &[f32]| {
+        let mut noise: Vec<f32> = (0..embedder::DIM).map(|_| random()).collect();
+        embedder::normalize(&mut noise);
+        let mut vector: Vec<f32> = topic.iter().zip(&noise).map(|(t, n)| t + n).collect();
+        embedder::normalize(&mut vector);
+        vector
+    };
+    let origin = vec![0.0; embedder::DIM];
+    let topics: Vec<Vec<f32>> = (0..TOPICS).map(|_| near(&origin)).collect();
     let started = std::time::Instant::now();
     {
         let mut store = store::Store::open(&path)?;
-        let mut seed = 0x2545F4914F6CDD1Du64;
-        let mut random = move || {
-            seed ^= seed << 13;
-            seed ^= seed >> 7;
-            seed ^= seed << 17;
-            (seed >> 11) as f32 / (1u64 << 53) as f32 - 0.5
-        };
         let per_file = 10;
         for file in 0..count.div_ceil(per_file) {
             let found = crawl::Found {
@@ -682,16 +697,12 @@ fn bench_search(count: usize) -> Result<()> {
             };
             let id = store.queue(&found, None, 0.0)?;
             let segments: Vec<store::NewSegment> = (0..per_file)
-                .map(|n| {
-                    let mut vector: Vec<f32> = (0..embedder::DIM).map(|_| random()).collect();
-                    embedder::normalize(&mut vector);
-                    store::NewSegment {
-                        segment: store::Segment::Passage,
-                        loc: Some(n as f64),
-                        loc_end: None,
-                        text: Some(format!("passage {n} of file {file} about topic{}", file % 97)),
-                        vector: Some(vector),
-                    }
+                .map(|n| store::NewSegment {
+                    segment: store::Segment::Passage,
+                    loc: Some(n as f64),
+                    loc_end: None,
+                    text: Some(format!("passage {n} of file {file} about topic{}", file % 97)),
+                    vector: Some(near(&topics[(file * per_file + n) % TOPICS])),
                 })
                 .collect();
             let row = store::FileRow {
@@ -706,30 +717,38 @@ fn bench_search(count: usize) -> Result<()> {
             store.finish_file(&row, &segments, &serde_json::json!({}), false)?;
         }
     }
-    println!("built an index of {count} vectors in {:.1} s", started.elapsed().as_secs_f64());
-    let mut query: Vec<f32> = (0..embedder::DIM).map(|i| ((i * 7919) % 101) as f32 - 50.0).collect();
-    embedder::normalize(&mut query);
-    let request = |q: &str| search::Request { q: q.into(), mode: None, kinds: vec![], limit: 40, prefix_last: true };
+    println!("built an index of {count} vectors around {TOPICS} topics in {:.1} s", started.elapsed().as_secs_f64());
+    let queries: Vec<Vec<f32>> = (0..20).map(|i| near(&topics[i * 37 % TOPICS])).collect();
+    let request = |q: &str| search::Request { q: q.into(), mode: None, kinds: vec![], limit: 20, prefix_last: true };
     let ms = |started: std::time::Instant| started.elapsed().as_secs_f64() * 1000.0;
-    for scan in [config::Scan::ExactF32, config::Scan::ExactF16] {
+    let mut exact: Vec<Vec<String>> = Vec::new();
+    for scan in [config::Scan::ExactF32, config::Scan::ExactF16, config::Scan::Sketch] {
         let started = std::time::Instant::now();
-        let mut searcher = search::Searcher::open(&path, config::Ranking::default())?;
-        searcher.load_vectors(scan)?;
+        let search = config::Search { vectors: scan, ..Default::default() };
+        let mut searcher = search::Searcher::open(&path, config::Ranking::default(), search)?;
+        searcher.load_vectors()?;
         let loaded = ms(started);
         let started = std::time::Instant::now();
-        searcher.search(&request("topic42"), Some(&query))?;
+        searcher.search(&request("topic42"), Some(&queries[0]))?;
         let first = ms(started);
         let started = std::time::Instant::now();
-        for _ in 0..20 {
-            searcher.search(&request("something else entirely"), Some(&query))?;
+        let mut tops = Vec::new();
+        for query in &queries {
+            let response = searcher.search(&request("something else entirely"), Some(query))?;
+            tops.push(response.hits.into_iter().map(|hit| hit.path).collect::<Vec<_>>());
         }
+        let then = ms(started) / queries.len() as f64;
+        if exact.is_empty() {
+            exact = tops.clone();
+        }
+        let kept: usize =
+            tops.iter().zip(&exact).map(|(top, exact)| top.iter().filter(|p| exact.contains(p)).count()).sum();
         println!(
-            "{}: mapped in {loaded:.0} ms, first search {first:.1} ms, then {:.1} ms; {} MB of it in memory, \
-             footprint {} MB",
+            "{}: mapped in {loaded:.0} ms, first search {first:.1} ms, then {then:.1} ms; footprint {} MB; keeps {kept} of \
+             the exact top 20s' {}",
             serde_json::json!(scan).as_str().unwrap_or("?"),
-            ms(started) / 20.0,
-            searcher.vectors_resident() >> 20,
-            footprint() >> 20
+            footprint() >> 20,
+            exact.iter().map(Vec::len).sum::<usize>()
         );
     }
     std::fs::remove_dir_all(&folder)?;

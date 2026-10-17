@@ -116,8 +116,19 @@ version of sift-it replaces a running engine of an older one at its first search
 
 The vectors are in files beside the index, and the engine maps them rather than copying them into memory: macOS can
 drop their pages when it needs the memory, and reads them again for the next search. `search.vectors` sets which form a
-search scans. `exact-f32`, the default, gives exact scores. `exact-f16` reads half as much, with scores within a
-thousandth. Both forms are always written, so a change takes effect at the next search.
+search scans:
+
+- `exact-f32` reads every vector as it was made, for exact scores.
+- `exact-f16` reads every vector at half precision: half as much, with scores within a thousandth.
+- `sketch` compares the query with a 96-byte sketch of every vector, a 32nd of its size, then scores the closest
+  exactly: 4,096 of them, or a 32nd of the vectors in a larger index. On Rust's books (7,400 vectors) it keeps all of
+  the exact top 20 for 45 queries.
+- `auto`, the default, scans the most precise form whose rows fit in `search.memory_mb`. That's a tenth of the Mac's
+  memory unless you set it: about 800 MB on an 8 GB Mac, enough for exact scores up to some 260,000 vectors.
+
+Every form is always written, so a change takes effect at the next search. A result's lift is measured from the
+query's median over a fixed sample of 8,192 vectors, which the engine keeps in memory (24 MB), so it's the same
+whichever form a search scans.
 `sift-it open <n>` opens a result from the last search.
 PDF results open in Preview at their page. Recordings and videos open in QuickTime at their matching time.
 Text and code results open at their matching line in a supported editor.
@@ -230,7 +241,7 @@ sift-it config indexing.on_battery false
 | `sources` | folders, ignore patterns, the file types of each kind, whether code is read | at the next sync |
 | `reading` | how deep and how files are read, per kind, file type, and folder | the files it affects are read again |
 | `ranking` | the constants search ranks by | at the next search |
-| `search` | whether a search is by meaning or by words, unless it says, and which form of the vectors it scans | at the next search |
+| `search` | whether a search is by meaning or by words, unless it says, which form of the vectors it scans, and the memory that may take | at the next search |
 | `indexing` | battery and timing of the background indexer | at once |
 | `log` | the size of the indexer's log | at once |
 

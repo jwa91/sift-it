@@ -614,19 +614,67 @@ pub struct Search {
     pub mode: Mode,
     /// Which form of the vectors a search by meaning scans.
     pub vectors: Scan,
+    /// How much of the vectors a search may read, in MB: with `vectors` at `auto`, it scans the most precise form that
+    /// fits. At `auto`, a tenth of the Mac's memory.
+    pub memory_mb: Budget,
 }
 
-/// Which form of the vectors a search by meaning scans. Every form is written for every vector (vectors.rs), so a
-/// change reads nothing again.
+/// Which form of the vectors a search by meaning scans. Every form is written for every vector and mapped (vectors.rs),
+/// so a change costs nothing.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Scan {
-    /// Every vector as it was made: exact scores.
+    /// The most precise form whose scan fits `search.memory_mb`.
     #[default]
+    #[serde(rename = "auto")]
+    Auto,
+    /// Every vector as it was made: exact scores.
     #[serde(rename = "exact-f32")]
     ExactF32,
     /// Every vector at half precision: half the memory, and nearly exact scores.
     #[serde(rename = "exact-f16")]
     ExactF16,
+    /// Every vector's sketch, then the closest few thousand exactly: the least memory, exact scores for what's found.
+    #[serde(rename = "sketch")]
+    Sketch,
+}
+
+/// An amount of memory in MB, or `auto`: what it is then depends on the Mac.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Budget {
+    #[default]
+    Auto,
+    Mb(u64),
+}
+
+impl Budget {
+    /// In bytes: as set, or else `share` of the Mac's memory.
+    pub fn bytes(self, share: f64) -> u64 {
+        match self {
+            Budget::Mb(mb) => mb << 20,
+            Budget::Auto => (crate::mac::memory() as f64 * share) as u64,
+        }
+    }
+}
+
+impl Serialize for Budget {
+    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        match self {
+            Budget::Auto => serializer.serialize_str("auto"),
+            Budget::Mb(mb) => serializer.serialize_u64(*mb),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Budget {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        match Value::deserialize(deserializer)? {
+            Value::String(word) if word == "auto" => Ok(Budget::Auto),
+            other => other
+                .as_u64()
+                .map(Budget::Mb)
+                .ok_or_else(|| D::Error::custom(format!("{other}: a number of MB, or \"auto\""))),
+        }
+    }
 }
 
 /// What a search is by.
@@ -738,6 +786,8 @@ mod tests {
         let mut config = Config::default();
         config.set("sources.ignore", r#"["*.psd", "~/Old"]"#).unwrap();
         config.set("reading.rules", r#"[{"path": "**/Lectures/**", "keep_every_s": 10}]"#).unwrap();
+        config.set("search.memory_mb", "512").unwrap();
+        assert_eq!(config.search.memory_mb, Budget::Mb(512));
         let text = serde_json::to_string_pretty(&config).unwrap();
         let mut back: Config = serde_json::from_str(&text).unwrap();
         back.check().unwrap();
@@ -745,6 +795,7 @@ mod tests {
         assert!(config.set("reading.video.keep_evry_s", "10").is_err());
         assert!(config.set("ranking.shown_lyft", "0.1").is_err());
         assert!(config.set("sources.kinds.image", r#"["mp4"]"#).is_err());
+        assert!(config.set("search.memory_mb", "lots").is_err());
     }
 
     #[test]

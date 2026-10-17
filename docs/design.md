@@ -1,8 +1,8 @@
 # Design: indexing and search
 
-Status: agreed on 2026-10-17. Steps 1 to 3 of the build order are built: the config, with depth in place of size
-and length limits, the engine, and the vector store with its two exact forms. It replaces the earlier design with
-several indexes.
+Status: agreed on 2026-10-17. Steps 1 to 4 of the build order are built: the config, with depth in place of size and
+length limits, the engine, the vector store, and search in each of its forms with `auto` choosing. It replaces the
+earlier design with several indexes.
 
 The goal is the best search there is for everything on a Mac, by meaning across text, pictures, sound and video, while
 being careful with memory and fast. It has to run well on an 8 GB MacBook and use what a 24 GB M4 has.
@@ -113,24 +113,40 @@ settings, or the engine stopping. There are no idle timers.
 |---|---|---|
 | `exact-f32` | 920 MB | exact |
 | `exact-f16` | 460 MB | nearly exact |
-| `sketch` | 29 MB, plus a few thousand f32 rows | exact for the candidates |
+| `sketch` | 29 MB, plus 9,400 f32 rows (a 32nd) | exact for the candidates |
 
 An exact scan reads every row, so it's only fast while those pages stay in memory. `auto`, the default, picks the most
 precise form whose scan fits `search.memory_mb`. That budget is 10% of the Mac's memory unless set: about 800 MB on
 8 GB, enough for exact f32 up to some 260,000 vectors and exact f16 up to some 520,000. The demo collection, 6,500
 vectors, is always scanned exactly.
 
-A sketch search goes in two steps. First it compares the query's sketch with every sketch, with the kind and path
-filters as a mask. That takes a few milliseconds. Then it scores the best few thousand exactly from their f32 rows and
-ranks them the way search does today. Searches typed letter by letter share most of their candidates, so after the
-first letter those rows are already in memory. The query's median, which the lift needs, comes from a fixed sample of
-8,192 rows that the engine copies into memory at load, 24 MB.
+A sketch search goes in two steps. First it estimates every row's cosine from its sketch, with the kind and path filters
+as a mask. The query stays exact: each dimension counts by how much of the query is in it and how far the partition's
+rows spread in it (from the sums SQLite keeps), rounded to 16 steps, so a row's estimate is five counts of bits. That
+takes a few milliseconds. Then it scores the closest exactly from their f32 rows, and the segments the query's words are
+in, and ranks them the way search does today. It scores 4,096 candidates, or a 32nd of the rows in a larger index: as
+many rows as the sketches are bytes. Searches typed letter by letter share most of their candidates, so after the first
+letter those rows are already in memory. The query's median, which the lift needs, comes from a fixed sample of 8,192
+rows that the engine copies into memory at load, 24 MB.
 
 llama.cpp maps the model's weights from their file the same way. Whether Metal uses them without a copy, so macOS can
 drop them under pressure too, `footprint` will show.
 
 `sift-it bench-search` measures all three forms: memory, time per search cold and warm, and how much of the exact top
-20 the sketch search keeps.
+20 the sketch search keeps. `sift-it eval --compare` measures that last part on real queries, with 256 to 8,192
+candidates.
+
+Measured so far, on the 8 GB Mac:
+
+- 200,000 vectors (`bench-search`): 13 ms per search exact at f32, 11 ms at f16, 7 ms with sketches and 6,250
+  candidates. The engine's footprint is about 60 MB in each, the sample included; mapped rows aren't in it.
+- Rust's books (2,100 pages, 7,400 vectors, all on one subject, so many rows come close to a query) with 45 queries:
+  sketches keep 99.3% of the exact top 20 with 256 candidates, 99.9% with 512, and all of it from 1,024. By segment
+  it takes more: the segments the exact top 20 found by meaning came within the first 1.9% of the rows by sketch for
+  half the queries, 3.9% for 90%, and 11.9% for all. A file is found by any of its segments that's close, so a missed
+  segment rarely costs it its place.
+- Centering on the partition's mean, with the spread weighing each dimension, is enough for EmbeddingGemma 2's
+  vectors: the numbers above come from that alone.
 
 ## Projects
 
@@ -351,8 +367,9 @@ change.
 
 ## Open questions
 
-- How many candidates the sketch search needs, and whether centering on the mean is enough for EmbeddingGemma 2's
-  vectors. The top-20 overlap answers both.
+- How the candidates a sketch search needs grow with an index past 10,000 vectors. Its best matches stand further above
+  the rest as it grows, so the share it takes should fall, and a 32nd would keep up; a large real collection will
+  tell. `sift-it eval --compare docs/demo-queries.json` measures the demo collection.
 - What a project summary needs: which files, and how many commit messages.
 - The chapter break threshold, tuned on recordings without chapter markers.
 - How a word found only in metadata counts when the query has a number, which today makes the words decide. "beach

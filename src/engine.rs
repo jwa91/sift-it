@@ -15,7 +15,8 @@
 //!   {"id":3,"op":"text","segment_id":12} or {"op":"text","path":"…"} → {"text":…}: a segment's whole text, or a
 //!       file's (its text segments in order)
 //!   {"id":4,"op":"status"}                               → {"meaning":"ready","vectors":n,"scan":"exact-f32",
-//!       "resident":bytes,"stats":{…}}: how many vectors are mapped, in which form, and how much of them is in memory
+//!       "resident":bytes,"stats":{…}}: how many vectors are mapped, which form searches scan (what `auto` picked),
+//!       and how much of them is in memory
 //!   {"id":5,"op":"unload"}                               → {"ok":true}: the model and the vectors go
 //!   {"id":6,"op":"stop"}                                 → {"ok":true}, and the engine exits
 //!
@@ -151,11 +152,11 @@ impl Core {
                 Ok(json!({"text": text}))
             }
             "status" => {
-                let (vectors, resident, stats) = self.with_searcher(|searcher| {
+                let (vectors, scan, resident, stats) = self.with_searcher(|searcher| {
                     searcher.refresh()?;
-                    Ok((searcher.vector_count(), searcher.vectors_resident(), searcher.store().stats()?))
+                    let stats = searcher.store().stats()?;
+                    Ok((searcher.vector_count(), searcher.scan(), searcher.vectors_resident(), stats))
                 })?;
-                let scan = self.config.lock().unwrap().1.search.vectors;
                 let meaning = self.meaning.lock().unwrap();
                 let error = match &meaning.meaning {
                     Meaning::Unavailable(error) => Some(error.clone()),
@@ -191,8 +192,19 @@ impl Core {
         self.with_searcher(|searcher| searcher.search(request, vector.as_deref()))
     }
 
-    /// The searcher, opened on first need, ranking by config.json's values as they are now, and scanning the form of
-    /// the vectors it says.
+    /// `work` with the searcher and the request's query vector (once the model is loaded, None without one): for
+    /// measuring search (`sift-it eval --compare`).
+    pub fn with_query<T>(
+        self: &Arc<Self>,
+        request: &Request,
+        work: impl FnOnce(&mut Searcher, Option<&[f32]>) -> Result<T>,
+    ) -> Result<T> {
+        self.with_searcher(|_| Ok(()))?;
+        let vector = self.query_vector(&request.prompt(), true);
+        self.with_searcher(|searcher| work(searcher, vector.as_deref()))
+    }
+
+    /// The searcher, opened on first need, ranking and scanning the vectors as config.json says now.
     fn with_searcher<T>(&self, work: impl FnOnce(&mut Searcher) -> Result<T>) -> Result<T> {
         let changed = self.reload_config();
         let config = || self.config.lock().unwrap().1.clone();
@@ -201,10 +213,13 @@ impl Core {
             Some(searcher) if changed => {
                 let config = config();
                 searcher.set_ranking(config.ranking);
-                searcher.set_scan(config.search.vectors)?;
+                searcher.set_search(config.search);
             }
             Some(_) => {}
-            None => *searcher = Some(Searcher::open(&self.index, config().ranking)?),
+            None => {
+                let config = config();
+                *searcher = Some(Searcher::open(&self.index, config.ranking, config.search)?)
+            }
         }
         work(searcher.as_mut().expect("just opened"))
     }
@@ -266,10 +281,9 @@ impl Core {
     }
 
     fn load(&self, generation: u64) {
-        let scan = || self.config.lock().unwrap().1.search.vectors;
         let loaded = (|| -> Result<(Embedder, Vectors)> {
             let embedder = Embedder::load(&ModelFiles::in_folder(&self.models)?, true)?;
-            let vectors = Vectors::load(&Store::open_readonly(&self.index)?, scan())?;
+            let vectors = Vectors::load(&Store::open_readonly(&self.index)?)?;
             Ok((embedder, vectors))
         })();
         let mut state = self.meaning.lock().unwrap();
@@ -279,11 +293,7 @@ impl Core {
         }
         let event = match loaded {
             Ok((embedder, vectors)) => {
-                // In the form config.json says now: it may have changed meanwhile.
-                let installed = self.with_searcher(|searcher| {
-                    searcher.set_vectors(vectors)?;
-                    searcher.set_scan(scan())
-                });
+                let installed = self.with_searcher(|searcher| searcher.set_vectors(vectors));
                 match installed {
                     Ok(()) => {
                         state.meaning = Meaning::Ready(embedder);

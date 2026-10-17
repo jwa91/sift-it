@@ -16,15 +16,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com); versions follow
   By words loads nothing. The first search by meaning loads the model and the vectors, and they stay until
   `sift-it engine unload`.
 - `sift-it status` shows what the engine holds.
-- `search.vectors` sets which form of the vectors a search scans: `exact-f32` (the default) or `exact-f16`, which reads
-  half as much. `sift-it bench-search` measures both.
+- `search.vectors` sets which form of the vectors a search scans: `exact-f32`, `exact-f16`, which reads half as much,
+  or `sketch`, which compares the query with a 96-byte sketch of every vector and scores the closest few thousand
+  exactly. `auto`, the default, scans the most precise form whose rows fit in `search.memory_mb`, a tenth of the Mac's
+  memory unless set. `sift-it bench-search` measures all three, and `sift-it eval --compare` how much of the exact top
+  20 a search with sketches keeps.
 
 ### Changed
 
 - The vectors are in files beside the index (`vectors/`), each written in three forms: as made, at half precision, and
-  as a sketch for searches to come. The engine maps them instead of copying them into memory, so macOS can drop their
+  as a sketch. The engine maps them instead of copying them into memory, so macOS can drop their
   pages under pressure. Code has a partition of its own. When a quarter of a partition belongs to removed files, the
   indexer writes it again while it's idle.
+- A query's median, which the lift is measured from, comes from a fixed sample of 8,192 vectors kept in memory, so it's
+  the same whichever form a search scans.
 - One `config.json` with a section for each part of the work: `sources`, `reading`, `ranking`, `indexing` and `log`.
   Every value is written out, `sift-it config <key> <value>` sets any of them by its dotted name, and a value the file
   leaves out keeps its default.

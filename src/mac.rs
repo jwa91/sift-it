@@ -305,3 +305,22 @@ pub fn waveform(levels: &[f32], height: usize, highlight: Option<(usize, usize)>
     }
     objc2_core_graphics::CGBitmapContextCreateImage(Some(&context)).ok_or_else(|| anyhow!("can't make the waveform"))
 }
+
+/// How much memory the Mac has, in bytes (read once; 8 GB, the least sift-it runs on, if it can't be read).
+pub fn memory() -> u64 {
+    static MEMORY: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *MEMORY.get_or_init(|| {
+        let mut bytes = 0u64;
+        let mut size = std::mem::size_of::<u64>();
+        let read = unsafe {
+            libc::sysctlbyname(
+                c"hw.memsize".as_ptr(),
+                &mut bytes as *mut u64 as *mut c_void,
+                &mut size,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if read == 0 { bytes } else { 8 << 30 }
+    })
+}
