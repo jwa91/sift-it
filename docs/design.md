@@ -1,8 +1,8 @@
 # Design: indexing and search
 
-Status: agreed on 2026-10-17. Steps 1 to 7 of the build order are built: the config, with depth in place of size and
+Status: agreed on 2026-10-17. Steps 1 to 8 of the build order are built: the config, with depth in place of size and
 length limits, the engine, the vector store, search in each of its forms with `auto` choosing, indexing's memory budget,
-the protocol, and the query path in its stages. It replaces the earlier design with several indexes.
+the protocol, the query path in its stages, and the index behind one facade. It replaces the earlier design with several indexes.
 
 After step 5 the plan changed. The first release is that core, its code structured as docs/architecture.md describes,
 and text cut by its form. Projects, text detection on every image, the measured ranking values, metadata and result
@@ -379,10 +379,10 @@ Built:
 6. The protocol: its types in a crate of their own (`crates/protocol`), documented (`docs/protocol.md`). The engine
    reports the indexer's progress and takes settings and folders through it.
 7. The query path: understand, retrieve, rank and present as modules (`src/query/`), ranking pure.
+8. The index: one facade with a writer and readers over the catalog and the vectors (`src/index/`).
 
-Next, for the first release. Steps 8 to 12 change no behavior (docs/architecture.md, "The way there"):
+Next, for the first release. Steps 9 to 12 change no behavior (docs/architecture.md, "The way there"):
 
-8. The index: one facade with a writer and readers over the catalog and the vectors.
 9. Extracting apart from segmenting.
 10. The ingest path: stages with owners, a scheduler, and speech as an extractor on a lane of its own.
 11. Resources: the plans for search and ingest in one module.

@@ -13,12 +13,10 @@ mod rank;
 mod retrieve;
 pub mod understand;
 
-pub use retrieve::Vectors;
 pub use understand::Query;
 
 use crate::config::{self, Ranking};
-use crate::store::Store;
-use crate::vectors::Form;
+use crate::index::{Form, Reader, Vectors};
 use anyhow::Result;
 use protocol::{Kind, Results, Scan, Search};
 use rank::Scored;
@@ -34,7 +32,7 @@ const CANDIDATES: usize = 4096;
 const MEMORY_SHARE: f64 = 0.1;
 
 pub struct Searcher {
-    store: Store,
+    index: Reader,
     ranking: Ranking,
     search: config::Search,
     file_kinds: HashMap<i64, Kind>,
@@ -52,9 +50,8 @@ impl Searcher {
     /// A searcher of the index at `path`, ranking by `ranking` and scanning the vectors as `search` says (config.json's).
     /// It searches by words until vectors are loaded.
     pub fn open(path: &Path, ranking: Ranking, search: config::Search) -> Result<Self> {
-        let store = Store::open_readonly(path)?;
         let mut searcher = Self {
-            store,
+            index: Reader::open(path)?,
             ranking,
             search,
             file_kinds: HashMap::new(),
@@ -70,14 +67,14 @@ impl Searcher {
 
     /// Loads the index's vectors, for searches by meaning.
     pub fn load_vectors(&mut self) -> Result<()> {
-        let vectors = Vectors::load(&self.store)?;
+        let vectors = Vectors::load(&self.index)?;
         self.set_vectors(vectors)
     }
 
     /// Takes vectors loaded elsewhere (on another connection, off the searching thread), and catches them up with
     /// what the indexer committed meanwhile.
     pub fn set_vectors(&mut self, mut vectors: Vectors) -> Result<()> {
-        vectors.catch_up(&self.store)?;
+        vectors.catch_up(&self.index)?;
         self.penalties = rank::length_penalties(vectors.files(), &self.ranking);
         self.vectors = vectors;
         self.loaded = true;
@@ -135,28 +132,22 @@ impl Searcher {
         self.vectors.resident()
     }
 
-    pub fn store(&self) -> &Store {
-        &self.store
+    pub fn index(&self) -> &Reader {
+        &self.index
     }
 
     /// Catches up with the indexer's commits: the files' kinds, and the vectors when they're loaded.
     pub fn refresh(&mut self) -> Result<bool> {
-        let version = self.store.data_version()?;
+        let version = self.index.data_version()?;
         if version == self.data_version {
             return Ok(false);
         }
         self.data_version = version;
         self.compatible =
-            self.store.meta("vector_source")?.is_none_or(|source| source == crate::embedder::vector_source());
-        let mut statement = self.store.conn.prepare("SELECT id, kind FROM files")?;
-        self.file_kinds = statement
-            .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))?
-            .filter_map(|row| row.ok())
-            .filter_map(|(id, kind)| Kind::parse(&kind).map(|kind| (id, kind)))
-            .collect();
-        drop(statement);
+            self.index.meta("vector_source")?.is_none_or(|source| source == crate::embedder::vector_source());
+        self.file_kinds = self.index.file_kinds()?;
         if self.loaded {
-            self.vectors.catch_up(&self.store)?;
+            self.vectors.catch_up(&self.index)?;
             self.penalties = rank::length_penalties(self.vectors.files(), &self.ranking);
         }
         Ok(true)
@@ -190,14 +181,7 @@ impl Searcher {
         let wanted_file = |file: i64| self.file_kinds.get(&file).is_some_and(|&kind| wanted(kind));
 
         // Words: the segments with all of them, or with the quoted ones.
-        let per_file = self.ranking.per_file;
-        let matches = if !query.phrases.is_empty() {
-            retrieve::phrase_matches(&self.store, &query.phrases, &wanted_file, per_file, 5000)?
-        } else if !query.words.is_empty() {
-            retrieve::word_matches(&self.store, &query.words, query.prefix_last, &wanted_file, per_file, 1000)?
-        } else {
-            Vec::new()
-        };
+        let matches = retrieve::text_matches(&self.index, &query, &wanted_file, self.ranking.per_file)?;
 
         // Meaning: the vectors' cosines (with sketches: the closest, and those with the words), and the query's median.
         let vector = vector.filter(|_| self.compatible && self.loaded);
@@ -229,7 +213,7 @@ impl Searcher {
 
         let mut hits = Vec::with_capacity(ranked.len());
         for file in &ranked {
-            hits.extend(present::result(&self.store, file, &query.words)?);
+            hits.extend(present::result(&self.index, file, &query.words)?);
         }
         Ok(Results { hits, meaning: vector.is_some(), ms: started.elapsed().as_secs_f64() * 1000.0 })
     }
@@ -249,19 +233,19 @@ impl Searcher {
 
     /// A segment's whole text.
     pub fn segment_text(&self, segment_id: i64) -> Result<Option<String>> {
-        self.store.segment_text(segment_id)
+        self.index.segment_text(segment_id)
     }
 
-    /// A file's text: its text segments in order (see Store::file_text).
+    /// A file's text: its text segments in order (see Reader::file_text).
     pub fn file_text(&self, path: &str) -> Result<Option<String>> {
-        self.store.file_text(path)
+        self.index.file_text(path)
     }
 
     /// Recently changed files, for an empty query.
     pub fn recent(&self, request: &Search) -> Result<Results> {
         let mut hits = Vec::new();
-        for segment in retrieve::recent(&self.store, request)? {
-            if let Some(mut hit) = present::hit(&self.store, segment, &[])? {
+        for segment in retrieve::recent(&self.index, request)? {
+            if let Some(mut hit) = present::hit(&self.index, segment, &[])? {
                 hit.strong = true;
                 hits.push(hit);
             }
@@ -273,58 +257,16 @@ impl Searcher {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::NewSegment;
-    use protocol::Segment;
-
-    /// An index in a folder of its own, removed when the test ends.
-    pub struct TempIndex(pub std::path::PathBuf);
-    impl TempIndex {
-        pub fn new(name: &str) -> Self {
-            let folder = std::env::temp_dir().join(format!("sift-it-test-{name}-{}", std::process::id()));
-            let _ = std::fs::remove_dir_all(&folder);
-            Self(folder.join("index.sqlite"))
-        }
-    }
-    impl Drop for TempIndex {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(self.0.parent().unwrap());
-        }
-    }
-
-    /// A file of `kind` whose passages are `texts`, indexed without vectors.
-    fn add(store: &mut Store, path: &str, kind: Kind, texts: Vec<String>) {
-        add_segments(store, path, kind, texts.into_iter().map(|text| (text, None)).collect());
-    }
-
-    /// A file of `kind` whose passages are these texts, with these vectors.
-    pub fn add_segments(store: &mut Store, path: &str, kind: Kind, passages: Vec<(String, Option<Vec<f32>>)>) -> i64 {
-        let settings = crate::config::Settings::BASE;
-        let found = crate::crawl::Found { path: path.into(), kind, size: 1, modified: 1.0, settings };
-        store.queue(&found, None, 0.0).unwrap();
-        let row = store.pending(100).unwrap().into_iter().find(|row| row.path == Path::new(path)).unwrap();
-        let segments: Vec<NewSegment> = passages
-            .into_iter()
-            .enumerate()
-            .map(|(i, (text, vector))| NewSegment {
-                segment: Segment::Passage,
-                loc: Some(i as f64 + 1.0),
-                loc_end: None,
-                text: Some(text),
-                vector,
-            })
-            .collect();
-        assert!(store.finish_file(&row, &segments, &serde_json::json!({}), false).unwrap());
-        row.id
-    }
+    use crate::index::Writer;
+    use crate::index::testing::{TempIndex, add, unit};
 
     #[test]
     fn the_vectors_are_followed_through_new_rows_and_a_next_generation() {
         let index = TempIndex::new("generations");
-        let mut store = Store::open(&index.0).unwrap();
-        let unit = crate::vectors::unit;
+        let mut store = Writer::open(&index.path).unwrap();
         let passage = |seed| (format!("passage {seed}"), Some(unit(seed)));
-        let one = add_segments(&mut store, "/a/one.txt", Kind::Plaintext, vec![passage(1), passage(2)]);
-        let mut searcher = Searcher::open(&index.0, Ranking::default(), scanning(Scan::ExactF32)).unwrap();
+        let one = add(&mut store, "/a/one.txt", Kind::Plaintext, vec![passage(1), passage(2)]);
+        let mut searcher = Searcher::open(&index.path, Ranking::default(), scanning(Scan::ExactF32)).unwrap();
         searcher.load_vectors().unwrap();
         let best = |searcher: &mut Searcher, seed| {
             let request = Search { q: "zebra".into(), limit: 1, ..Default::default() };
@@ -334,7 +276,7 @@ mod tests {
         assert_eq!(best(&mut searcher, 2).0, "one.txt");
 
         // New rows are mapped as they come.
-        add_segments(&mut store, "/a/two.txt", Kind::Plaintext, vec![passage(3)]);
+        add(&mut store, "/a/two.txt", Kind::Plaintext, vec![passage(3)]);
         let (name, cosine) = best(&mut searcher, 3);
         assert_eq!(name, "two.txt");
         assert!((cosine - 1.0).abs() < 1e-5);
@@ -365,16 +307,15 @@ mod tests {
     #[test]
     fn sketches_find_what_the_exact_scan_finds() {
         let index = TempIndex::new("sketches");
-        let mut store = Store::open(&index.0).unwrap();
-        let unit = crate::vectors::unit;
+        let mut store = Writer::open(&index.path).unwrap();
         // More segments than are scored exactly, and a code file the search mustn't show.
         let files = CANDIDATES / 50 + 20;
         for file in 0..files as u64 {
             let passages = (0..50).map(|n| (format!("passage {n}"), Some(unit(file * 100 + n)))).collect();
-            add_segments(&mut store, &format!("/a/{file}.txt"), Kind::Plaintext, passages);
+            add(&mut store, &format!("/a/{file}.txt"), Kind::Plaintext, passages);
         }
-        add_segments(&mut store, "/a/code.rs", Kind::Code, vec![("fn".into(), Some(unit(7 * 100 + 3)))]);
-        let mut searcher = Searcher::open(&index.0, Ranking::default(), scanning(Scan::Sketch)).unwrap();
+        add(&mut store, "/a/code.rs", Kind::Code, vec![("fn".into(), Some(unit(7 * 100 + 3)))]);
+        let mut searcher = Searcher::open(&index.path, Ranking::default(), scanning(Scan::Sketch)).unwrap();
         searcher.load_vectors().unwrap();
         let request = Search { q: "zebra".into(), limit: 1, ..Default::default() };
         let hits = searcher.search(&request, Some(&unit(7 * 100 + 3))).unwrap().hits;
@@ -387,11 +328,10 @@ mod tests {
     #[test]
     fn auto_scans_the_most_precise_form_that_fits() {
         let index = TempIndex::new("auto");
-        let mut store = Store::open(&index.0).unwrap();
-        let unit = crate::vectors::unit;
+        let mut store = Writer::open(&index.path).unwrap();
         let passages = (0..400).map(|n| (format!("passage {n}"), Some(unit(n)))).collect();
-        add_segments(&mut store, "/a/one.txt", Kind::Plaintext, passages);
-        let mut searcher = Searcher::open(&index.0, Ranking::default(), config::Search::default()).unwrap();
+        add(&mut store, "/a/one.txt", Kind::Plaintext, passages);
+        let mut searcher = Searcher::open(&index.path, Ranking::default(), config::Search::default()).unwrap();
         searcher.load_vectors().unwrap();
         // 400 rows: 1.2 MB at f32, 0.6 MB at f16.
         for (mb, scan) in [(2, Scan::ExactF32), (1, Scan::ExactF16), (0, Scan::Sketch)] {
@@ -403,11 +343,16 @@ mod tests {
     #[test]
     fn a_long_file_or_an_unwanted_kind_doesnt_use_up_the_word_matches() {
         let index = TempIndex::new("budget");
-        let mut store = Store::open(&index.0).unwrap();
-        add(&mut store, "/docs/long.html", Kind::Document, (0..1200).map(|i| format!("needle {i}, needle")).collect());
-        add(&mut store, "/notes/note.txt", Kind::Plaintext, vec!["needle extra context in a note".into()]);
+        let mut store = Writer::open(&index.path).unwrap();
+        add(
+            &mut store,
+            "/docs/long.html",
+            Kind::Document,
+            (0..1200).map(|i| (format!("needle {i}, needle"), None)).collect(),
+        );
+        add(&mut store, "/notes/note.txt", Kind::Plaintext, vec![("needle extra context in a note".into(), None)]);
         drop(store);
-        let mut searcher = Searcher::open(&index.0, Ranking::default(), config::Search::default()).unwrap();
+        let mut searcher = Searcher::open(&index.path, Ranking::default(), config::Search::default()).unwrap();
         let search = |searcher: &mut Searcher, kinds: Vec<Kind>| {
             let request = Search { q: "needle".into(), kinds, limit: 10, ..Default::default() };
             searcher.search(&request, None).unwrap().hits.into_iter().map(|hit| hit.path).collect::<Vec<_>>()

@@ -10,13 +10,13 @@
 //! as the indexer writes it) and changes the settings and the folders (config.json, which the indexer follows).
 //!
 //! Nothing loads before it's needed: a search by words uses SQLite's full-text index alone. The first search by meaning
-//! loads the text model and maps the vectors (vectors.rs), off the searching threads. What's loaded stays until `unload`
-//! or the engine stopping. There are no idle timers.
+//! loads the text model and maps the vectors (index::Vectors), off the searching threads. What's loaded stays until
+//! `unload` or the engine stopping. There are no idle timers.
 
 use crate::config::{self, Config};
 use crate::embedder::{Embedder, ModelFiles};
-use crate::query::{Query, Searcher, Vectors};
-use crate::store::Store;
+use crate::index::{Reader, Vectors};
+use crate::query::{Query, Searcher};
 use anyhow::{Context, Result, bail};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use protocol::{
@@ -210,7 +210,7 @@ impl Core {
     fn status(self: &Arc<Self>) -> Result<Status> {
         let (vectors, scan, resident, stats) = self.with_searcher(|searcher| {
             searcher.refresh()?;
-            let stats = searcher.store().stats()?;
+            let stats = searcher.index().stats()?;
             Ok((searcher.vector_count(), searcher.scan(), searcher.vectors_resident(), stats))
         })?;
         let meaning = self.meaning.lock().unwrap();
@@ -332,7 +332,7 @@ impl Core {
     fn load(&self, generation: u64) {
         let loaded = (|| -> Result<(Embedder, Vectors)> {
             let embedder = Embedder::load(&ModelFiles::in_folder(&self.models)?, true)?;
-            let vectors = Vectors::load(&Store::open_readonly(&self.index)?)?;
+            let vectors = Vectors::load(&Reader::open(&self.index)?)?;
             Ok((embedder, vectors))
         })();
         let mut state = self.meaning.lock().unwrap();
@@ -510,11 +510,9 @@ fn stop(core: &Arc<Core>, writer: &Writer, id: Value) -> ! {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Settings;
-    use crate::crawl::Found;
-    use crate::store::NewSegment;
-    use protocol::{Kind, Segment};
-    use serde_json::json;
+    use crate::index::Writer;
+    use crate::index::testing::add;
+    use protocol::Kind;
 
     #[test]
     fn a_deep_data_folder_is_reached_through_a_short_link() {
@@ -544,17 +542,8 @@ mod tests {
         let folder = std::env::temp_dir().join(format!("sift-it-engine-{}", std::process::id()));
         std::fs::create_dir_all(&folder).unwrap();
         let index = folder.join("index.sqlite");
-        {
-            let mut store = Store::open(&index).unwrap();
-            let settings = Settings::BASE;
-            let found =
-                Found { path: "/a/pancakes.txt".into(), kind: Kind::Plaintext, size: 1, modified: 1.0, settings };
-            store.queue(&found, None, 0.0).unwrap();
-            let row = store.pending(1).unwrap().remove(0);
-            let text = Some("pancakes with syrup".to_string());
-            let passage = NewSegment { segment: Segment::Passage, loc: Some(1.0), loc_end: None, text, vector: None };
-            store.finish_file(&row, &[passage], &json!({}), false).unwrap();
-        }
+        let passages = vec![("pancakes with syrup".to_string(), None)];
+        add(&mut Writer::open(&index).unwrap(), "/a/pancakes.txt", Kind::Plaintext, passages);
         let events = Arc::new(Mutex::new(Vec::new()));
         let seen = events.clone();
         let core = Core::new(

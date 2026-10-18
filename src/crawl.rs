@@ -3,6 +3,7 @@
 //! in the cloud (reading those would download them), or what `sources.ignore` leaves out.
 
 use crate::config::{Config, Settings};
+use crate::index::NewFile;
 use crate::readers;
 use protocol::Kind;
 use std::ffi::CString;
@@ -116,6 +117,18 @@ impl Found {
     /// What's said in it is to be written down.
     pub fn speech(&self) -> bool {
         readers::transcribes(self.kind, &self.settings)
+    }
+
+    /// The file, as the index queues it.
+    pub fn new_file(&self) -> NewFile {
+        NewFile {
+            path: self.path.clone(),
+            kind: self.kind,
+            size: self.size,
+            modified: self.modified,
+            reading: self.reading(),
+            speech: self.speech(),
+        }
     }
 }
 

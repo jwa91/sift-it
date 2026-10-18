@@ -9,7 +9,7 @@
 //! their sketches' estimates.
 
 use crate::engine::Core;
-use crate::vectors::Form;
+use crate::index::Form;
 use anyhow::Result;
 use protocol::{Mode, Search};
 use serde::Deserialize;

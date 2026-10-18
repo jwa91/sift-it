@@ -21,9 +21,9 @@
 use crate::config::{self, Config};
 use crate::crawl::{self, Found, Rescan};
 use crate::embedder::{Embedder, ModelFiles};
+use crate::index::{FileRow, NewSegment, Writer};
 use crate::readers::{self, Payload, Piece};
 use crate::speech::{Gone, Outcome, Spoken, Transcriber};
-use crate::store::{FileRow, NewSegment, Store};
 use anyhow::{Result, anyhow};
 use protocol::Kind;
 use serde::Serialize;
@@ -139,7 +139,7 @@ enum Message {
     Done(i64, Result<serde_json::Value>),
 }
 
-/// Segments a file keeps before they're written as a part (Store::write_part): about 2.5 MB of vectors.
+/// Segments a file keeps before they're written as a part (Writer::write_part): about 2.5 MB of vectors.
 const PART: usize = 256;
 
 /// A reader that hands over nothing for this long is stuck. Vision's text recognition can be: right after it compiles
@@ -239,7 +239,7 @@ impl Speech {
     }
 }
 
-/// A reader got stuck (STUCK) on this file. It's set aside (Store::set_aside), and the run ends: the thread can't be
+/// A reader got stuck (STUCK) on this file. It's set aside (Writer::set_aside), and the run ends: the thread can't be
 /// stopped, and what it's stuck in stays stuck for this process (Vision reads no more text in it). A new process goes
 /// on with the rest.
 #[derive(Debug)]
@@ -269,7 +269,7 @@ struct Assembly {
 }
 
 pub struct Indexer {
-    pub store: Store,
+    pub index: Writer,
     models: PathBuf,
     embedder: Option<Embedder>,
     /// The loaded model has the image and audio encoders (else it's the text model alone).
@@ -277,18 +277,18 @@ pub struct Indexer {
 }
 
 impl Indexer {
-    /// An indexer for this store. Vectors from another pipeline (another model or llama.cpp) are dropped, and their
+    /// An indexer writing to `index`. Vectors from another pipeline (another model or llama.cpp) are dropped, and their
     /// files queued again: they'd never compare right with new queries. Vector files no partition uses (what a crash
     /// left, or what was dropped) go.
-    pub fn new(mut store: Store, models: PathBuf) -> Result<Self> {
-        if store.adopt_vector_source(&crate::embedder::vector_source())? {
+    pub fn new(mut index: Writer, models: PathBuf) -> Result<Self> {
+        if index.adopt_vector_source(&crate::embedder::vector_source())? {
             eprintln!("the index was made by another model or pipeline: everything is indexed again");
         }
-        if store.adopt_speech_source(crate::speech::source())? {
+        if index.adopt_speech_source(crate::speech::source())? {
             eprintln!("what's said in recordings was written down by another speech model: it's written down again");
         }
-        store.tidy_vectors()?;
-        Ok(Self { store, models, embedder: None, media: false })
+        index.tidy_vectors()?;
+        Ok(Self { index, models, embedder: None, media: false })
     }
 
     /// Frees the model (about 1 GB) until it's needed again.
@@ -304,28 +304,29 @@ impl Indexer {
         let started = Instant::now();
         let crawl = crawl::crawl(config);
         let existing: HashMap<PathBuf, FileRow> =
-            self.store.files()?.into_iter().map(|row| (row.path.clone(), row)).collect();
+            self.index.files()?.into_iter().map(|row| (row.path.clone(), row)).collect();
         let found_paths: HashSet<&PathBuf> = crawl.found.iter().map(|f| &f.path).collect();
-        let transaction = self.store.conn.unchecked_transaction()?;
-        let (added, mut changed) = self.queue_found(&crawl.found, &existing)?;
-        // Files where some piece couldn't be embedded, or reading got stuck: once in a while, try them again.
-        changed += self.store.requeue_passing(6.0)?;
-        let mut removed = 0;
-        for (path, row) in &existing {
-            if found_paths.contains(path) || crawl.unavailable.iter().any(|root| path.starts_with(root)) {
-                continue;
+        let (added, changed, removed) = self.index.batch(|| {
+            let (added, mut changed) = self.queue_found(&crawl.found, &existing)?;
+            // Files where some piece couldn't be embedded, or reading got stuck: once in a while, try them again.
+            changed += self.index.requeue_passing(6.0)?;
+            let mut removed = 0;
+            for (path, row) in &existing {
+                if found_paths.contains(path) || crawl.unavailable.iter().any(|root| path.starts_with(root)) {
+                    continue;
+                }
+                self.index.remove_file(row.id)?;
+                removed += 1;
             }
-            self.store.remove_file(row.id)?;
-            removed += 1;
-        }
-        transaction.commit()?;
+            Ok((added, changed, removed))
+        })?;
         Ok(Event::Sync {
             files: crawl.found.len(),
             added,
             changed,
             removed,
             unavailable: crawl.unavailable.iter().map(|p| p.display().to_string()).collect(),
-            pending: self.store.pending_count()?,
+            pending: self.index.pending_count()?,
             ms: started.elapsed().as_millis() as u64,
         })
     }
@@ -334,35 +335,36 @@ impl Indexer {
     pub fn sync_paths(&mut self, config: &Config, paths: &[PathBuf]) -> Result<Event> {
         let started = Instant::now();
         let (mut files, mut added, mut changed, mut removed) = (0, 0, 0, 0);
-        let transaction = self.store.conn.unchecked_transaction()?;
-        for path in paths {
-            let found = match crawl::rescan(config, path) {
-                Rescan::Outside | Rescan::Unavailable => continue,
-                Rescan::Skipped => Vec::new(),
-                Rescan::Found(found) => found,
-            };
-            let existing: HashMap<PathBuf, FileRow> =
-                self.store.files_under(path)?.into_iter().map(|row| (row.path.clone(), row)).collect();
-            let (a, c) = self.queue_found(&found, &existing)?;
-            let found_paths: HashSet<&PathBuf> = found.iter().map(|f| &f.path).collect();
-            for (existing_path, row) in &existing {
-                if !found_paths.contains(existing_path) {
-                    self.store.remove_file(row.id)?;
-                    removed += 1;
+        self.index.batch(|| {
+            for path in paths {
+                let found = match crawl::rescan(config, path) {
+                    Rescan::Outside | Rescan::Unavailable => continue,
+                    Rescan::Skipped => Vec::new(),
+                    Rescan::Found(found) => found,
+                };
+                let existing: HashMap<PathBuf, FileRow> =
+                    self.index.files_under(path)?.into_iter().map(|row| (row.path.clone(), row)).collect();
+                let (a, c) = self.queue_found(&found, &existing)?;
+                let found_paths: HashSet<&PathBuf> = found.iter().map(|f| &f.path).collect();
+                for (existing_path, row) in &existing {
+                    if !found_paths.contains(existing_path) {
+                        self.index.remove_file(row.id)?;
+                        removed += 1;
+                    }
                 }
+                files += found.len();
+                added += a;
+                changed += c;
             }
-            files += found.len();
-            added += a;
-            changed += c;
-        }
-        transaction.commit()?;
+            Ok(())
+        })?;
         Ok(Event::Sync {
             files,
             added,
             changed,
             removed,
             unavailable: Vec::new(),
-            pending: self.store.pending_count()?,
+            pending: self.index.pending_count()?,
             ms: started.elapsed().as_millis() as u64,
         })
     }
@@ -372,14 +374,14 @@ impl Indexer {
         for file in found {
             match existing.get(&file.path) {
                 None => {
-                    self.store.queue(file, None, crate::estimate::cost(file))?;
+                    self.index.queue(&file.new_file(), None, crate::estimate::cost(file))?;
                     added += 1;
                 }
                 Some(row) if is_changed(row, file) => {
-                    self.store.queue(file, Some(row.id), crate::estimate::cost(file))?;
+                    self.index.queue(&file.new_file(), Some(row.id), crate::estimate::cost(file))?;
                     changed += 1;
                 }
-                Some(row) if row.speech != file.speech() => self.store.set_speech(row.id, file.speech())?,
+                Some(row) if row.speech != file.speech() => self.index.set_speech(row.id, file.speech())?,
                 Some(_) => {}
             }
         }
@@ -398,7 +400,7 @@ impl Indexer {
         changes: &mut dyn FnMut() -> Vec<PathBuf>,
         helper: Option<&mut Option<Transcriber>>,
     ) -> Result<()> {
-        let pending = self.store.pending(usize::MAX)?;
+        let pending = self.index.pending(usize::MAX)?;
         if pending.is_empty() {
             return Ok(());
         }
@@ -441,7 +443,7 @@ impl Indexer {
                     if send(Message::Start(id, Instant::now())).is_err() {
                         break;
                     }
-                    // Read with this run's values. A file queued for other ones meanwhile isn't written (Store::write_file).
+                    // Read with this run's values. A file queued for other ones meanwhile isn't written (Writer::write_file).
                     let settings = reading.resolve(&row.path, row.kind);
                     mark(Some(id));
                     // A reader that panics (a file no one expected) is a file that couldn't be read, not a lost run.
@@ -487,7 +489,7 @@ impl Indexer {
                 if !changed.is_empty() {
                     on_event(self.sync_paths(config, &changed)?);
                     let fresh: Vec<FileRow> = self
-                        .store
+                        .index
                         .pending(usize::MAX)?
                         .into_iter()
                         .filter(|row| !known.contains_key(&row.id))
@@ -513,8 +515,8 @@ impl Indexer {
                 if let Some((id, _)) = stuck {
                     let row = &known[&id];
                     let error = format!("reading it got stuck: nothing came of it in {} minutes", STUCK.as_secs() / 60);
-                    // Parts written of it go. It's tried again later (Store::requeue_passing).
-                    if self.store.set_aside(row, &error)? {
+                    // Parts written of it go. It's tried again later (Writer::requeue_passing).
+                    if self.index.set_aside(row, &error)? {
                         run.failed += 1;
                         on_event(Event::Failed { path: row.path.display().to_string(), error });
                     }
@@ -630,7 +632,7 @@ impl Indexer {
                         };
                         let parts = assembly.written > 0;
                         // Not written when the file changed (or left) while it was read: it's queued again.
-                        if self.store.finish_file(&assembly.row, &assembly.segments, &info, parts)? {
+                        if self.index.finish_file(&assembly.row, &assembly.segments, &info, parts)? {
                             run.indexed += 1;
                             on_event(Event::File {
                                 path,
@@ -644,7 +646,7 @@ impl Indexer {
                     }
                     Err(error) => {
                         let error = format!("{error:#}");
-                        if self.store.fail_file(&assembly.row, &error)? {
+                        if self.index.fail_file(&assembly.row, &error)? {
                             run.failed += 1;
                             on_event(Event::Failed { path, error });
                         }
@@ -675,11 +677,11 @@ impl Indexer {
     /// The next recording or video waiting for what's said in it to be written down, from where it got to (one
     /// without sound is done at once), or None.
     fn next_listening(&mut self, on_event: &mut dyn FnMut(Event)) -> Result<Option<Listening>> {
-        while let Some((row, from)) = self.store.transcripts_pending(1)?.into_iter().next() {
+        while let Some((row, from)) = self.index.transcripts_pending(1)?.into_iter().next() {
             // The tags go in with the first stretch (they're read again when it starts over).
             let tags = (from == 0.0).then(|| crate::av::tags(&row.path));
             if !crate::av::has_audio(&row.path) {
-                self.store.add_transcript(&row, from, &[], tags.as_ref(), "done")?;
+                self.index.add_transcript(&row, from, &[], tags.as_ref(), "done")?;
                 let path = row.path.display().to_string();
                 on_event(Event::Transcribed { path, passages: 0, seconds: 0.0, ms: 0 });
                 continue;
@@ -730,7 +732,7 @@ impl Indexer {
             .collect();
         listening.passages += segments.len();
         let (row, tags) = (&listening.row, listening.tags.take());
-        if !self.store.add_transcript(row, start, &segments, tags.as_ref(), &format!("at:{end:.2}"))? {
+        if !self.index.add_transcript(row, start, &segments, tags.as_ref(), &format!("at:{end:.2}"))? {
             listening.changed = true;
             return Ok(false);
         }
@@ -749,7 +751,7 @@ impl Indexer {
         let path = listening.row.path.display().to_string();
         match outcome {
             Ok(Outcome::Finished(end)) if !listening.changed => {
-                self.store.add_transcript(&listening.row, end, &[], None, "done")?;
+                self.index.add_transcript(&listening.row, end, &[], None, "done")?;
                 on_event(Event::Transcribed {
                     path,
                     passages: listening.passages,
@@ -761,7 +763,7 @@ impl Indexer {
             Err(error) if error.is::<Gone>() => return Err(error),
             Err(error) => {
                 let error = format!("{error:#}");
-                self.store.add_transcript(&listening.row, listening.from, &[], None, &format!("failed: {error}"))?;
+                self.index.add_transcript(&listening.row, listening.from, &[], None, &format!("failed: {error}"))?;
                 on_event(Event::TranscribeFailed { path, error });
             }
         }
@@ -880,7 +882,7 @@ impl Indexer {
     fn write_parts(&mut self, run: &mut Run) -> Result<()> {
         for assembly in run.assemblies.values_mut().filter(|a| !a.stale && a.segments.len() >= PART) {
             let first = assembly.written == 0;
-            if self.store.write_part(&assembly.row, &assembly.segments, first)? {
+            if self.index.write_part(&assembly.row, &assembly.segments, first)? {
                 assembly.written += assembly.segments.len();
                 assembly.vectors += assembly.segments.iter().filter(|s| s.vector.is_some()).count();
             } else {
@@ -996,13 +998,13 @@ mod tests {
 
         let mut config = Config::default();
         config.reading.all.depth = Some(Depth::Words);
-        let store = Store::open(&folder.join("index.sqlite")).unwrap();
+        let index = Writer::open(&folder.join("index.sqlite")).unwrap();
         for path in [&stuck, &fine] {
             let settings = config.reading.resolve(path, Kind::Plaintext);
             let found = Found { path: path.clone(), kind: Kind::Plaintext, size: 1, modified: 1.0, settings };
-            store.queue(&found, None, 0.0).unwrap();
+            index.queue(&found.new_file(), None, 0.0).unwrap();
         }
-        let mut indexer = Indexer::new(store, folder.join("models")).unwrap();
+        let mut indexer = Indexer::new(index, folder.join("models")).unwrap();
         let mut failed = Vec::new();
         let mut events = |event| {
             if let Event::Failed { path, .. } = event {
@@ -1013,14 +1015,11 @@ mod tests {
 
         assert!(outcome.unwrap_err().is::<Stuck>());
         assert_eq!(failed, [stuck.display().to_string()]);
-        let state = |path: &Path| -> String {
-            let path = path.to_string_lossy();
-            indexer.store.conn.query_row("SELECT state FROM files WHERE path = ?1", [path], |row| row.get(0)).unwrap()
-        };
+        let state = |path: &Path| indexer.index.file_state(path);
         assert_eq!(state(&stuck), "failed");
         assert_eq!(state(&fine), "done");
         // It's tried again later.
-        assert_eq!(indexer.store.requeue_passing(0.0).unwrap(), 1);
+        assert_eq!(indexer.index.requeue_passing(0.0).unwrap(), 1);
         assert_eq!(state(&stuck), "pending");
 
         // A writer lets the reader go: it finds the run over.

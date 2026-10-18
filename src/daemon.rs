@@ -7,7 +7,7 @@
 //! `indexing.memory_mb` allows both models (indexer::Plan), else once everything is read. Anything that changes in the
 //! folders comes first, and the writing down goes on where it stopped.
 //!
-//! With nothing left to do, it writes the next generation of a vector partition that's due one (vectors.rs).
+//! With nothing left to do, it writes the next generation of a vector partition that's due one (index/vectors.rs).
 //!
 //! It says what it's doing in status.json (for `sift-it status` and front ends), and listens to signals:
 //!   SIGUSR1  look for changes now (a full sync)
@@ -18,10 +18,10 @@
 //! waits. When a reader gets stuck (indexer::Stuck), it exits, and launchd starts a new one.
 
 use crate::config::{self, Config};
+use crate::index::{self, Writer};
 use crate::indexer::{Event, Indexer, Plan, Stuck};
 use crate::power;
 use crate::speech::Transcriber;
-use crate::store::{self, Store};
 use anyhow::{Context, Result, bail};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use protocol::{IndexerState, IndexerStatus};
@@ -137,7 +137,7 @@ impl Reporter {
             return;
         }
         self.last_write = Instant::now();
-        self.status.updated = store::now();
+        self.status.updated = index::now();
         if let Ok(json) = serde_json::to_vec(&self.status) {
             let _ = config::write_atomically(&config::status_path(), &json);
         }
@@ -322,8 +322,8 @@ pub fn run() -> Result<()> {
     };
     reporter.write(true);
 
-    let store = Store::open(&config::index_path()).context("can't open the index")?;
-    let mut indexer = Indexer::new(store, config::models_dir())?;
+    let index = Writer::open(&config::index_path()).context("can't open the index")?;
+    let mut indexer = Indexer::new(index, config::models_dir())?;
     let (sender, receiver) = channel();
     let mut watcher = watch(&config, sender.clone())?;
     let mut changes = Changes {
@@ -396,7 +396,7 @@ pub fn run() -> Result<()> {
             }
         }
 
-        let pending = indexer.store.pending_count().unwrap_or(0);
+        let pending = indexer.index.pending_count().unwrap_or(0);
         if pending > 0 && paused {
             reporter.set(IndexerState::Paused, Some(format!("Paused, {pending} files waiting")));
         } else if pending > 0 {
@@ -450,7 +450,7 @@ pub fn run() -> Result<()> {
         } else {
             // Everything is read: what's said in recordings and videos is written down meanwhile.
             let to_write = !paused
-                && indexer.store.transcripts_pending(1).map(|rows| !rows.is_empty()).unwrap_or(false)
+                && indexer.index.transcripts_pending(1).map(|rows| !rows.is_empty()).unwrap_or(false)
                 && reason_to_wait(&config).is_none();
             let may_start = speech_failed_at.is_none_or(|at| at.elapsed() > SPEECH_RETRY);
             if to_write && transcriber.is_none() && may_start {
@@ -473,7 +473,7 @@ pub fn run() -> Result<()> {
             // A change that's still settling is synced and read first: the helper waits for it, loaded.
             let settling = !changes.paths.is_empty();
             if let (true, Some(running), false) = (to_write, transcriber.as_mut(), settling) {
-                if let Ok(store::Transcripts { done, total, .. }) = indexer.store.transcripts() {
+                if let Ok(index::Transcripts { done, total, .. }) = indexer.index.transcripts() {
                     reporter.status.speech_done = done;
                     reporter.status.speech_total = total;
                     reporter.status.done = done;
@@ -519,7 +519,7 @@ pub fn run() -> Result<()> {
             reporter.status.current = None;
             // Partitions with many dead rows, or sketches made against a mean that moved: their next generation.
             if !paused && compact_failed_at.is_none_or(|at| at.elapsed() > COMPACT_RETRY) {
-                match indexer.store.compact_vectors() {
+                match indexer.index.compact_vectors() {
                     Ok(written) if !written.is_empty() => {
                         log(&format!("wrote the vectors again: {}", written.join(", ")))
                     }

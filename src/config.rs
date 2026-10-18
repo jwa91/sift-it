@@ -2,7 +2,7 @@
 //!
 //!   config.json     what to index and how: one per Mac (`sift-it config`, `sift-it folders`)
 //!   index.sqlite    the index
-//!   vectors/        its vectors (vectors.rs)
+//!   vectors/        its vectors (index/vectors.rs)
 //!   status.json     what the background indexer is doing (for front ends)
 //!   models/         the model files
 //!   previews/       thumbnails rendered for search results

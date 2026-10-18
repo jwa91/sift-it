@@ -1,46 +1,17 @@
-//! The index: one SQLite file. A row per file, a row per segment (a passage, a PDF page, a picture, a video frame,
-//! 30 s of sound, what's said in a recording) with where its vector is, and a full-text index over every segment's
-//! words and its file's name and tags. The vectors themselves are in files beside it (vectors.rs).
-//!
-//! The indexer is the only writer; searchers read alongside it (WAL), and notice its changes through SQLite's
-//! data_version.
+//! The catalog: one SQLite file. A row per file, a row per segment with where its vector is (vectors.rs), a
+//! full-text index over every segment's words and its file's name and tags, and the queue.
 
-use crate::crawl::Found;
+use super::vectors;
+use super::{FileRow, Heavy, NewFile, NewSegment, Queued, Reader, SegmentRow, Transcripts, Writer};
 use crate::embedder::DIM;
-use crate::vectors;
 use anyhow::{Context, Result, bail};
 use protocol::{Kind, Segment, Stats};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, TransactionBehavior, params};
-use serde::Serialize;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// An index of another version is dropped and made again.
 const SCHEMA_VERSION: i64 = 6;
-
-/// A segment to write.
-#[derive(Debug, Clone)]
-pub struct NewSegment {
-    pub segment: Segment,
-    /// Page (from 1), line (from 1) or second, by segment.
-    pub loc: Option<f64>,
-    pub loc_end: Option<f64>,
-    /// The words for the keyword index and excerpts.
-    pub text: Option<String>,
-    pub vector: Option<Vec<f32>>,
-}
-
-#[derive(Debug, Clone)]
-pub struct FileRow {
-    pub id: i64,
-    pub path: PathBuf,
-    pub kind: Kind,
-    pub size: u64,
-    pub modified: f64,
-    /// How it's read (readers::fingerprint).
-    pub reading: String,
-    /// What's said in it is to be written down.
-    pub speech: bool,
-}
 
 /// The files whose speech is to be written down, once they're read.
 const SPEECH: &str = "speech AND state = 'done'";
@@ -60,40 +31,9 @@ fn file_row(row: &Row) -> rusqlite::Result<FileRow> {
     })
 }
 
-/// The work still queued (Store::queued).
-#[derive(Debug, Serialize)]
-pub struct Queued {
-    pub files: usize,
-    /// About how long reading them takes (estimate::cost).
-    pub seconds: f64,
-    /// The dearest of them, dearest first.
-    pub heaviest: Vec<Heavy>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct Heavy {
-    pub path: String,
-    pub kind: Kind,
-    pub seconds: f64,
-}
-
-/// Recordings and videos whose speech is written down (Store::transcripts).
-#[derive(Debug, Serialize)]
-pub struct Transcripts {
-    pub done: usize,
-    pub total: usize,
-    /// Sound still to be written down.
-    pub seconds: f64,
-}
-
-pub struct Store {
-    pub conn: Connection,
-    path: PathBuf,
-}
-
 /// Words for the keyword index from a file: its name (name_words), and the tags read from it (a recording's title,
 /// artist and album: see av::tags), which `info` holds.
-pub fn file_words(path: &Path, info: &serde_json::Value) -> String {
+fn file_words(path: &Path, info: &serde_json::Value) -> String {
     let mut words = name_words(path);
     if let Some(tags) = info.get("tags").and_then(|tags| tags.as_object()) {
         for value in tags.values().filter_map(|value| value.as_str()) {
@@ -106,7 +46,7 @@ pub fn file_words(path: &Path, info: &serde_json::Value) -> String {
 
 /// Words for the keyword index from a path: the file's name split at punctuation and case changes, its extension,
 /// and the folder it's in.
-pub fn name_words(path: &Path) -> String {
+fn name_words(path: &Path) -> String {
     let stem = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
     let mut words = String::new();
     let mut previous_lower = false;
@@ -128,28 +68,285 @@ pub fn name_words(path: &Path) -> String {
     words
 }
 
-impl Store {
+impl Reader {
+    /// A reader of the index at `path`.
     pub fn open(path: &Path) -> Result<Self> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let conn = Connection::open(path).with_context(|| format!("can't open {}", path.display()))?;
-        let store = Self { conn, path: path.to_path_buf() };
-        store.setup()?;
-        Ok(store)
-    }
-
-    /// A reader's connection: never writes, never creates.
-    pub fn open_readonly(path: &Path) -> Result<Self> {
         if !path.exists() {
             // A searcher may start before the first index: make an empty one to read.
-            drop(Self::open(path)?);
+            drop(Writer::open(path)?);
         }
         let conn =
             Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)
                 .with_context(|| format!("can't open {}", path.display()))?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         Ok(Self { conn, path: path.to_path_buf() })
+    }
+
+    /// The folder the vectors are in.
+    pub(super) fn vectors_folder(&self) -> PathBuf {
+        vectors::folder(&self.path)
+    }
+
+    pub fn meta(&self, key: &str) -> Result<Option<String>> {
+        Ok(self.conn.query_row("SELECT value FROM meta WHERE key = ?1", [key], |row| row.get(0)).optional()?)
+    }
+
+    /// Changes when another connection commits (SQLite's data_version): a reader's cue to refresh.
+    pub fn data_version(&self) -> Result<i64> {
+        Ok(self.conn.query_row("PRAGMA data_version", [], |row| row.get(0))?)
+    }
+
+    pub fn files(&self) -> Result<Vec<FileRow>> {
+        let mut statement = self.conn.prepare(&format!("SELECT {FILE_COLUMNS} FROM files"))?;
+        let rows = statement.query_map([], file_row)?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// The files at a path or under it.
+    pub fn files_under(&self, path: &Path) -> Result<Vec<FileRow>> {
+        let exact = path.to_string_lossy().to_string();
+        let prefix = format!("{}/", exact.trim_end_matches('/'));
+        let mut statement = self
+            .conn
+            .prepare(&format!("SELECT {FILE_COLUMNS} FROM files WHERE path = ?1 OR substr(path, 1, ?2) = ?3"))?;
+        let rows = statement.query_map(params![exact, prefix.chars().count() as i64, prefix], file_row)?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    pub fn pending_count(&self) -> Result<usize> {
+        Ok(self.conn.query_row("SELECT COUNT(*) FROM files WHERE state = 'pending'", [], |row| row.get::<_, i64>(0))?
+            as usize)
+    }
+
+    /// Files waiting to be indexed, cheapest first (newest first among equals).
+    pub fn pending(&self, limit: usize) -> Result<Vec<FileRow>> {
+        let mut statement = self.conn.prepare(&format!(
+            "SELECT {FILE_COLUMNS} FROM files WHERE state = 'pending' ORDER BY cost, modified DESC LIMIT ?1"
+        ))?;
+        let rows = statement.query_map([limit.min(i64::MAX as usize) as i64], file_row)?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// The work still queued: how many files, about how long reading them takes, and the `heaviest` dearest ones.
+    pub fn queued(&self, heaviest: usize) -> Result<Queued> {
+        let (files, seconds) =
+            self.conn.query_row("SELECT COUNT(*), TOTAL(cost) FROM files WHERE state = 'pending'", [], |row| {
+                Ok((row.get::<_, i64>(0)? as usize, row.get(1)?))
+            })?;
+        let mut statement = self.conn.prepare(
+            "SELECT path, kind, cost FROM files WHERE state = 'pending' ORDER BY cost DESC, modified DESC LIMIT ?1",
+        )?;
+        let heaviest = statement
+            .query_map([heaviest as i64], |row| {
+                Ok(Heavy {
+                    path: row.get(0)?,
+                    kind: Kind::parse(&row.get::<_, String>(1)?).unwrap_or(Kind::Plaintext),
+                    seconds: row.get(2)?,
+                })
+            })?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(Queued { files, seconds, heaviest })
+    }
+
+    /// Recordings and videos whose speech is still to be written down (or was, partway: `at`), newest first. The
+    /// second of each is where to go on from.
+    pub fn transcripts_pending(&self, limit: usize) -> Result<Vec<(FileRow, f64)>> {
+        let mut statement = self.conn.prepare(&format!(
+            "SELECT {FILE_COLUMNS}, transcript FROM files
+             WHERE {SPEECH} AND (transcript IS NULL OR transcript LIKE 'at:%') ORDER BY modified DESC LIMIT ?1",
+        ))?;
+        let rows = statement.query_map([limit as i64], |row| {
+            let progress: Option<String> = row.get(7)?;
+            Ok((
+                file_row(row)?,
+                progress.and_then(|p| p.strip_prefix("at:").and_then(|at| at.parse().ok())).unwrap_or(0.0),
+            ))
+        })?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// How many recordings and videos have their speech written down, how many in all, and how much sound is left.
+    pub fn transcripts(&self) -> Result<Transcripts> {
+        Ok(self.conn.query_row(
+            &format!(
+                "SELECT COUNT(*) FILTER (WHERE transcript IS NOT NULL AND transcript NOT LIKE 'at:%'), COUNT(*),
+                     TOTAL(MAX(json_extract(info, '$.duration') - COALESCE(CAST(substr(transcript, 4) AS REAL), 0), 0))
+                         FILTER (WHERE transcript IS NULL OR transcript LIKE 'at:%')
+                 FROM files WHERE {SPEECH}"
+            ),
+            [],
+            |row| {
+                Ok(Transcripts {
+                    done: row.get::<_, i64>(0)? as usize,
+                    total: row.get::<_, i64>(1)? as usize,
+                    seconds: row.get(2)?,
+                })
+            },
+        )?)
+    }
+
+    /// A segment's whole text.
+    pub fn segment_text(&self, segment_id: i64) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .prepare_cached("SELECT text FROM segments WHERE id = ?1")?
+            .query_row([segment_id], |row| row.get(0))
+            .optional()?
+            .flatten())
+    }
+
+    /// A file's text: its text segments in order, at most about 8,000 characters.
+    pub fn file_text(&self, path: &str) -> Result<Option<String>> {
+        let mut statement = self.conn.prepare(
+            "SELECT s.text FROM segments s JOIN files f ON f.id = s.file_id
+             WHERE f.path = ?1 AND s.text IS NOT NULL AND s.text != '' ORDER BY s.loc, s.id",
+        )?;
+        let mut text = String::new();
+        for part in statement.query_map([path], |row| row.get::<_, String>(0))? {
+            if !text.is_empty() {
+                text.push_str("\n\n");
+            }
+            text.push_str(&part?);
+            if text.len() > 8000 {
+                break;
+            }
+        }
+        Ok((!text.is_empty()).then_some(text))
+    }
+
+    pub fn stats(&self) -> Result<Stats> {
+        let mut stats = Stats::default();
+        let mut statement =
+            self.conn.prepare("SELECT kind, state, COUNT(*), SUM(size) FROM files GROUP BY kind, state")?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            let kind: String = row.get(0)?;
+            let state: String = row.get(1)?;
+            let count: i64 = row.get(2)?;
+            stats.files += count;
+            stats.bytes += row.get::<_, Option<i64>>(3)?.unwrap_or(0) as u64;
+            match state.as_str() {
+                "done" => stats.done += count,
+                "pending" => stats.pending += count,
+                _ => stats.failed += count,
+            }
+            *stats.by_kind.entry(kind).or_default() += count;
+        }
+        stats.segments = self.conn.query_row("SELECT COUNT(*) FROM segments", [], |row| row.get(0))?;
+        stats.vectors =
+            self.conn.query_row("SELECT COUNT(*) FROM segments WHERE row IS NOT NULL", [], |row| row.get(0))?;
+        Ok(stats)
+    }
+
+    /// Each file's kind, by its id.
+    pub fn file_kinds(&self) -> Result<HashMap<i64, Kind>> {
+        let mut statement = self.conn.prepare("SELECT id, kind FROM files")?;
+        Ok(statement
+            .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))?
+            .filter_map(|row| row.ok())
+            .filter_map(|(id, kind)| Kind::parse(&kind).map(|kind| (id, kind)))
+            .collect())
+    }
+
+    /// A segment, with its file.
+    pub fn segment(&self, id: i64) -> Result<Option<SegmentRow>> {
+        let mut statement = self.conn.prepare_cached(
+            "SELECT f.path, f.kind, f.modified, f.size, f.info, s.segment, s.loc, s.loc_end, s.text
+             FROM segments s JOIN files f ON f.id = s.file_id WHERE s.id = ?1",
+        )?;
+        Ok(statement
+            .query_row([id], |row| {
+                Ok(SegmentRow {
+                    path: row.get(0)?,
+                    kind: Kind::parse(&row.get::<_, String>(1)?).unwrap_or(Kind::Plaintext),
+                    modified: row.get(2)?,
+                    size: row.get::<_, i64>(3)? as u64,
+                    info: row
+                        .get::<_, Option<String>>(4)?
+                        .and_then(|info| serde_json::from_str(&info).ok())
+                        .unwrap_or(serde_json::Value::Null),
+                    segment: Segment::parse(&row.get::<_, String>(5)?).unwrap_or(Segment::Passage),
+                    loc: row.get(6)?,
+                    loc_end: row.get(7)?,
+                    text: row.get(8)?,
+                })
+            })
+            .optional()?)
+    }
+
+    /// The segments with all of `words`, best first (FTS5's bm25), each with its file, for as long as `take` takes
+    /// more. With `prefix_last`, the last word matches as a prefix.
+    pub fn word_matches(&self, words: &[String], prefix_last: bool, take: impl FnMut(i64, i64) -> bool) -> Result<()> {
+        let query = words
+            .iter()
+            .enumerate()
+            .map(|(i, word)| {
+                let quoted = format!("\"{}\"", word.replace('"', "\"\""));
+                if prefix_last && i == words.len() - 1 { format!("{quoted}*") } else { quoted }
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        self.text_matches(&query, take)
+    }
+
+    /// The segments with every phrase, its words together and in order (FTS5 phrase queries), as word_matches.
+    pub fn phrase_matches(&self, phrases: &[Vec<String>], take: impl FnMut(i64, i64) -> bool) -> Result<()> {
+        let query = phrases
+            .iter()
+            .map(|words| format!("\"{}\"", words.join(" ").replace('"', "\"\"")))
+            .collect::<Vec<_>>()
+            .join(" ");
+        self.text_matches(&query, take)
+    }
+
+    fn text_matches(&self, query: &str, mut take: impl FnMut(i64, i64) -> bool) -> Result<()> {
+        let mut statement = self.conn.prepare_cached(
+            "SELECT words.rowid, segments.file_id FROM words JOIN segments ON segments.id = words.rowid
+             WHERE words MATCH ?1 ORDER BY words.rank",
+        )?;
+        let mut rows = statement.query([query])?;
+        while let Some(row) = rows.next()? {
+            if !take(row.get(0)?, row.get(1)?) {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    /// The first segment of each of the files of these kinds changed last, newest first.
+    pub fn recent(&self, kinds: &[Kind], limit: usize) -> Result<Vec<i64>> {
+        // The kinds go into the query itself (kind names are fixed words, safe to inline): filtering after the limit
+        // could leave nothing.
+        let kinds: Vec<String> = kinds.iter().map(|kind| format!("'{}'", kind.as_str())).collect();
+        let mut statement = self.conn.prepare(&format!(
+            "SELECT (SELECT MIN(id) FROM segments WHERE file_id = f.id) FROM files f
+             WHERE f.state = 'done' AND f.kind IN ({}) ORDER BY f.modified DESC LIMIT ?1",
+            kinds.join(", ")
+        ))?;
+        let segments: Vec<Option<i64>> =
+            statement.query_map([limit as i64], |row| row.get(0))?.collect::<std::result::Result<_, _>>()?;
+        Ok(segments.into_iter().flatten().collect())
+    }
+
+    /// A file's state: pending, done or failed.
+    #[cfg(test)]
+    pub fn file_state(&self, path: &Path) -> String {
+        let path = path.to_string_lossy();
+        self.conn.query_row("SELECT state FROM files WHERE path = ?1", [path], |row| row.get(0)).unwrap()
+    }
+}
+
+impl Writer {
+    /// The writer of the index at `path`, made when it isn't there. An index of another version is dropped and made
+    /// again.
+    pub fn open(path: &Path) -> Result<Self> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let conn = Connection::open(path).with_context(|| format!("can't open {}", path.display()))?;
+        let writer = Self { reader: Reader { conn, path: path.to_path_buf() } };
+        writer.setup()?;
+        Ok(writer)
     }
 
     fn setup(&self) -> Result<()> {
@@ -171,7 +368,7 @@ impl Store {
                 "DROP TABLE IF EXISTS words; DROP TABLE IF EXISTS segments; DROP TABLE IF EXISTS files;
                  DROP TABLE IF EXISTS partitions; DELETE FROM meta; VACUUM;",
             )?;
-            let folder = self.vectors();
+            let folder = self.vectors_folder();
             if folder.exists() {
                 std::fs::remove_dir_all(&folder).with_context(|| format!("can't remove {}", folder.display()))?;
             }
@@ -217,65 +414,29 @@ impl Store {
         Ok(())
     }
 
-    /// The folder the vectors are in.
-    pub fn vectors(&self) -> PathBuf {
-        vectors::folder(&self.path)
-    }
-
-    pub fn meta(&self, key: &str) -> Result<Option<String>> {
-        Ok(self.conn.query_row("SELECT value FROM meta WHERE key = ?1", [key], |row| row.get(0)).optional()?)
-    }
-
     pub fn set_meta(&self, key: &str, value: &str) -> Result<()> {
         self.conn.execute("INSERT OR REPLACE INTO meta VALUES (?1, ?2)", [key, value])?;
         Ok(())
     }
 
-    /// Changes when another connection commits (SQLite's data_version): a reader's cue to refresh.
-    pub fn data_version(&self) -> Result<i64> {
-        Ok(self.conn.query_row("PRAGMA data_version", [], |row| row.get(0))?)
-    }
-
-    pub fn files(&self) -> Result<Vec<FileRow>> {
-        let mut statement = self.conn.prepare(&format!("SELECT {FILE_COLUMNS} FROM files"))?;
-        let rows = statement.query_map([], file_row)?;
-        Ok(rows.collect::<std::result::Result<_, _>>()?)
-    }
-
-    /// The files at a path or under it.
-    pub fn files_under(&self, path: &Path) -> Result<Vec<FileRow>> {
-        let exact = path.to_string_lossy().to_string();
-        let prefix = format!("{}/", exact.trim_end_matches('/'));
-        let mut statement = self
-            .conn
-            .prepare(&format!("SELECT {FILE_COLUMNS} FROM files WHERE path = ?1 OR substr(path, 1, ?2) = ?3"))?;
-        let rows = statement.query_map(params![exact, prefix.chars().count() as i64, prefix], file_row)?;
-        Ok(rows.collect::<std::result::Result<_, _>>()?)
-    }
-
-    pub fn pending_count(&self) -> Result<usize> {
-        Ok(self.conn.query_row("SELECT COUNT(*) FROM files WHERE state = 'pending'", [], |row| row.get::<_, i64>(0))?
-            as usize)
-    }
-
     /// A new or changed file: (re)queued, with what was indexed from it before gone. `cost` is about how long reading
     /// it takes (estimate::cost): the queue goes cheapest first.
-    pub fn queue(&self, found: &Found, existing: Option<i64>, cost: f64) -> Result<i64> {
-        let path = found.path.to_string_lossy();
-        let (kind, size, reading, speech) = (found.kind.as_str(), found.size as i64, found.reading(), found.speech());
+    pub fn queue(&self, file: &NewFile, existing: Option<i64>, cost: f64) -> Result<i64> {
+        let path = file.path.to_string_lossy();
+        let (kind, size, reading, speech) = (file.kind.as_str(), file.size as i64, &file.reading, file.speech);
         if let Some(id) = existing {
             self.delete_segments(id)?;
             self.conn.execute(
                 "UPDATE files SET kind = ?2, size = ?3, modified = ?4, reading = ?5, speech = ?6, cost = ?7,
                  state = 'pending', error = NULL, info = NULL, indexed_at = NULL, transcript = NULL WHERE id = ?1",
-                params![id, kind, size, found.modified, reading, speech, cost],
+                params![id, kind, size, file.modified, reading, speech, cost],
             )?;
             Ok(id)
         } else {
             self.conn.execute(
                 "INSERT INTO files (path, kind, size, modified, reading, speech, cost)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![path, kind, size, found.modified, reading, speech, cost],
+                params![path, kind, size, file.modified, reading, speech, cost],
             )?;
             Ok(self.conn.last_insert_rowid())
         }
@@ -306,42 +467,12 @@ impl Store {
         delete_segments(&self.conn, file_id)
     }
 
-    /// Files waiting to be indexed, cheapest first (newest first among equals).
-    pub fn pending(&self, limit: usize) -> Result<Vec<FileRow>> {
-        let mut statement = self.conn.prepare(&format!(
-            "SELECT {FILE_COLUMNS} FROM files WHERE state = 'pending' ORDER BY cost, modified DESC LIMIT ?1"
-        ))?;
-        let rows = statement.query_map([limit.min(i64::MAX as usize) as i64], file_row)?;
-        Ok(rows.collect::<std::result::Result<_, _>>()?)
-    }
-
-    /// The work still queued: how many files, about how long reading them takes, and the `heaviest` dearest ones.
-    pub fn queued(&self, heaviest: usize) -> Result<Queued> {
-        let (files, seconds) =
-            self.conn.query_row("SELECT COUNT(*), TOTAL(cost) FROM files WHERE state = 'pending'", [], |row| {
-                Ok((row.get::<_, i64>(0)? as usize, row.get(1)?))
-            })?;
-        let mut statement = self.conn.prepare(
-            "SELECT path, kind, cost FROM files WHERE state = 'pending' ORDER BY cost DESC, modified DESC LIMIT ?1",
-        )?;
-        let heaviest = statement
-            .query_map([heaviest as i64], |row| {
-                Ok(Heavy {
-                    path: row.get(0)?,
-                    kind: Kind::parse(&row.get::<_, String>(1)?).unwrap_or(Kind::Plaintext),
-                    seconds: row.get(2)?,
-                })
-            })?
-            .collect::<std::result::Result<_, _>>()?;
-        Ok(Queued { files, seconds, heaviest })
-    }
-
     /// Writes a part of a big file's segments while the rest is still being read, so memory doesn't grow with the
     /// file, and a search finds that part meanwhile. The `first` part clears what an earlier read left. Nothing is
     /// written (false) when the file left the index or changed since it was handed out.
     pub fn write_part(&mut self, row: &FileRow, segments: &[NewSegment], first: bool) -> Result<bool> {
-        let folder = self.vectors();
-        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let folder = self.vectors_folder();
+        let tx = self.reader.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         if !as_handed_out(&tx, row)? {
             return Ok(false);
         }
@@ -386,8 +517,8 @@ impl Store {
         parts: bool,
         error: Option<&str>,
     ) -> Result<bool> {
-        let folder = self.vectors();
-        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let folder = self.vectors_folder();
+        let tx = self.reader.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         if !as_handed_out(&tx, row)? {
             return Ok(false);
         }
@@ -412,43 +543,6 @@ impl Store {
         Ok(true)
     }
 
-    /// Recordings and videos whose speech is still to be written down (or was, partway: `at`), newest first. The
-    /// second of each is where to go on from.
-    pub fn transcripts_pending(&self, limit: usize) -> Result<Vec<(FileRow, f64)>> {
-        let mut statement = self.conn.prepare(&format!(
-            "SELECT {FILE_COLUMNS}, transcript FROM files
-             WHERE {SPEECH} AND (transcript IS NULL OR transcript LIKE 'at:%') ORDER BY modified DESC LIMIT ?1",
-        ))?;
-        let rows = statement.query_map([limit as i64], |row| {
-            let progress: Option<String> = row.get(7)?;
-            Ok((
-                file_row(row)?,
-                progress.and_then(|p| p.strip_prefix("at:").and_then(|at| at.parse().ok())).unwrap_or(0.0),
-            ))
-        })?;
-        Ok(rows.collect::<std::result::Result<_, _>>()?)
-    }
-
-    /// How many recordings and videos have their speech written down, how many in all, and how much sound is left.
-    pub fn transcripts(&self) -> Result<Transcripts> {
-        Ok(self.conn.query_row(
-            &format!(
-                "SELECT COUNT(*) FILTER (WHERE transcript IS NOT NULL AND transcript NOT LIKE 'at:%'), COUNT(*),
-                     TOTAL(MAX(json_extract(info, '$.duration') - COALESCE(CAST(substr(transcript, 4) AS REAL), 0), 0))
-                         FILTER (WHERE transcript IS NULL OR transcript LIKE 'at:%')
-                 FROM files WHERE {SPEECH}"
-            ),
-            [],
-            |row| {
-                Ok(Transcripts {
-                    done: row.get::<_, i64>(0)? as usize,
-                    total: row.get::<_, i64>(1)? as usize,
-                    seconds: row.get(2)?,
-                })
-            },
-        )?)
-    }
-
     /// Writes down a stretch of what's said in a file (speech segments with their vectors), and how far that goes:
     /// `upto` seconds, or `done`. The first stretch (from 0) replaces what was written before, and takes the file's
     /// tags, which go into the keyword index with its name. Nothing is written (false) when the file changed since
@@ -461,8 +555,8 @@ impl Store {
         tags: Option<&serde_json::Value>,
         progress: &str,
     ) -> Result<bool> {
-        let folder = self.vectors();
-        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let folder = self.vectors_folder();
+        let tx = self.reader.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let current: Option<(String, i64, f64, String, Option<String>)> = tx
             .query_row("SELECT path, size, modified, state, info FROM files WHERE id = ?1", [row.id], |r| {
                 Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
@@ -522,59 +616,6 @@ impl Store {
         Ok(stale)
     }
 
-    /// A segment's whole text.
-    pub fn segment_text(&self, segment_id: i64) -> Result<Option<String>> {
-        Ok(self
-            .conn
-            .prepare_cached("SELECT text FROM segments WHERE id = ?1")?
-            .query_row([segment_id], |row| row.get(0))
-            .optional()?
-            .flatten())
-    }
-
-    /// A file's text: its text segments in order, at most about 8,000 characters.
-    pub fn file_text(&self, path: &str) -> Result<Option<String>> {
-        let mut statement = self.conn.prepare(
-            "SELECT s.text FROM segments s JOIN files f ON f.id = s.file_id
-             WHERE f.path = ?1 AND s.text IS NOT NULL AND s.text != '' ORDER BY s.loc, s.id",
-        )?;
-        let mut text = String::new();
-        for part in statement.query_map([path], |row| row.get::<_, String>(0))? {
-            if !text.is_empty() {
-                text.push_str("\n\n");
-            }
-            text.push_str(&part?);
-            if text.len() > 8000 {
-                break;
-            }
-        }
-        Ok((!text.is_empty()).then_some(text))
-    }
-
-    pub fn stats(&self) -> Result<Stats> {
-        let mut stats = Stats::default();
-        let mut statement =
-            self.conn.prepare("SELECT kind, state, COUNT(*), SUM(size) FROM files GROUP BY kind, state")?;
-        let mut rows = statement.query([])?;
-        while let Some(row) = rows.next()? {
-            let kind: String = row.get(0)?;
-            let state: String = row.get(1)?;
-            let count: i64 = row.get(2)?;
-            stats.files += count;
-            stats.bytes += row.get::<_, Option<i64>>(3)?.unwrap_or(0) as u64;
-            match state.as_str() {
-                "done" => stats.done += count,
-                "pending" => stats.pending += count,
-                _ => stats.failed += count,
-            }
-            *stats.by_kind.entry(kind).or_default() += count;
-        }
-        stats.segments = self.conn.query_row("SELECT COUNT(*) FROM segments", [], |row| row.get(0))?;
-        stats.vectors =
-            self.conn.query_row("SELECT COUNT(*) FROM segments WHERE row IS NOT NULL", [], |row| row.get(0))?;
-        Ok(stats)
-    }
-
     /// Makes sure the index's vectors come from the pipeline that makes new ones (`source`, see
     /// embedder::vector_source). When they don't, every file is queued again; true then.
     pub fn adopt_vector_source(&self, source: &str) -> Result<bool> {
@@ -616,14 +657,23 @@ impl Store {
     /// Writes the next generation of the partitions that are due one (vectors::compact), for when the indexer is idle.
     /// Returns their names.
     pub fn compact_vectors(&mut self) -> Result<Vec<String>> {
-        let folder = self.vectors();
-        vectors::compact(&mut self.conn, &folder)
+        let folder = self.vectors_folder();
+        vectors::compact(&mut self.reader.conn, &folder)
     }
 
     /// Removes the vector files no partition uses any more.
     pub fn tidy_vectors(&mut self) -> Result<()> {
-        let folder = self.vectors();
-        vectors::tidy(&mut self.conn, &folder)
+        let folder = self.vectors_folder();
+        vectors::tidy(&mut self.reader.conn, &folder)
+    }
+
+    /// Runs `work` in one transaction: its writes commit together, which is faster than one by one. An error rolls
+    /// them back.
+    pub fn batch<T>(&self, work: impl FnOnce() -> Result<T>) -> Result<T> {
+        let transaction = self.conn.unchecked_transaction()?;
+        let value = work()?;
+        transaction.commit()?;
+        Ok(value)
     }
 }
 
@@ -716,34 +766,33 @@ pub fn now() -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Settings;
+    use crate::index::testing::TempIndex;
 
-    /// A store in a folder of its own, removed when the test ends.
-    struct TempStore(Store, PathBuf);
+    /// A writer of an index in a folder of its own, removed when the test ends.
+    struct TempStore(Writer, TempIndex);
     impl TempStore {
         fn new(name: &str) -> Self {
-            let folder = std::env::temp_dir().join(format!("sift-it-test-{name}-{}", std::process::id()));
-            let _ = std::fs::remove_dir_all(&folder);
-            let path = folder.join("index.sqlite");
-            Self(Store::open(&path).unwrap(), path)
-        }
-    }
-    impl Drop for TempStore {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(self.1.parent().unwrap());
+            let folder = TempIndex::new(name);
+            Self(Writer::open(&folder.path).unwrap(), folder)
         }
     }
 
-    fn found(path: &str) -> Found {
-        let settings = Settings::BASE;
-        Found { path: PathBuf::from(path), kind: Kind::Plaintext, size: 10, modified: 100.0, settings }
+    fn found(path: &str) -> NewFile {
+        NewFile {
+            path: PathBuf::from(path),
+            kind: Kind::Plaintext,
+            size: 10,
+            modified: 100.0,
+            reading: "words".into(),
+            speech: false,
+        }
     }
 
     fn passage(text: &str) -> NewSegment {
         NewSegment { segment: Segment::Passage, loc: None, loc_end: None, text: Some(text.into()), vector: None }
     }
 
-    fn texts(store: &Store, id: i64) -> Vec<String> {
+    fn texts(store: &Reader, id: i64) -> Vec<String> {
         let mut statement = store.conn.prepare("SELECT text FROM segments WHERE file_id = ?1 ORDER BY id").unwrap();
         statement
             .query_map([id], |row| row.get::<_, Option<String>>(0))
@@ -772,11 +821,11 @@ mod tests {
         let id = store.0.queue(&found("/a/note.txt"), None, 0.0).unwrap();
         let job = store.0.pending(10).unwrap().remove(0);
         // The reading values changed while it was read: it's queued again, to be read the new way.
-        let shorter = Found { settings: Settings { passage_chars: 600, ..Settings::BASE }, ..found("/a/note.txt") };
+        let shorter = NewFile { reading: "shorter passages".into(), ..found("/a/note.txt") };
         store.0.queue(&shorter, Some(id), 0.0).unwrap();
         assert!(!store.0.finish_file(&job, &[], &serde_json::json!({}), false).unwrap());
         let again = store.0.pending(10).unwrap().remove(0);
-        assert_eq!(again.reading, shorter.reading());
+        assert_eq!(again.reading, shorter.reading);
         assert!(store.0.finish_file(&again, &[], &serde_json::json!({}), false).unwrap());
     }
 
@@ -817,7 +866,7 @@ mod tests {
             .unwrap();
         assert_eq!(named, 3);
         // A file that changed meanwhile isn't written to.
-        store.0.queue(&Found { size: 20, ..found("/a/book.txt") }, Some(id), 0.0).unwrap();
+        store.0.queue(&NewFile { size: 20, ..found("/a/book.txt") }, Some(id), 0.0).unwrap();
         assert!(!store.0.write_part(&job, &[passage("four")], false).unwrap());
     }
 
@@ -826,14 +875,14 @@ mod tests {
         let store = TempStore::new("version");
         store.0.queue(&found("/a/note.txt"), None, 0.0).unwrap();
         store.0.set_meta("schema", "3").unwrap();
-        let reopened = Store::open(&store.1).unwrap();
+        let reopened = Writer::open(&store.1.path).unwrap();
         assert_eq!(reopened.files().unwrap().len(), 0);
         assert_eq!(reopened.meta("schema").unwrap().as_deref(), Some(SCHEMA_VERSION.to_string().as_str()));
     }
 
     /// A file of `kind` with a passage for each of `vectors`, written.
-    fn add_vectors(store: &mut Store, path: &str, kind: Kind, vectors: &[Vec<f32>]) -> i64 {
-        let id = store.queue(&Found { kind, ..found(path) }, None, 0.0).unwrap();
+    fn add_vectors(store: &mut Writer, path: &str, kind: Kind, vectors: &[Vec<f32>]) -> i64 {
+        let id = store.queue(&NewFile { kind, ..found(path) }, None, 0.0).unwrap();
         let job = store.pending(100).unwrap().into_iter().find(|row| row.id == id).unwrap();
         let segments: Vec<NewSegment> =
             vectors.iter().map(|vector| NewSegment { vector: Some(vector.clone()), ..passage("words") }).collect();
@@ -842,7 +891,7 @@ mod tests {
     }
 
     /// A file's vectors, read from where its segments say they are.
-    fn stored(store: &Store, file: i64) -> Vec<Vec<f32>> {
+    fn stored(store: &Reader, file: i64) -> Vec<Vec<f32>> {
         let mut statement = store
             .conn
             .prepare(
@@ -857,19 +906,19 @@ mod tests {
             .into_iter()
             .map(|(name, row)| {
                 let row = row as usize;
-                let rows = vectors::read_rows(&store.conn, &store.vectors(), &name, vectors::Form::F32).unwrap();
+                let rows = vectors::read_rows(&store.conn, &store.vectors_folder(), &name, vectors::Form::F32).unwrap();
                 rows[row * bytes..(row + 1) * bytes].as_chunks::<4>().0.iter().map(|b| f32::from_le_bytes(*b)).collect()
             })
             .collect()
     }
 
-    fn partition(store: &Store, name: &str) -> vectors::Partition {
+    fn partition(store: &Reader, name: &str) -> vectors::Partition {
         vectors::partitions(&store.conn).unwrap().into_iter().find(|p| p.name == name).unwrap()
     }
 
     /// The files in the vectors folder.
-    fn files(store: &Store) -> Vec<String> {
-        let mut names: Vec<String> = std::fs::read_dir(store.vectors())
+    fn files(store: &Reader) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(store.vectors_folder())
             .unwrap()
             .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
             .collect();
@@ -917,7 +966,7 @@ mod tests {
         let mut store = TempStore::new("leftovers");
         add_vectors(&mut store.0, "/a/one.txt", Kind::Plaintext, &[vectors::unit(1)]);
         // A crash between appending and committing leaves rows nothing points at.
-        let path = partition(&store.0, "main").path(&store.0.vectors(), vectors::Form::F32);
+        let path = partition(&store.0, "main").path(&store.0.vectors_folder(), vectors::Form::F32);
         std::fs::OpenOptions::new().append(true).open(&path).unwrap().write_all(&[7; 1000]).unwrap();
         let two = add_vectors(&mut store.0, "/a/two.txt", Kind::Plaintext, &[vectors::unit(2)]);
         assert_eq!(stored(&store.0, two), [vectors::unit(2)]);

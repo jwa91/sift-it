@@ -1,6 +1,6 @@
 //! The vector store: every segment's vector in flat files beside the index, which the engine maps and scans in place.
-//! SQLite keeps, for each segment, the partition and row that hold its vector (store.rs); this keeps the files and the
-//! partitions table.
+//! The catalog keeps, for each segment, the partition and row that hold its vector (catalog.rs); this keeps the files
+//! and the partitions table.
 //!
 //!   vectors/<partition>.<generation>.f32      768 floats per row
 //!   vectors/<partition>.<generation>.f16      the same rows at half precision

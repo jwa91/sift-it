@@ -9,6 +9,7 @@ mod estimate;
 mod eval;
 mod finder;
 mod imaging;
+mod index;
 mod indexer;
 mod llama;
 mod mac;
@@ -23,9 +24,7 @@ mod selftest;
 mod serve;
 mod service;
 mod speech;
-mod store;
 mod term;
-mod vectors;
 
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
@@ -450,11 +449,11 @@ fn index(json: bool, reindex: bool) -> Result<()> {
         eprintln!("the background indexer (pid {pid}) is looking for changes now");
         return Ok(());
     }
-    let store = store::Store::open(&config::index_path())?;
+    let index = index::Writer::open(&config::index_path())?;
     if reindex {
-        store.requeue_all()?;
+        index.requeue_all()?;
     }
-    let mut indexer = indexer::Indexer::new(store, config::models_dir())?;
+    let mut indexer = indexer::Indexer::new(index, config::models_dir())?;
     let mut report = |event: indexer::Event| {
         if json {
             println!("{}", serde_json::to_string(&event).unwrap());
@@ -498,7 +497,7 @@ fn index(json: bool, reindex: bool) -> Result<()> {
         return Err(error);
     }
     // Then what's said in recordings and videos that's left, when the speech model is there.
-    if !indexer.store.transcripts_pending(1)?.is_empty() {
+    if !indexer.index.transcripts_pending(1)?.is_empty() {
         match helper.map_or_else(speech::Transcriber::start, Ok) {
             Ok(mut transcriber) => {
                 if !json {
@@ -509,7 +508,7 @@ fn index(json: bool, reindex: bool) -> Result<()> {
             Err(error) => eprintln!("what's said in recordings isn't written down: {error:#}"),
         }
     }
-    let written = indexer.store.compact_vectors()?;
+    let written = indexer.index.compact_vectors()?;
     if !written.is_empty() && !json {
         eprintln!("wrote the vectors again: {}", written.join(", "));
     }
@@ -542,12 +541,12 @@ fn search_once(q: &str, kinds: &[String], limit: usize, by: Option<Mode>, json: 
 }
 
 fn status(json: bool) -> Result<()> {
-    let store = store::Store::open(&config::index_path())?;
-    let stats = store.stats()?;
+    let index = index::Reader::open(&config::index_path())?;
+    let stats = index.stats()?;
     let config = Config::load()?;
     let models = models::status(&config::models_dir());
-    let transcripts = store.transcripts()?;
-    let queued = store.queued(5)?;
+    let transcripts = index.transcripts()?;
+    let queued = index.queued(5)?;
     let plan = indexer::Plan::of(&config.indexing);
     // The engine, if it's running (status doesn't start it): what it holds.
     let engine =
@@ -667,7 +666,7 @@ fn bench_search(count: usize) -> Result<()> {
     let topics: Vec<Vec<f32>> = (0..TOPICS).map(|_| near(&origin)).collect();
     let started = std::time::Instant::now();
     {
-        let mut store = store::Store::open(&path)?;
+        let mut index = index::Writer::open(&path)?;
         let per_file = 10;
         for file in 0..count.div_ceil(per_file) {
             let found = crawl::Found {
@@ -677,9 +676,9 @@ fn bench_search(count: usize) -> Result<()> {
                 modified: 0.0,
                 settings: config::Settings::BASE,
             };
-            let id = store.queue(&found, None, 0.0)?;
-            let segments: Vec<store::NewSegment> = (0..per_file)
-                .map(|n| store::NewSegment {
+            let id = index.queue(&found.new_file(), None, 0.0)?;
+            let segments: Vec<index::NewSegment> = (0..per_file)
+                .map(|n| index::NewSegment {
                     segment: protocol::Segment::Passage,
                     loc: Some(n as f64),
                     loc_end: None,
@@ -687,7 +686,7 @@ fn bench_search(count: usize) -> Result<()> {
                     vector: Some(near(&topics[(file * per_file + n) % TOPICS])),
                 })
                 .collect();
-            let row = store::FileRow {
+            let row = index::FileRow {
                 id,
                 path: found.path.clone(),
                 kind: Kind::Plaintext,
@@ -696,7 +695,7 @@ fn bench_search(count: usize) -> Result<()> {
                 reading: found.reading(),
                 speech: false,
             };
-            store.finish_file(&row, &segments, &serde_json::json!({}), false)?;
+            index.finish_file(&row, &segments, &serde_json::json!({}), false)?;
         }
     }
     println!("built an index of {count} vectors around {TOPICS} topics in {:.1} s", started.elapsed().as_secs_f64());

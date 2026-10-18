@@ -3,16 +3,15 @@
 //! the first of them.
 
 use super::rank::{Candidate, Ranked};
-use crate::store::Store;
+use crate::index::Reader;
 use anyhow::Result;
 use protocol::{Hit, Kind, Segment};
-use rusqlite::OptionalExtension;
 use std::path::Path;
 
 /// A ranked file as a result, at its segment where it opens (None when the segment is gone meanwhile).
-pub fn result(store: &Store, file: &Ranked, words: &[String]) -> Result<Option<Hit>> {
-    let chosen = choose(store, &file.segments, words)?;
-    let Some(mut hit) = hit(store, chosen.segment, words)? else { return Ok(None) };
+pub fn result(index: &Reader, file: &Ranked, words: &[String]) -> Result<Option<Hit>> {
+    let chosen = choose(index, &file.segments, words)?;
+    let Some(mut hit) = hit(index, chosen.segment, words)? else { return Ok(None) };
     hit.score = file.score;
     hit.lift = chosen.lift;
     hit.cosine = chosen.cosine;
@@ -23,13 +22,13 @@ pub fn result(store: &Store, file: &Ranked, words: &[String]) -> Result<Option<H
 }
 
 /// Of a file's segments that score about the same, the one with the most of the query's telling words.
-fn choose<'a>(store: &Store, segments: &'a [Candidate], words: &[String]) -> Result<&'a Candidate> {
+fn choose<'a>(index: &Reader, segments: &'a [Candidate], words: &[String]) -> Result<&'a Candidate> {
     if segments.len() == 1 || words.is_empty() {
         return Ok(&segments[0]);
     }
     let mut best = (&segments[0], 0usize);
     for candidate in segments {
-        let text = store.segment_text(candidate.segment)?.unwrap_or_default().to_lowercase();
+        let text = index.segment_text(candidate.segment)?.unwrap_or_default().to_lowercase();
         let found = words.iter().filter(|word| telling(word)).filter(|word| text.contains(word.as_str())).count();
         if found > best.1 || (found == best.1 && candidate.score > best.0.score) {
             best = (candidate, found);
@@ -45,46 +44,33 @@ fn telling(word: &str) -> bool {
 }
 
 /// A segment as a result, unscored: its file, its place, and its excerpt around the words.
-pub fn hit(store: &Store, segment_id: i64, words: &[String]) -> Result<Option<Hit>> {
-    let mut statement = store.conn.prepare_cached(
-        "SELECT f.path, f.kind, f.modified, f.size, f.info, s.segment, s.loc, s.loc_end, s.text
-         FROM segments s JOIN files f ON f.id = s.file_id WHERE s.id = ?1",
-    )?;
-    let hit: Option<Hit> = statement
-        .query_row([segment_id], |row| {
-            let path: String = row.get(0)?;
-            let text: Option<String> = row.get(8)?;
-            Ok(Hit {
-                name: Path::new(&path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
-                path,
-                kind: Kind::parse(&row.get::<_, String>(1)?).unwrap_or(Kind::Plaintext),
-                modified: row.get(2)?,
-                size: row.get::<_, i64>(3)? as u64,
-                info: row
-                    .get::<_, Option<String>>(4)?
-                    .and_then(|info| serde_json::from_str(&info).ok())
-                    .unwrap_or(serde_json::Value::Null),
-                segment: Segment::parse(&row.get::<_, String>(5)?).unwrap_or(Segment::Passage),
-                segment_id,
-                loc: row.get(6)?,
-                loc_end: row.get(7)?,
-                excerpt: text.map(|text| excerpt(&text, words)),
-                score: 0.0,
-                lift: None,
-                cosine: None,
-                meaning: false,
-                words: false,
-                strong: false,
-            })
-        })
-        .optional()?;
-    let Some(mut hit) = hit else { return Ok(None) };
+pub fn hit(index: &Reader, segment_id: i64, words: &[String]) -> Result<Option<Hit>> {
+    let Some(row) = index.segment(segment_id)? else { return Ok(None) };
+    let mut hit = Hit {
+        name: Path::new(&row.path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
+        path: row.path,
+        kind: row.kind,
+        modified: row.modified,
+        size: row.size,
+        info: row.info,
+        segment: row.segment,
+        segment_id,
+        loc: row.loc,
+        loc_end: row.loc_end,
+        excerpt: row.text.map(|text| excerpt(&text, words)),
+        score: 0.0,
+        lift: None,
+        cosine: None,
+        meaning: false,
+        words: false,
+        strong: false,
+    };
     // In text and code, open at the first line with one of the query's telling words, not at the passage's top.
     // (A notebook's places are cells, not lines.)
     let notebook = hit.path.ends_with(".ipynb");
     if let (Segment::Passage, Kind::Code | Kind::Plaintext, Some(first), false) =
         (hit.segment, hit.kind, hit.loc, notebook)
-        && let Some(offset) = focus_line(store, segment_id, words)?
+        && let Some(offset) = focus_line(index, segment_id, words)?
     {
         hit.loc = Some(first + offset as f64);
     }
@@ -92,12 +78,12 @@ pub fn hit(store: &Store, segment_id: i64, words: &[String]) -> Result<Option<Hi
 }
 
 /// The first line of a segment (from 0) with one of the telling words.
-fn focus_line(store: &Store, segment_id: i64, words: &[String]) -> Result<Option<usize>> {
+fn focus_line(index: &Reader, segment_id: i64, words: &[String]) -> Result<Option<usize>> {
     let telling: Vec<&String> = words.iter().filter(|word| telling(word)).collect();
     if telling.is_empty() {
         return Ok(None);
     }
-    Ok(store.segment_text(segment_id)?.and_then(|text| {
+    Ok(index.segment_text(segment_id)?.and_then(|text| {
         text.lines().position(|line| {
             let line = line.to_lowercase();
             telling.iter().any(|word| line.contains(word.as_str()))
