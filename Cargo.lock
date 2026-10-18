@@ -1328,7 +1328,9 @@ version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13a380031deed8e99db00065c45937da434ca987c034e13b87e4441f9e4090be"
 dependencies = [
+ "block2",
  "objc2",
+ "objc2-core-media",
  "objc2-foundation",
 ]
 
@@ -2332,6 +2334,7 @@ version = "0.2.0"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
+ "block2",
  "clap",
  "crossterm",
  "image",
@@ -2339,6 +2342,7 @@ dependencies = [
  "notify",
  "objc2",
  "objc2-av-foundation",
+ "objc2-avf-audio",
  "objc2-core-foundation",
  "objc2-core-graphics",
  "objc2-core-media",

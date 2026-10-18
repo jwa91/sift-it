@@ -1,7 +1,7 @@
 //! Recordings and videos through AVFoundation, which plays every format macOS can.
 //!
-//! Sound is decoded to 16 kHz mono, and video sampled every few seconds. Which windows of sound and which frames
-//! become segments is the segmenters' to say (ingest/segment).
+//! Sound is decoded to 16 kHz mono, the same on every read (docs/audio-decoding.md), and video sampled every few
+//! seconds. Which windows of sound and which frames become segments is the segmenters' to say (ingest/segment).
 //!
 //! It uses AVFoundation's synchronous calls (deprecated for the async ones): they block a worker thread, which is what
 //! a reader wants.
@@ -17,10 +17,11 @@ use objc2_av_foundation::{
 };
 use objc2_core_foundation::{CGFloat, CGSize};
 use objc2_core_graphics::CGImage;
-use objc2_core_media::{CMTime, CMTimeRange, kCMTimePositiveInfinity};
+use objc2_core_media::{CMTime, CMTimeRange};
 use objc2_foundation::{NSArray, NSDictionary, NSNumber, NSString, NSURL};
 use std::path::Path;
-use std::ptr::NonNull;
+
+mod resample;
 
 /// Video is sampled at least this often, and at most this many times per file.
 const FRAME_STEP: f64 = 2.0;
@@ -42,11 +43,11 @@ pub fn has_audio(path: &Path) -> bool {
     unsafe { asset(path).tracksWithMediaType(audio).count() > 0 }
 }
 
-/// Linear PCM, 32-bit float, mono, 16 kHz: AVFoundation decodes, mixes the channels down and resamples.
+/// Linear PCM, 32-bit float, mono, at the file's own rate: AVFoundation decodes and mixes the channels down, and
+/// resample.rs takes it to 16 kHz.
 fn pcm_settings() -> Retained<NSDictionary<NSString, AnyObject>> {
     let keys = [
         "AVFormatIDKey",
-        "AVSampleRateKey",
         "AVNumberOfChannelsKey",
         "AVLinearPCMBitDepthKey",
         "AVLinearPCMIsFloatKey",
@@ -56,7 +57,6 @@ fn pcm_settings() -> Retained<NSDictionary<NSString, AnyObject>> {
     .map(NSString::from_str);
     let values = [
         NSNumber::new_u32(u32::from_be_bytes(*b"lpcm")),
-        NSNumber::new_f64(AUDIO_RATE as f64),
         NSNumber::new_u32(1),
         NSNumber::new_u32(32),
         NSNumber::new_bool(true),
@@ -85,10 +85,15 @@ fn read_pass(
 ) -> Result<Pass> {
     let reader = unsafe { AVAssetReader::assetReaderWithAsset_error(asset) }
         .map_err(|error| anyhow!("AVFoundation: {}", describe(&error)))?;
-    if start_seconds > 0.0 {
-        let start = unsafe { CMTime::with_seconds(start_seconds, AUDIO_RATE as i32) };
-        unsafe { reader.setTimeRange(CMTimeRange { start, duration: kCMTimePositiveInfinity }) };
+    // To the end of the tracks: the asset's estimated duration can leave out AAC's last partial buffer.
+    let end = tracks.iter().map(|track| unsafe { track.timeRange().end().seconds() }).fold(0.0, f64::max);
+    let seconds = (end - start_seconds).max(0.0);
+    if seconds == 0.0 {
+        return Ok(Pass::Finished);
     }
+    let start = unsafe { CMTime::with_seconds(start_seconds, AUDIO_RATE as i32) };
+    let duration = unsafe { CMTime::with_seconds(seconds, 1_000_000_000) };
+    unsafe { reader.setTimeRange(CMTimeRange { start, duration }) };
     let settings = pcm_settings();
     // One track is read as it is; several are mixed down.
     let output: Retained<AVAssetReaderOutput> = if tracks.count() == 1 {
@@ -112,31 +117,13 @@ fn read_pass(
             bail!("AVFoundation can't read it: {reason}");
         }
     }
-    let mut samples: Vec<f32> = Vec::new();
-    loop {
-        let more = autoreleasepool(|_| -> Result<bool> {
-            let Some(sample) = (unsafe { output.copyNextSampleBuffer() }) else { return Ok(false) };
-            let Some(block) = (unsafe { sample.data_buffer() }) else { return Ok(true) };
-            let count = unsafe { block.data_length() } / 4;
-            samples.resize(count, 0.0);
-            let destination = NonNull::new(samples.as_mut_ptr()).unwrap().cast();
-            let status = unsafe { block.copy_data_bytes(0, count * 4, destination) };
-            if status != 0 {
-                bail!("couldn't copy decoded sound ({status})");
-            }
-            Ok(true)
-        })?;
-        if !samples.is_empty() {
-            on_samples(&samples)?;
-            samples.clear();
-        }
-        if !more {
-            break;
-        }
-    }
+    resample::read(&output, seconds, on_samples)?;
     if unsafe { reader.status() } == AVAssetReaderStatus::Failed {
         let reason = unsafe { reader.error() }.map(|e| describe(&e)).unwrap_or_default();
         return Ok(Pass::Failed(reason));
+    }
+    if unsafe { reader.status() } != AVAssetReaderStatus::Completed {
+        bail!("AVFoundation stopped before the sound ended");
     }
     Ok(Pass::Finished)
 }
@@ -314,4 +301,49 @@ pub fn read_video(
         time += step;
     }
     Ok(VideoInfo { duration, width: size.width.abs() as u32, height: size.height.abs() as u32 })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn decode(path: &Path, from: f64, slow: bool) -> (f64, Vec<u32>) {
+        let mut bits = Vec::new();
+        let seconds = read_samples(path, from, &mut |samples| {
+            bits.extend(samples.iter().map(|sample| sample.to_bits()));
+            if slow {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            Ok(())
+        })
+        .unwrap();
+        (seconds, bits)
+    }
+
+    #[test]
+    fn compressed_sound_is_independent_of_reader_timing() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/audio");
+        for (name, frames) in [("priming.mp3", 123716), ("partial.m4a", 19760)] {
+            let path = root.join(name);
+            let expected = decode(&path, 0.0, false);
+            assert_eq!(expected.1.len(), frames, "{name}");
+            for run in 0..20 {
+                let actual = decode(&path, 0.0, run % 2 == 0);
+                assert_eq!(actual.0, expected.0, "{name}, run {run}: duration");
+                assert_eq!(actual.1.len(), expected.1.len(), "{name}, run {run}: length");
+                let difference = actual.1.iter().zip(&expected.1).position(|(a, b)| a != b);
+                assert_eq!(difference, None, "{name}, run {run}: first different sample");
+            }
+            let (end, tail) = decode(&path, 1.0, false);
+            assert_eq!(end, expected.0, "{name}, resumed duration");
+            assert_eq!(tail.len() + AUDIO_RATE, frames, "{name}, resumed length");
+        }
+    }
+
+    #[test]
+    fn sound_consumer_errors_stop_decoding() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/audio/priming.mp3");
+        let error = read_samples(&path, 0.0, &mut |_| bail!("consumer stopped")).unwrap_err();
+        assert_eq!(error.to_string(), "consumer stopped");
+    }
 }

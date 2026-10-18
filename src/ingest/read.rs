@@ -44,7 +44,9 @@ pub type Sink<'a> = &'a mut dyn FnMut(Piece) -> Result<()>;
 /// it couldn't: the files it read (or failed to) are read again, and the index keeps what it has meanwhile.
 pub fn version(kind: Kind) -> u32 {
     match kind {
-        Kind::Plaintext | Kind::Document | Kind::Image | Kind::Screenshot | Kind::Audio | Kind::Video | Kind::Code => 1,
+        Kind::Plaintext | Kind::Document | Kind::Image | Kind::Screenshot | Kind::Code => 1,
+        // 2: sound decoded the same on every read (docs/audio-decoding.md).
+        Kind::Audio | Kind::Video => 2,
     }
 }
 
