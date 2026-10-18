@@ -1,9 +1,10 @@
 # Design: indexing and search
 
-Status: agreed on 2026-10-17. Steps 1 to 12 of the build order are built: the config, with depth in place of size and
+Status: agreed on 2026-10-17. Steps 1 to 13 of the build order are built: the config, with depth in place of size and
 length limits, the engine, the vector store, search in each of its forms with `auto` choosing, indexing's memory budget,
 the protocol, the query path in its stages, the index behind one facade, extracting apart from segmenting, the ingest
-path in its stages, the plans for memory in one module, and the code laid out as docs/architecture.md says. It replaces the earlier design with several indexes.
+path in its stages, the plans for memory in one module, the code laid out as docs/architecture.md says, and text cut by
+its form. It replaces the earlier design with several indexes.
 
 After step 5 the plan changed. The first release is that core, its code structured as docs/architecture.md describes,
 and text cut by its form. Projects, text detection on every image, the measured ranking values, metadata and result
@@ -253,24 +254,38 @@ built-in defaults. A PDF is a document. Screenshot isn't a kind but a metadata f
 | audio | none beyond depth |
 | video | shot change, keep every n seconds, sound on or off (no sound, no speech). Frames take the image settings |
 | document | images inside the document. Scanned pages get OCR |
-| plaintext | passage size |
+| plaintext | passage size, cut at headings |
 | code | passage size, cut at definitions |
-| structured | passage size, ignore patterns for keys and columns |
+| structured | passage size, cut at records |
 
 Vision's text detection runs on every image, video frames included. An image with text gets `text_tokens` and full OCR.
 One without gets `tokens` and no OCR. A photo of a whiteboard gets the higher budget, a screenshot of a holiday photo
 the lower one. OCR has no on/off setting, and skipping recognition on images without text keeps it affordable for a
 photo library.
 
-Structured files are csv, tsv, json, jsonl, yaml and toml. They're cut like markdown into whole records, rows or
-top-level keys that fit the passage size. Ignore patterns for keys and columns, like `**.id` or `created_at`, keep
-identifiers and timestamps out of the passages.
+Text is cut where its form breaks (`src/ingest/segment/`). A part between two breaks that fits the maximum stays
+whole, and a longer one is cut at its next weaker breaks. Parts next to each other are joined up to the passage size,
+but the pieces of a part cut up aren't joined with what's around it, and they're embedded with the part's first line
+(its heading, its signature, its key) before them, so the model sees what they belong to.
+
+Prose is cut at paragraphs, and Markdown and plain text also at their headings (`#`, or underlined): a section that
+fits the maximum is one passage, and a heading stays with what follows it. Text before the first heading, and text
+with none, is paragraphs joined up to the passage size, as before. A paragraph longer than the maximum is cut into
+pieces of about the passage size at line ends, sentences or spaces.
 
 Code is cut by its structure, not at a fixed length: a top-level definition (a function, a class, an impl block) is
 a passage, with the comments and attributes right above it. Indentation finds them, so it works for any language
 without a parser: a line at the outer level starts a definition, and a closing bracket there ends one. Small
 definitions next to each other are joined up to the passage size. One larger than the maximum is cut at its inner
-definitions, then at blank lines. A notebook cell is cut the same way.
+definitions, then at blank lines. A notebook cell is cut the same way, and a Markdown cell as Markdown.
+
+Structured files are csv, tsv, json, jsonl, yaml and toml. CSV and TSV are cut at their rows, each passage embedded
+with the header row; JSON at the records of its outer list or the keys of its outer object, whatever its line breaks;
+JSON Lines at its lines; YAML at its top-level keys and items; TOML at its tables. A record too long for the maximum is
+cut at its own keys and items. Records are read one by one: their passage size is 120 characters, so only short ones
+(a setting's line) go together. A passage of several records blurs what each says: on the testbed, a journal entry
+asked for by meaning comes first this way, and second in passages of 600. Lock files (`package-lock.json`,
+`pnpm-lock.yaml`) are never read, and in a code project structured files are read only with the code.
 
 ### Example
 
@@ -387,12 +402,11 @@ Built:
     lane of its own (`src/ingest/`).
 11. Resources: the plans for search and ingest in one module (`src/resources.rs`).
 12. Crates where they pay: llama.cpp's binding (`crates/llama`), and the modules as docs/architecture.md lays them out.
-
-Next, for the first release:
-
 13. Text cut by its form: prose and Markdown at paragraphs and headings, code at its definitions, structured files
-    (csv, tsv, json, jsonl, yaml, toml) at whole rows, records or top-level keys. Eval questions for code and
-    structured files measure it.
+    (csv, tsv, json, jsonl, yaml, toml) at their rows, records or keys. Eval questions for Markdown, code and
+    structured files measure it: 53 of 54 at the top, where 49 were before.
+
+Next: the first release.
 
 Later, when a measurement shows it helps:
 
@@ -401,6 +415,8 @@ Later, when a measurement shows it helps:
 - The measured prior median and length penalty.
 - Metadata: the table, its weight in ranking, operators.
 - Result units and chapters.
+- Ignore patterns for keys and columns in structured files, like `**.id` or `created_at`, to keep identifiers and
+  timestamps out of the passages.
 
 ## Open questions
 

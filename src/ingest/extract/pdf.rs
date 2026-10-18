@@ -3,6 +3,7 @@
 
 use crate::adapters::macos;
 use crate::ingest::Content;
+use crate::ingest::segment::passages::Form;
 use anyhow::{Result, bail};
 use objc2::AllocAnyThread;
 use objc2::rc::autoreleasepool;
@@ -43,7 +44,7 @@ pub fn read(path: &Path, content: &mut Content) -> Result<serde_json::Value> {
             content.scan(number, &page, &text)?;
             continue;
         }
-        content.text(Segment::Page, number as f64, &text)?;
+        content.text(Segment::Page, number as f64, &text, Form::Prose)?;
     }
     Ok(serde_json::json!({ "pages": pages, "scanned_pages": scanned }))
 }

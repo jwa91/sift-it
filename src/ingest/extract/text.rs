@@ -1,4 +1,4 @@
-//! Text files and code: their lines, decoded as they come (UTF-8, UTF-16 with a byte order mark, or Latin-1), so a
+//! Text files, code and records: their lines, decoded as they come (UTF-8, UTF-16 with a byte order mark, or Latin-1), so a
 //! file of any size streams.
 
 use crate::ingest::Content;
@@ -110,17 +110,17 @@ impl<R: Read> Lines<R> {
 mod tests {
     use super::*;
     use crate::config::Settings;
-    use crate::ingest::segment::prose::{Cutter, Passage, passages};
+    use crate::ingest::segment::passages::{Form, Passage, Text, passages};
 
-    /// What streaming `bytes` through Lines and a Cutter makes.
+    /// What streaming `bytes` through Lines and the cutting makes.
     fn streamed(bytes: &[u8]) -> Vec<Passage> {
         let mut lines = Lines::new(bytes).unwrap();
-        let mut cutter = Cutter::new(&Settings::BASE);
+        let mut text = Text::new(Form::Markdown, &Settings::BASE);
         while let Some((line, ended)) = lines.next_line().unwrap() {
-            cutter.push(&line, ended);
+            text.line(&line, ended);
         }
-        cutter.finish();
-        cutter.ready().collect()
+        text.finish();
+        text.ready().collect()
     }
 
     #[test]
@@ -130,7 +130,7 @@ mod tests {
             "a sentence of words. ".repeat(300),
             "é".repeat(LINE_PART as usize) // one line longer than a part, split inside a character
         );
-        let whole = passages(&text.replace('\r', ""), &Settings::BASE);
+        let whole = passages(&text.replace('\r', ""), Form::Markdown, &Settings::BASE);
         assert_eq!(streamed(text.as_bytes()), whole);
         let utf16: Vec<u8> = [0xFF, 0xFE].into_iter().chain(text.encode_utf16().flat_map(u16::to_le_bytes)).collect();
         assert_eq!(streamed(&utf16), whole);

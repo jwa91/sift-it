@@ -77,6 +77,9 @@ const PROJECT_MARKERS: &[&str] = &[
     "Makefile",
 ];
 
+/// Lock files: what a package manager wrote down, never what someone searches for.
+const LOCK_FILES: &[&str] = &["package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml"];
+
 /// Secrets: never read, whatever folder they're in.
 const SECRET_EXTENSIONS: &[&str] = &[
     "pem",
@@ -265,10 +268,10 @@ fn consider(path: &Path, name: &str, config: &Config, in_project: bool) -> Optio
         return None;
     }
     let kind = config.sources.kind_of(&extension)?;
-    // In a code project only pictures, PDFs and recordings are read, unless code is: its text files and documents
-    // are READMEs, fixtures and data, which would bury everything else.
-    let prose = kind == Kind::Plaintext || (kind == Kind::Document && !is_pdf(path));
-    if (kind == Kind::Code || (in_project && prose)) && !config.sources.code {
+    // In a code project only pictures, PDFs and recordings are read, unless code is: its text files, records and
+    // documents are READMEs, configuration, fixtures and data, which would bury everything else.
+    let text = matches!(kind, Kind::Plaintext | Kind::Structured) || (kind == Kind::Document && !is_pdf(path));
+    if ((kind == Kind::Code || (in_project && text)) && !config.sources.code) || LOCK_FILES.contains(&name) {
         return None;
     }
     let metadata = std::fs::metadata(path).ok()?;

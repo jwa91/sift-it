@@ -21,6 +21,8 @@ recordings, videos, and code. DigUp also includes a CLI.
 - **Raycast integration:** a separate TypeScript extension uses `sift-it serve` for searches and previews.
 - **Ranking changes:** account for file length and give ordinary words less weight than numbers, code searches,
   and quoted phrases.
+- **Text cut by its form:** Markdown at its headings, code at its definitions, and records (CSV, JSON, YAML, TOML)
+  one by one, so a passage is about one thing, and a piece of a long one is read with its heading or signature.
 - **Speech, written down:** what's said in recordings and videos is transcribed in the background, so a word or a name
   spoken in a podcast is found at its moment. With enough memory this runs beside the reading; otherwise only after
   everything else is searchable.

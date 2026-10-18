@@ -1,7 +1,8 @@
-//! Jupyter notebooks: their cells' source, each at its cell number (from 1). Their outputs (pictures, tables) are
-//! passed over as they stream by.
+//! Jupyter notebooks: their cells' source, each at its cell number (from 1), code cut as code and Markdown as Markdown.
+//! Their outputs (pictures, tables) are passed over as they stream by.
 
 use crate::ingest::Content;
+use crate::ingest::segment::passages::Form;
 use anyhow::{Context, Result};
 use protocol::Segment;
 use serde::Deserialize;
@@ -15,6 +16,8 @@ struct Notebook {
 
 #[derive(Deserialize)]
 struct Cell {
+    #[serde(default)]
+    cell_type: String,
     #[serde(default)]
     source: Source,
 }
@@ -40,7 +43,12 @@ pub fn read(path: &Path, content: &mut Content) -> Result<serde_json::Value> {
         if source.trim().is_empty() {
             continue;
         }
-        content.text(Segment::Passage, (index + 1) as f64, &source)?;
+        let form = match cell.cell_type.as_str() {
+            "markdown" => Form::Markdown,
+            "code" => Form::Code,
+            _ => Form::Prose,
+        };
+        content.text(Segment::Passage, (index + 1) as f64, &source, form)?;
     }
     Ok(serde_json::json!({ "cells": notebook.cells.len(), "passages": content.passages }))
 }

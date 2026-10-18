@@ -6,6 +6,7 @@ use super::rank::{Candidate, Ranked};
 use crate::index::Reader;
 use anyhow::Result;
 use protocol::{Hit, Kind, Segment};
+use std::cmp::Reverse;
 use std::path::Path;
 
 /// A ranked file as a result, at its segment where it opens (None when the segment is gone meanwhile).
@@ -65,10 +66,10 @@ pub fn hit(index: &Reader, segment_id: i64, words: &[String]) -> Result<Option<H
         words: false,
         strong: false,
     };
-    // In text and code, open at the first line with one of the query's telling words, not at the passage's top.
-    // (A notebook's places are cells, not lines.)
+    // In text, records and code, open at the first line with one of the query's telling words, not at the passage's
+    // top. (A notebook's places are cells, not lines.)
     let notebook = hit.path.ends_with(".ipynb");
-    if let (Segment::Passage, Kind::Code | Kind::Plaintext, Some(first), false) =
+    if let (Segment::Passage, Kind::Code | Kind::Structured | Kind::Plaintext, Some(first), false) =
         (hit.segment, hit.kind, hit.loc, notebook)
         && let Some(offset) = focus_line(index, segment_id, words)?
     {
@@ -77,17 +78,20 @@ pub fn hit(index: &Reader, segment_id: i64, words: &[String]) -> Result<Option<H
     Ok(Some(hit))
 }
 
-/// The first line of a segment (from 0) with one of the telling words.
+/// The line of a segment (from 0) with the most of the telling words, the first of those: in a passage of several
+/// sections or records, the one the query is about.
 fn focus_line(index: &Reader, segment_id: i64, words: &[String]) -> Result<Option<usize>> {
     let telling: Vec<&String> = words.iter().filter(|word| telling(word)).collect();
     if telling.is_empty() {
         return Ok(None);
     }
     Ok(index.segment_text(segment_id)?.and_then(|text| {
-        text.lines().position(|line| {
+        let found = |line: &str| {
             let line = line.to_lowercase();
-            telling.iter().any(|word| line.contains(word.as_str()))
-        })
+            telling.iter().filter(|word| line.contains(word.as_str())).count()
+        };
+        let lines = text.lines().enumerate().map(|(at, line)| (found(line), Reverse(at)));
+        lines.filter(|(found, _)| *found > 0).max().map(|(_, Reverse(at))| at)
     }))
 }
 

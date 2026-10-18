@@ -32,8 +32,8 @@ pub fn cost(file: &Found) -> f64 {
     let size = file.size as f64;
     match file.kind {
         // Plain text: about 4 bytes a token.
-        Kind::Plaintext | Kind::Code if embeds => size / 4.0 / TOKENS_PER_SECOND,
-        Kind::Plaintext | Kind::Code => size / CUT_BYTES_PER_SECOND,
+        Kind::Plaintext | Kind::Structured | Kind::Code if embeds => size / 4.0 / TOKENS_PER_SECOND,
+        Kind::Plaintext | Kind::Structured | Kind::Code => size / CUT_BYTES_PER_SECOND,
         Kind::Document if is_pdf(&file.path) => {
             let pages = objc2::rc::autoreleasepool(|_| macos::pdf_pages(&file.path)).unwrap_or(1) as f64;
             pages * if embeds { PDF_PAGE } else { PDF_PAGE_TEXT }

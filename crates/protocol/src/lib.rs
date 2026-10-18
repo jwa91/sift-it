@@ -322,6 +322,8 @@ pub enum Kind {
     Plaintext,
     /// PDFs and rich documents: rtf, doc, docx, odt, html, webarchive.
     Document,
+    /// Records: csv, tsv, json, jsonl, yaml, toml.
+    Structured,
     Image,
     /// A picture of a screen: read for its text as well as what it shows.
     Screenshot,
@@ -332,13 +334,22 @@ pub enum Kind {
 }
 
 impl Kind {
-    pub const ALL: [Kind; 7] =
-        [Kind::Plaintext, Kind::Document, Kind::Image, Kind::Screenshot, Kind::Audio, Kind::Video, Kind::Code];
+    pub const ALL: [Kind; 8] = [
+        Kind::Plaintext,
+        Kind::Document,
+        Kind::Structured,
+        Kind::Image,
+        Kind::Screenshot,
+        Kind::Audio,
+        Kind::Video,
+        Kind::Code,
+    ];
 
     pub fn as_str(self) -> &'static str {
         match self {
             Kind::Plaintext => "plaintext",
             Kind::Document => "document",
+            Kind::Structured => "structured",
             Kind::Image => "image",
             Kind::Screenshot => "screenshot",
             Kind::Audio => "audio",

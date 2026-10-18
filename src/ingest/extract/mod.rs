@@ -22,7 +22,7 @@ use std::path::Path;
 pub fn read(path: &Path, kind: Kind, settings: &Settings, content: &mut Content) -> Result<serde_json::Value> {
     match kind {
         Kind::Code if path.extension().is_some_and(|e| e == "ipynb") => notebook::read(path, content),
-        Kind::Plaintext | Kind::Code => text::read(path, content),
+        Kind::Plaintext | Kind::Structured | Kind::Code => text::read(path, content),
         Kind::Document if is_pdf(path) => pdf::read(path, content),
         Kind::Document => document::read(path, content),
         Kind::Image | Kind::Screenshot => image::read(path, kind, settings, content),

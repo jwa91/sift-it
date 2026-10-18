@@ -3,8 +3,8 @@
 //! it what it decodes, by its type.
 
 use super::segment::frames::Shots;
+use super::segment::passages::{self, Form, Text};
 use super::segment::pictures;
-use super::segment::prose::{self, Cutter};
 use super::segment::sound::Windows;
 use super::{extract, prepare};
 use crate::config::{Depth, Settings};
@@ -44,9 +44,9 @@ pub type Sink<'a> = &'a mut dyn FnMut(Piece) -> Result<()>;
 /// it couldn't: the files it read (or failed to) are read again, and the index keeps what it has meanwhile.
 pub fn version(kind: Kind) -> u32 {
     match kind {
-        Kind::Plaintext | Kind::Document | Kind::Image | Kind::Screenshot | Kind::Code => 1,
-        // 2: sound decoded the same on every read (docs/audio-decoding.md).
-        Kind::Audio | Kind::Video => 2,
+        Kind::Structured | Kind::Image => 1,
+        // 2: sound decoded the same on every read (docs/audio-decoding.md), and text cut by its form.
+        Kind::Plaintext | Kind::Document | Kind::Screenshot | Kind::Audio | Kind::Video | Kind::Code => 2,
     }
 }
 
@@ -54,13 +54,13 @@ pub fn version(kind: Kind) -> u32 {
 /// the file is read again. Whether what's said in it is written down isn't in it: that comes after reading.
 pub fn fingerprint(path: &Path, kind: Kind, settings: &Settings) -> String {
     let words = match kind {
-        Kind::Plaintext | Kind::Code | Kind::Document | Kind::Screenshot => {
+        Kind::Plaintext | Kind::Structured | Kind::Code | Kind::Document | Kind::Screenshot => {
             json!([settings.passage_chars, settings.max_passage_chars])
         }
         Kind::Image | Kind::Audio | Kind::Video => json!(null),
     };
     let meaning = settings.embeds().then(|| match kind {
-        Kind::Plaintext | Kind::Code | Kind::Audio => json!(null),
+        Kind::Plaintext | Kind::Structured | Kind::Code | Kind::Audio => json!(null),
         Kind::Document if is_pdf(path) => json!(settings.text_tokens),
         Kind::Document => json!(null),
         Kind::Image => json!(settings.tokens),
@@ -89,7 +89,8 @@ pub struct Content<'a> {
     /// What the file's text is embedded with (prepare::title).
     title: String,
     sink: Sink<'a>,
-    prose: Cutter,
+    /// The file's lines, cut by their form.
+    lines: Text,
     sound: Windows,
     shots: Shots,
     /// Passages of text, windows of sound and frames sent.
@@ -104,7 +105,7 @@ impl<'a> Content<'a> {
             settings,
             title: prepare::title(path, kind),
             sink,
-            prose: Cutter::new(settings),
+            lines: Text::new(Form::of(kind, path), settings),
             sound: Windows::default(),
             shots: Shots::new(settings.shot_change, settings.keep_every_s),
             passages: 0,
@@ -115,31 +116,31 @@ impl<'a> Content<'a> {
 
     /// A line of text, or a part of a long one (`ended`: the line ends with it). A passage's place is its lines.
     pub fn line(&mut self, text: &str, ended: bool) -> Result<()> {
-        self.prose.push(text, ended);
+        self.lines.line(text, ended);
         self.send_cut()
     }
 
     /// The end of the lines. Returns how many there were.
     pub fn end_lines(&mut self) -> Result<usize> {
-        self.prose.finish();
+        self.lines.finish();
         self.send_cut()?;
-        Ok(self.prose.lines())
+        Ok(self.lines.lines())
     }
 
     fn send_cut(&mut self) -> Result<()> {
-        let cut: Vec<prose::Passage> = self.prose.ready().collect();
+        let cut: Vec<passages::Passage> = self.lines.ready().collect();
         for passage in cut {
             let (first, last) = (passage.first_line as f64, passage.last_line as f64);
-            self.passage(Segment::Passage, Some(first), Some(last), passage.text)?;
+            self.passage(Segment::Passage, Some(first), Some(last), passage)?;
         }
         Ok(())
     }
 
-    /// A whole text at one place in the file (a page's text layer, a notebook cell's source): its passages keep that
-    /// place.
-    pub fn text(&mut self, segment: Segment, loc: f64, text: &str) -> Result<()> {
-        for passage in prose::passages(text, self.settings) {
-            self.passage(segment, Some(loc), None, passage.text)?;
+    /// A whole text of a form at one place in the file (a page's text layer, a notebook cell's source): its passages
+    /// keep that place.
+    pub fn text(&mut self, segment: Segment, loc: f64, text: &str, form: Form) -> Result<()> {
+        for passage in passages::passages(text, form, self.settings) {
+            self.passage(segment, Some(loc), None, passage)?;
         }
         Ok(())
     }
@@ -196,16 +197,22 @@ impl<'a> Content<'a> {
 
     /// Text read off a picture, as passages.
     fn read_off(&mut self, text: &str, loc: Option<f64>) -> Result<()> {
-        for passage in prose::passages(text, self.settings) {
-            self.passage(Segment::Ocr, loc, None, passage.text)?;
+        for passage in passages::passages(text, Form::Prose, self.settings) {
+            self.passage(Segment::Ocr, loc, None, passage)?;
         }
         Ok(())
     }
 
-    fn passage(&mut self, segment: Segment, loc: Option<f64>, loc_end: Option<f64>, text: String) -> Result<()> {
+    fn passage(
+        &mut self,
+        segment: Segment,
+        loc: Option<f64>,
+        loc_end: Option<f64>,
+        passage: passages::Passage,
+    ) -> Result<()> {
         self.passages += 1;
-        let payload = prepare::text(&self.title, &text, self.settings);
-        (self.sink)(Piece { segment, loc, loc_end, text: Some(text), payload })
+        let payload = prepare::text(&self.title, &passage.context, &passage.text, self.settings);
+        (self.sink)(Piece { segment, loc, loc_end, text: Some(passage.text), payload })
     }
 
     fn send(&mut self, segment: Segment, loc: Option<f64>, text: Option<String>, payload: Payload) -> Result<()> {

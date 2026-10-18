@@ -95,6 +95,181 @@ EOF
   for day in $(seq 1 60); do echo "2024-06-$(printf %02d $(( (day % 30) + 1 ))),$((15 + day % 9)).$((day % 10)),$((40 + day % 30)),$((1000 + day % 25))"; done
 } > "$OUT/Documents/readings.txt"
 
+# A handbook in sections: each question's answer sits under its own heading.
+cat > "$OUT/Documents/handbook.md" <<'EOF'
+# Team handbook
+
+What everyone at Northwind Studio needs to know, from the first day on. Ask Mira (operations) when something here is
+unclear or out of date.
+
+## Your first week
+
+On your first morning you get a laptop, a building pass and accounts for email, chat and the design tools. Your buddy
+walks you through the projects that are running and sits with you for the first five days. By Friday you will have
+shipped one small change to a real project, however small: the point is to go through the whole process once. Lunch
+on the first day is on the studio.
+
+## Expenses
+
+Pay for work costs yourself and claim them back. Upload a photo of the receipt in the finance app within 30 days of
+the purchase; claims older than that can't be paid. Train travel is always second class, flights need approval from
+your lead before you book. Meals while travelling are covered up to 25 euros a day. Software subscriptions go through
+Mira, not through your own card, so the studio keeps track of the licences it pays for.
+
+## Time off
+
+Everyone gets 25 vacation days a year, on top of the public holidays, and the days build up from your first month.
+Request time off at least two weeks ahead in the planning tool, and check with your project lead when you plan more
+than a week. Up to five unused days carry over to the next year; the rest lapse on 1 April. When you're ill, tell your
+lead before 10:00 and take the time you need: sick days don't come out of your vacation.
+
+## Working from home
+
+You can work from home up to three days a week, as long as your project allows it. Core hours are 10:00 to 15:00,
+when everyone is reachable on chat and video. Tuesdays are studio days for the whole team, for the weekly review and
+lunch together. The studio pays a one-off 300 euros towards a desk and chair for your home office.
+
+## Equipment
+
+Laptops are replaced every three years, or sooner when one breaks down. Monitors, keyboards and headphones can be
+ordered through Mira. Everything stays the studio's property: when you leave, it comes back on your last day.
+EOF
+
+# Records: contacts in a table, books in a list, a garden by plant, a journal by line, a backup's settings by table.
+cat > "$OUT/Documents/contacts.csv" <<'EOF'
+name,role,company,city,phone
+Anneke Bos,general practitioner,Huisartsenpraktijk Oost,Utrecht,030-2511840
+Joris Visser,dog walker,Uitlaatservice Visser,Amersfoort,06-46133770
+Fatima El Idrissi,translator,Vertaalbureau De Linde,Utrecht,030-2714462
+Kees Jansen,plumber,Jansen Installatietechniek,Zeist,030-6952210
+Sanne de Graaf,piano teacher,,Utrecht,06-41873320
+Thomas Mulder,electrician,Mulder Elektra,Bilthoven,030-2283391
+Lotte Smit,veterinarian,Dierenkliniek Wittevrouwen,Utrecht,030-2717705
+Ruben Koster,locksmith,Slotenmakerij Koster,Utrecht,06-29384751
+Inge Willems,physiotherapist,Fysio Lombok,Utrecht,030-2943318
+Noor Hendriks,hairdresser,Salon Noor,Utrecht,030-2366019
+Daan Peters,car mechanic,Garage Peters,Nieuwegein,030-6033542
+Eva Bakker,notary,Bakker Notarissen,Utrecht,030-2318890
+Lucas de Wit,gardener,Groen & Wit,De Bilt,06-51209977
+Yara Meijer,babysitter,,Utrecht,06-38817264
+EOF
+
+cat > "$OUT/Documents/books.json" <<'EOF'
+[
+  {
+    "title": "Pride and Prejudice",
+    "author": "Jane Austen",
+    "year": 1813,
+    "summary": "Elizabeth Bennet and the proud Mr Darcy misjudge each other until a letter changes her mind."
+  },
+  {
+    "title": "Frankenstein",
+    "author": "Mary Shelley",
+    "year": 1818,
+    "summary": "A young scientist gives life to a creature stitched together from corpses, then abandons it."
+  },
+  {
+    "title": "Moby-Dick",
+    "author": "Herman Melville",
+    "year": 1851,
+    "summary": "Ishmael signs on to the Pequod, whose captain, Ahab, hunts the white whale that took his leg."
+  },
+  {
+    "title": "Crime and Punishment",
+    "author": "Fyodor Dostoevsky",
+    "year": 1866,
+    "summary": "A poor student in St Petersburg kills a pawnbroker and is undone by his own conscience."
+  },
+  {
+    "title": "Twenty Thousand Leagues Under the Seas",
+    "author": "Jules Verne",
+    "year": 1870,
+    "summary": "Three castaways travel the oceans as prisoners aboard Nemo's electric submarine, the Nautilus."
+  },
+  {
+    "title": "Mrs Dalloway",
+    "author": "Virginia Woolf",
+    "year": 1925,
+    "summary": "One June day in London as Clarissa prepares a party, and a shell-shocked veteran unravels."
+  },
+  {
+    "title": "Things Fall Apart",
+    "author": "Chinua Achebe",
+    "year": 1958,
+    "summary": "Okonkwo, a proud wrestler and farmer in an Igbo village, sees his world change as missionaries arrive."
+  },
+  {
+    "title": "One Hundred Years of Solitude",
+    "author": "Gabriel García Márquez",
+    "year": 1967,
+    "summary": "Seven generations of the Buendía family in the town of Macondo, where the miraculous is ordinary."
+  }
+]
+EOF
+
+cat > "$OUT/Documents/garden.yaml" <<'EOF'
+# The garden and the windowsills: what grows where, and how to keep it alive.
+basil:
+  spot: kitchen windowsill
+  water: when the top of the soil feels dry
+  sun: at least six hours
+  notes: pinch off the flowers so it keeps making leaves
+chillies:
+  spot: greenhouse, on the top shelf
+  water: every other morning in summer, at the roots, never on the leaves
+  feed: liquid feed once a week after the first flowers open
+  notes: the plants get heavy, tie them to a stick
+lavender:
+  spot: along the garden path
+  water: rarely, it likes dry soil
+  sun: full
+  notes: cut back by a third after flowering in August
+mint:
+  spot: its own pot, or it takes over
+  water: keep the soil moist
+  sun: half shade is fine
+strawberries:
+  spot: hanging basket by the door
+  water: daily when fruiting
+  notes: net them against the blackbirds
+EOF
+
+cat > "$OUT/Documents/journal.jsonl" <<'EOF'
+{"date": "2024-01-04", "entry": "First run of the year along the canal, slow but nice. Bought new running shoes."}
+{"date": "2024-01-11", "entry": "Painted the hallway pale green. Two coats, the old colour kept showing through."}
+{"date": "2024-01-19", "entry": "The boiler broke down overnight: no heating, no hot water. An engineer comes Monday."}
+{"date": "2024-01-22", "entry": "Engineer replaced the pump in the boiler, warm again. Invoice to follow."}
+{"date": "2024-02-02", "entry": "Dinner with Sam and Lea, made the lentil soup. Lea is moving to Lisbon in spring."}
+{"date": "2024-02-14", "entry": "Started reading Things Fall Apart for the book club."}
+{"date": "2024-02-27", "entry": "Rijksmuseum with my sister. The Night Watch is being restored behind glass."}
+{"date": "2024-03-09", "entry": "Sowed the basil and chilli seeds on the windowsill."}
+EOF
+
+cat > "$OUT/Documents/backup.toml" <<'EOF'
+# Settings for the home server's backup.
+name = "home-server"
+target = "/Volumes/Backup"
+
+[sources]
+folders = ["~/Pictures", "~/Documents", "~/Music"]
+skip = ["*.tmp", "Caches"]
+
+[schedule]
+every = "night"
+at = "03:00"
+wake_the_mac = true
+
+[retention]
+# How long old backups are kept before they are deleted.
+daily = 7
+weekly = 4
+monthly = 12
+
+[notify]
+email = "me@example.com"
+on = ["failure"]
+EOF
+
 # A lease over four pages; the clause about pets is on page 3. Form feeds make the page breaks.
 {
   echo "RESIDENTIAL LEASE AGREEMENT"; echo
@@ -271,6 +446,214 @@ cells = [
         "counts = df['label'].value_counts()\n", "counts.plot(kind='bar', title='Examples per class')"]},
 ]
 json.dump({"cells": cells, "metadata": {}, "nbformat": 4, "nbformat_minor": 5}, open(sys.argv[1], "w"), indent=1)
+EOF2
+
+# A class longer than a passage may be, cut at its methods; a long function with blank lines in it, kept whole.
+cat > "$P/src/forecast.py" <<'EOF2'
+"""Forecasts from the station readings: daily summaries, and which way the weather is going."""
+
+from dataclasses import dataclass
+from statistics import mean
+
+
+@dataclass
+class Reading:
+    day: str
+    high_c: float
+    low_c: float
+    rain_mm: float
+    wind_kmh: float
+
+
+class Week:
+    """Seven days of readings from one station, and what they say."""
+
+    def __init__(self, station, readings):
+        self.station = station
+        self.readings = sorted(readings, key=lambda reading: reading.day)
+
+    def average_high(self):
+        """The mean of the daily maximum temperatures, in degrees Celsius."""
+        return mean(reading.high_c for reading in self.readings)
+
+    def warmest_day(self):
+        return max(self.readings, key=lambda reading: reading.high_c).day
+
+    def frost_nights(self):
+        """The nights the temperature dropped below zero."""
+        return [reading.day for reading in self.readings if reading.low_c < 0]
+
+    def total_rain(self):
+        return sum(reading.rain_mm for reading in self.readings)
+
+    def wet_days(self, threshold_mm=2.0):
+        """Days with enough rain to need an umbrella."""
+        return [reading.day for reading in self.readings if reading.rain_mm >= threshold_mm]
+
+    def windiest_day(self):
+        return max(self.readings, key=lambda reading: reading.wind_kmh).day
+
+    def trend(self):
+        """Whether it's getting warmer or colder: the slope of a straight line through the highs, in degrees a day."""
+        days = len(self.readings)
+        x_mean = (days - 1) / 2
+        y_mean = self.average_high()
+        top = sum((x - x_mean) * (reading.high_c - y_mean) for x, reading in enumerate(self.readings))
+        bottom = sum((x - x_mean) ** 2 for x in range(days))
+        return top / bottom if bottom else 0.0
+
+    def summary(self):
+        """One line for the dashboard."""
+        direction = "warming" if self.trend() > 0 else "cooling"
+        return (
+            f"{self.station}: average high {self.average_high():.1f} °C, {len(self.frost_nights())} frost nights, "
+            f"{self.total_rain():.0f} mm of rain, {direction}"
+        )
+
+
+def load_week(station, rows):
+    """A week from CSV rows of day, high, low, rain and wind."""
+    readings = [Reading(day, float(high), float(low), float(rain), float(wind)) for day, high, low, rain, wind in rows]
+    return Week(station, readings)
+EOF2
+cat > "$P/src/sync.ts" <<'EOF2'
+import { getJson } from "./http";
+
+export interface Reading {
+  station: string;
+  takenAt: number;
+  celsius: number;
+}
+
+const delivered = new Set<string>();
+
+/**
+ * Sends the readings that were saved while the device was offline, oldest first. One the server already has (the
+ * same station and time) is dropped; when the server can't be reached, the rest wait for the next try.
+ */
+export async function sendSavedReadings(saved: Reading[], post: (reading: Reading) => Promise<Response>) {
+  const oldestFirst = [...saved].sort((a, b) => a.takenAt - b.takenAt);
+  let sent = 0;
+
+  for (const reading of oldestFirst) {
+    const key = `${reading.station}@${reading.takenAt}`;
+    if (delivered.has(key)) {
+      saved.splice(saved.indexOf(reading), 1);
+      continue;
+    }
+
+    let response: Response;
+    try {
+      response = await post(reading);
+    } catch {
+      // Offline again: keep the rest for later.
+      break;
+    }
+
+    if (response.status === 409 || response.ok) {
+      // 409: the server had it already.
+      delivered.add(key);
+      saved.splice(saved.indexOf(reading), 1);
+      sent += 1;
+    }
+  }
+
+  return sent;
+}
+
+export async function latestReading(station: string): Promise<Reading> {
+  return (await getJson(`/stations/${station}/latest`)) as Reading;
+}
+EOF2
+
+# A second project: a map's tile cache in Rust, its impl block longer than a passage may be.
+T="$OUT/Projects/tiles"
+mkdir -p "$T/.git" "$T/src"
+printf '[package]\nname = "tiles"\nversion = "0.1.0"\nedition = "2024"\n' > "$T/Cargo.toml"
+cat > "$T/src/cache.rs" <<'EOF2'
+//! A cache of map tiles in memory, so panning back and forth doesn't fetch them again.
+
+use std::collections::HashMap;
+
+/// A tile's place: zoom level, column and row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct TileId {
+    pub zoom: u8,
+    pub x: u32,
+    pub y: u32,
+}
+
+/// Holds up to `capacity` tiles; when it's full, the tile used longest ago makes room.
+pub struct TileCache {
+    capacity: usize,
+    tiles: HashMap<TileId, (Vec<u8>, u64)>,
+    clock: u64,
+    hits: u64,
+    misses: u64,
+}
+
+impl TileCache {
+    pub fn new(capacity: usize) -> Self {
+        Self { capacity, tiles: HashMap::new(), clock: 0, hits: 0, misses: 0 }
+    }
+
+    /// The tile's image, if it's here; it counts as just used.
+    pub fn get(&mut self, id: TileId) -> Option<&[u8]> {
+        self.clock += 1;
+        match self.tiles.get_mut(&id) {
+            Some((image, used)) => {
+                *used = self.clock;
+                self.hits += 1;
+                Some(image)
+            }
+            None => {
+                self.misses += 1;
+                None
+            }
+        }
+    }
+
+    /// Keeps a tile. When the cache is full, the least recently used tile is dropped first.
+    pub fn insert(&mut self, id: TileId, image: Vec<u8>) {
+        self.clock += 1;
+        if self.tiles.len() >= self.capacity && !self.tiles.contains_key(&id) {
+            let oldest = self.tiles.iter().min_by_key(|(_, (_, used))| *used).map(|(id, _)| *id);
+            if let Some(oldest) = oldest {
+                self.tiles.remove(&oldest);
+            }
+        }
+        self.tiles.insert(id, (image, self.clock));
+    }
+
+    /// The tiles around one, at the same zoom, that aren't here yet: what to fetch before the user pans to them.
+    pub fn missing_neighbours(&self, id: TileId) -> Vec<TileId> {
+        let mut missing = Vec::new();
+        for dx in -1i64..=1 {
+            for dy in -1i64..=1 {
+                let (x, y) = (id.x as i64 + dx, id.y as i64 + dy);
+                if (dx, dy) == (0, 0) || x < 0 || y < 0 {
+                    continue;
+                }
+                let neighbour = TileId { zoom: id.zoom, x: x as u32, y: y as u32 };
+                if !self.tiles.contains_key(&neighbour) {
+                    missing.push(neighbour);
+                }
+            }
+        }
+        missing
+    }
+
+    /// Drops every tile of a zoom level, after the map's style changed there.
+    pub fn clear_zoom(&mut self, zoom: u8) {
+        self.tiles.retain(|id, _| id.zoom != zoom);
+    }
+
+    /// The share of lookups that found their tile.
+    pub fn hit_rate(&self) -> f64 {
+        let lookups = self.hits + self.misses;
+        if lookups == 0 { 0.0 } else { self.hits as f64 / lookups as f64 }
+    }
+}
 EOF2
 
 cp "$TMP/pictures.txt" "$OUT/.pictures.txt"   # which IMG is which (hidden: not indexed)

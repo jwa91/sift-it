@@ -37,7 +37,7 @@ use std::time::{Duration, Instant};
 /// The kinds Tab steps through.
 const FILTERS: [(&str, &[Kind]); 6] = [
     ("everything", &[]),
-    ("documents", &[Kind::Plaintext, Kind::Document]),
+    ("documents", &[Kind::Plaintext, Kind::Document, Kind::Structured]),
     ("pictures", &[Kind::Image, Kind::Screenshot]),
     ("recordings", &[Kind::Audio]),
     ("videos", &[Kind::Video]),
@@ -408,7 +408,7 @@ fn make_preview(client: &mut Client, hit: &Hit, folder: &Path) -> Preview {
                 preview.text = segment_text(client);
             }
         }
-        Kind::Plaintext | Kind::Document | Kind::Code => preview.text = segment_text(client),
+        Kind::Plaintext | Kind::Document | Kind::Structured | Kind::Code => preview.text = segment_text(client),
     }
     preview
 }
@@ -470,6 +470,7 @@ fn kind_label(kind: Kind) -> &'static str {
     match kind {
         Kind::Plaintext => "text",
         Kind::Document => "document",
+        Kind::Structured => "data",
         Kind::Image => "picture",
         Kind::Screenshot => "screenshot",
         Kind::Audio => "recording",
@@ -592,7 +593,7 @@ fn draw_preview(frame: &mut Frame, app: &mut App, area: Rect) {
         frame.render_widget(Paragraph::new(lines), wave_area);
     }
     let text = match (&shown.text, hit.kind) {
-        (Some(text), Kind::Code) => code_text(text, hit.loc, &words),
+        (Some(text), Kind::Code | Kind::Structured) => code_text(text, hit.loc, &words),
         (Some(text), _) => prose_text(text, &words),
         (None, Kind::Video) if hit.segment == Segment::Frame => Text::styled(
             hit.loc.map(|t| format!("seen at {}", timestamp(t))).unwrap_or_default(),
@@ -724,7 +725,9 @@ fn open_label(hit: &Hit) -> String {
         (Kind::Document, Some(page)) if page > 1.0 && crawl::is_pdf(Path::new(&hit.path)) => {
             format!("open at page {page}")
         }
-        (Kind::Plaintext | Kind::Code, Some(line)) if line > 1.0 && !hit.path.ends_with(".ipynb") => {
+        (Kind::Plaintext | Kind::Structured | Kind::Code, Some(line))
+            if line > 1.0 && !hit.path.ends_with(".ipynb") =>
+        {
             format!("open at line {line}")
         }
         _ => "open".into(),

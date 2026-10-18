@@ -63,7 +63,10 @@ These family rules are Go-specific and don't apply here:
   way dependencies point. New code follows its rules, and a step on its way changes no behavior.
 - `make check` before every commit. `make selftest` after anything that could change vectors (llama.cpp, the model
   files, image sizing, prompts): every vector must keep cosine ≥ 0.999 with tests/reference.
-- `make eval` (testbed + evals/evals.json) after anything that touches ranking or readers. Currently 44/44 top-1, 9 of
-  10 at the right place: "penguin in the film" opens where the narration names it, a few seconds before it's shown.
+- `make eval` (testbed + evals/evals.json) after anything that touches ranking or readers. Currently 53/54 top-1, 18
+  of 19 at the right place, 0/4 false alarms. "someone who can fix a leaking tap" finds contacts.csv first, but too
+  weakly to show it (a table's many rows lower its score); "penguin in the film" opens where the narration names it,
+  a few seconds before it's shown.
 - The index records which pipeline made its vectors (`embedder::vector_source`); bump its version when vectors change
-  on purpose, and indexes re-embed.
+  on purpose, and indexes re-embed. When a kind is read or cut differently, bump its `ingest::read::version` instead:
+  only its files are read again.

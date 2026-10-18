@@ -124,7 +124,8 @@ src/
     discover/            what's new or changed (mod.rs), crawling (crawl.rs), what reading costs (cost.rs)
     read.rs              extract, segment and prepare, joined
     extract/             per container: text, document, notebook, pdf, image, audio, video, speech
-    segment/             per content type: prose, pictures, frames, sound, speech
+    segment/             per content type: text by its form (passages; prose, code, records), pictures, frames,
+                         sound, speech
     prepare.rs           prompts, fitting pictures, sound
     embed.rs             the embedding stage, the model's owner
     write.rs             files put together and written
@@ -172,8 +173,9 @@ that touches segmenting also keeps every segment, and so every fingerprint and v
 6. **Resources:** the plans in one module.
 7. **Crates:** `sift-it-llama`, and the modules in the tree above.
 
-Segmenting text by its form lands where it belongs next: prose and Markdown at paragraphs and headings, code at
-its definitions, records at whole rows, records or top-level keys.
+Segmenting text by its form landed where it belongs: one cutter (`segment/passages.rs`) and a form per content type
+saying where its text breaks: prose and Markdown at paragraphs and headings, code at its definitions, records at their
+rows, records or keys.
 
 ## Not done on purpose
 

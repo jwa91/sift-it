@@ -184,7 +184,7 @@ fn body(terminal: &Terminal, hit: &Hit, words: &[String], client: &mut Client) -
                 _ => {}
             }
         }
-        Kind::Code => {
+        Kind::Code | Kind::Structured => {
             let text = client.segment_text(hit.segment_id).ok().flatten().or_else(|| hit.excerpt.clone());
             for code_line in text.map(|t| code_lines(terminal, &t, hit.loc, words, width)).unwrap_or_default() {
                 push_line(&mut out, &code_line);

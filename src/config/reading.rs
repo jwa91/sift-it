@@ -96,6 +96,9 @@ impl Default for Reading {
             kinds: BTreeMap::from([
                 (Kind::Plaintext, Values::default()),
                 (Kind::Document, Values::default()),
+                // Records are read one by one (about 30 tokens): a passage of several blurs what each says. Short
+                // ones, like a setting's line, go together.
+                (Kind::Structured, Values { passage_chars: Some(120), ..Default::default() }),
                 (Kind::Image, Values::default()),
                 (Kind::Audio, Values::default()),
                 (Kind::Video, Values { tokens: Some(70), ..Default::default() }),

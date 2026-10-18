@@ -45,6 +45,7 @@ impl Default for Sources {
                         "dng", "cr2", "cr3", "nef", "arw", "raf", "orf", "rw2",
                     ]),
                 ),
+                (Kind::Structured, types(&["csv", "tsv", "json", "jsonl", "ndjson", "yaml", "yml", "toml"])),
                 (Kind::Audio, types(&["mp3", "m4a", "aac", "wav", "aif", "aiff", "flac", "caf", "ogg", "opus", "m4b"])),
                 (Kind::Video, types(&["mp4", "mov", "m4v", "avi", "mkv", "webm", "3gp"])),
                 (

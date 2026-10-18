@@ -168,7 +168,8 @@ Ends `sift-it serve` once the requests before it are answered: `{"id": 10, "ok":
 | `modified`, `size` | seconds since 1970, bytes |
 | `info` | what the reader found out: pages, duration, size in pixels, tags |
 
-**Kind:** `plaintext`, `document`, `image`, `screenshot`, `audio`, `video`, `code`.
+**Kind:** `plaintext`, `document`, `structured` (csv, tsv, json, jsonl, yaml, toml), `image`, `screenshot`, `audio`,
+`video`, `code`.
 
 **Segment:** `passage`, `page`, `picture`, `ocr`, `sound`, `frame`, `speech`.
 

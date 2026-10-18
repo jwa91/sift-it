@@ -90,7 +90,9 @@ pub fn open(place: &Place, reveal: bool) -> Result<String> {
             run("open", &["-a".as_ref(), "Preview".as_ref(), place.path.as_os_str()])?;
             Ok(format!("Opened {name}; the match is on page {page} (Preview's Go to Page needs Accessibility access)"))
         }
-        (Kind::Plaintext | Kind::Code, Some(line)) if !place.path.to_string_lossy().ends_with(".ipynb") => {
+        (Kind::Plaintext | Kind::Structured | Kind::Code, Some(line))
+            if !place.path.to_string_lossy().ends_with(".ipynb") =>
+        {
             let line = line.max(1.0) as usize;
             if let Some(editor) = open_in_editor(&place.path, line)? {
                 return Ok(format!("Opened {name} at line {line} in {editor}"));

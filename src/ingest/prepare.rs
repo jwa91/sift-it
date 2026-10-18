@@ -36,12 +36,16 @@ fn project_path(path: &Path) -> String {
     path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()
 }
 
-/// A text, in its document prompt, at a depth that embeds; else it goes into the keyword index only.
-pub fn text(title: &str, text: &str, settings: &Settings) -> Payload {
-    if settings.embeds() && !mostly_numbers(text) {
+/// A text, after its context (what it was cut from: a heading, a signature, a header row), in its document prompt, at
+/// a depth that embeds; else it goes into the keyword index only.
+pub fn text(title: &str, context: &str, text: &str, settings: &Settings) -> Payload {
+    if !settings.embeds() || mostly_numbers(text) {
+        return Payload::None;
+    }
+    if context.is_empty() {
         Payload::Text(embedder::prompts::document(Some(title), text))
     } else {
-        Payload::None
+        Payload::Text(embedder::prompts::document(Some(title), &format!("{context}\n{text}")))
     }
 }
 
