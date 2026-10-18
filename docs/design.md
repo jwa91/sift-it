@@ -1,8 +1,8 @@
 # Design: indexing and search
 
-Status: agreed on 2026-10-17. Steps 1 to 6 of the build order are built: the config, with depth in place of size and
+Status: agreed on 2026-10-17. Steps 1 to 7 of the build order are built: the config, with depth in place of size and
 length limits, the engine, the vector store, search in each of its forms with `auto` choosing, indexing's memory budget,
-and the protocol. It replaces the earlier design with several indexes.
+the protocol, and the query path in its stages. It replaces the earlier design with several indexes.
 
 After step 5 the plan changed. The first release is that core, its code structured as docs/architecture.md describes,
 and text cut by its form. Projects, text detection on every image, the measured ranking values, metadata and result
@@ -296,7 +296,7 @@ definitions, then at blank lines. A notebook cell is cut the same way.
 }
 ```
 
-The `sources.kinds` and `ranking` sections are trimmed. `ranking` holds the constants at the top of `src/search.rs`,
+The `sources.kinds` and `ranking` sections are trimmed. `ranking` holds the values the ranking uses (`src/query/rank.rs`),
 except the two that sift-it measures.
 
 These stay in the code: the models' facts (768 dimensions, 16 kHz sound, 30-second windows, patch size), SQLite busy
@@ -378,10 +378,10 @@ Built:
 5. `indexing.memory_mb`, with embedding and transcription side by side when it allows.
 6. The protocol: its types in a crate of their own (`crates/protocol`), documented (`docs/protocol.md`). The engine
    reports the indexer's progress and takes settings and folders through it.
+7. The query path: understand, retrieve, rank and present as modules (`src/query/`), ranking pure.
 
-Next, for the first release. Steps 7 to 12 change no behavior (docs/architecture.md, "The way there"):
+Next, for the first release. Steps 8 to 12 change no behavior (docs/architecture.md, "The way there"):
 
-7. The query path: understand, retrieve, rank and present as modules, ranking pure.
 8. The index: one facade with a writer and readers over the catalog and the vectors.
 9. Extracting apart from segmenting.
 10. The ingest path: stages with owners, a scheduler, and speech as an extractor on a lane of its own.

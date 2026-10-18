@@ -17,8 +17,8 @@ mod open;
 mod power;
 mod present;
 mod preview;
+mod query;
 mod readers;
-mod search;
 mod selftest;
 mod serve;
 mod service;
@@ -393,7 +393,7 @@ fn run(cli: Cli) -> Result<()> {
             let files = embedder::ModelFiles::in_folder(&config::models_dir())?;
             let mut encoder = embedder::Embedder::load(&files, true)?;
             for query in queries {
-                let prompt = search::prompt(&Search { q: query, ..Default::default() });
+                let prompt = query::Query::of(&Search { q: query, ..Default::default() }).prompt();
                 println!("{}", serde_json::to_string(&encoder.embed_text(&prompt)?)?);
             }
             Ok(())
@@ -707,7 +707,7 @@ fn bench_search(count: usize) -> Result<()> {
     for scan in [protocol::Scan::ExactF32, protocol::Scan::ExactF16, protocol::Scan::Sketch] {
         let started = std::time::Instant::now();
         let search = config::Search { vectors: scan, ..Default::default() };
-        let mut searcher = search::Searcher::open(&path, config::Ranking::default(), search)?;
+        let mut searcher = query::Searcher::open(&path, config::Ranking::default(), search)?;
         searcher.load_vectors()?;
         let loaded = ms(started);
         let started = std::time::Instant::now();

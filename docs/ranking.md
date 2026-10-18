@@ -3,7 +3,7 @@
 The testbed (`make testbed`) is small and every file in it is short, so it can't show what long files and ordinary
 words do to the ranking. The demo folder can: `../sift-it-data/make-demo.sh` plus six more Project Gutenberg books, 522 files
 in all, eight books among photos, sounds, recordings, music, videos, PDFs and notes (6,500 vectors). Two problems
-showed up there, both fixed in `src/search.rs`.
+showed up there, both fixed in the ranking (`src/query/rank.rs`).
 
 ## Reproducing
 

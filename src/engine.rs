@@ -15,7 +15,7 @@
 
 use crate::config::{self, Config};
 use crate::embedder::{Embedder, ModelFiles};
-use crate::search::{Searcher, Vectors};
+use crate::query::{Query, Searcher, Vectors};
 use crate::store::Store;
 use anyhow::{Context, Result, bail};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
@@ -235,7 +235,7 @@ impl Core {
         // The searcher first: an index that isn't there yet is an error, with nothing loaded for it.
         self.with_searcher(|_| Ok(()))?;
         let vector = match mode {
-            Mode::Meaning => self.query_vector(&crate::search::prompt(request), request.wait),
+            Mode::Meaning => self.query_vector(&Query::of(request).prompt(), request.wait),
             Mode::Words => None,
         };
         self.with_searcher(|searcher| searcher.search(request, vector.as_deref()))
@@ -249,7 +249,7 @@ impl Core {
         work: impl FnOnce(&mut Searcher, Option<&[f32]>) -> Result<T>,
     ) -> Result<T> {
         self.with_searcher(|_| Ok(()))?;
-        let vector = self.query_vector(&crate::search::prompt(request), true);
+        let vector = self.query_vector(&Query::of(request).prompt(), true);
         self.with_searcher(|searcher| work(searcher, vector.as_deref()))
     }
 

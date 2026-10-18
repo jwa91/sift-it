@@ -526,7 +526,8 @@ impl Store {
     pub fn segment_text(&self, segment_id: i64) -> Result<Option<String>> {
         Ok(self
             .conn
-            .query_row("SELECT text FROM segments WHERE id = ?1", [segment_id], |row| row.get(0))
+            .prepare_cached("SELECT text FROM segments WHERE id = ?1")?
+            .query_row([segment_id], |row| row.get(0))
             .optional()?
             .flatten())
     }

@@ -12,7 +12,7 @@ use crate::config;
 use crate::crawl;
 use crate::open::{self, Place, timestamp};
 use crate::preview;
-use crate::search::words_of;
+use crate::query::understand::words_of;
 use crate::term;
 use anyhow::Result;
 use protocol::Kind;

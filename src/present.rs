@@ -6,7 +6,7 @@ use crate::client::Client;
 use crate::config;
 use crate::open::timestamp;
 use crate::preview;
-use crate::search::words_of;
+use crate::query::understand::words_of;
 use crate::term::{self, Images, Terminal};
 use anyhow::Result;
 use protocol::Kind;

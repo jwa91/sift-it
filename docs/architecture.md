@@ -157,8 +157,8 @@ transcribe/              sift-it-transcribe
 | Speech | `speech.rs`, `transcribe/` | a stage of its own beside the pipeline, not an extractor |
 | Write and schedule | `indexer.rs`, `daemon.rs` | ordering, the pipeline, speech and storage in one loop |
 | Index | `store.rs`, `vectors.rs` | its rules are spread over both |
-| Query | `search.rs` | retrieving and ranking in one function |
-| Resources | `config.rs`, `indexer::Plan`, `search.rs`, `mac.rs` | four places |
+| Query | `query/` | done (step 2 below) |
+| Resources | `config.rs`, `indexer::Plan`, `query/mod.rs`, `mac.rs` | four places |
 | Protocol | `crates/protocol`, `docs/protocol.md` | done (step 1 below) |
 | Clients | `finder.rs`, `term.rs`, `present.rs`, `preview.rs`, `open.rs`, `serve.rs` | beside the core, in one namespace |
 

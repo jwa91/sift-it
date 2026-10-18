@@ -570,7 +570,7 @@ impl<'de> Deserialize<'de> for Reading {
     }
 }
 
-/// How results rank (see search.rs for what each value does to them).
+/// How results rank (see query/rank.rs for what each value does to them).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Ranking {
