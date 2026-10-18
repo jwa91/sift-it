@@ -5,9 +5,9 @@ use anyhow::Result;
 use embedder::{AUDIO_RATE, AUDIO_WINDOW};
 
 /// Windows start this far apart: 30 s windows overlapping by 10 s.
-pub const HOP: usize = 20 * AUDIO_RATE;
+const HOP: usize = 20 * AUDIO_RATE;
 /// A window quieter than this (RMS, full scale 1.0, about −50 dBFS) is silence.
-const SILENCE: f32 = 0.003;
+pub const SILENCE: f32 = 0.003;
 
 /// Cuts sound into windows as it's decoded, handing each over as (start in seconds, samples).
 #[derive(Default)]
@@ -51,7 +51,8 @@ fn window(start: usize, samples: &[f32], on: &mut dyn FnMut(f64, &[f32]) -> Resu
     on(start as f64 / AUDIO_RATE as f64, samples)
 }
 
-fn rms(samples: &[f32]) -> f32 {
+/// How loud sound is: its root mean square.
+pub fn rms(samples: &[f32]) -> f32 {
     if samples.is_empty() {
         return 0.0;
     }

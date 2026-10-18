@@ -1,5 +1,5 @@
 //! Frames: which of a video's sampled frames are kept. A frame starts a new shot when its thumbnail (the 16 × 9 grey
-//! one mac::signature makes) differs from the last one kept by at least `shot_change` (the mean difference, 0 to 255);
+//! one macos::signature makes) differs from the last one kept by at least `shot_change` (the mean difference, 0 to 255);
 //! within one shot a frame is kept every `keep_every` seconds.
 
 pub struct Shots {

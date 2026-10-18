@@ -62,8 +62,9 @@ if [ "$#" -eq 0 ]; then
   exit 2
 fi
 check
+sign_with="$(identity)"
 for binary in "$@"; do
-  codesign --force --options runtime --timestamp --identifier "dev.jwa91.$(basename "$binary")" --sign "$(identity)" "$binary"
+  codesign --force --options runtime --timestamp --identifier "dev.jwa91.$(basename "$binary")" --sign "$sign_with" "$binary"
   echo "codesign: signed $binary"
 done
 

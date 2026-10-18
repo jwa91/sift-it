@@ -19,15 +19,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com); versions follow
 - `sift-it status` shows what the engine holds, and how the indexer uses its memory.
 - The protocol front ends speak has a crate of its own (`sift-it-protocol`) and a description (`docs/protocol.md`).
   Through it the engine also changes the settings (`config`) and the folders (`folders`), reports the indexer's
-  progress in `status`, and says when it changes (an `indexer` event). A web UI or an app needs nothing else.
+  progress in `status`, and says when it changes (an `indexer` event). A front end needs nothing else.
 - `indexing.memory_mb` decides how fast indexing goes, never what it writes: how many files are read at once, and
   whether what's said in recordings is written down beside the reading or after it. At `auto` it's a quarter of the
-  Mac's memory: on 8 GB the embedding and speech models take turns, on 24 GB they run together.
+  Mac's memory: with room for both, the embedding and speech models run together, and otherwise they take turns.
 - `search.vectors` sets which form of the vectors a search scans: `exact-f32`, `exact-f16`, which reads half as much,
   or `sketch`, which compares the query with a 96-byte sketch of every vector and scores the closest few thousand
   exactly. `auto`, the default, scans the most precise form whose rows fit in `search.memory_mb`, a tenth of the Mac's
   memory unless set. `sift-it bench-search` measures all three, and `sift-it eval --compare` how much of the exact top
   20 a search with sketches keeps.
+- A kind for records, `structured`: csv, tsv, json, jsonl, yaml and toml files. CSV and TSV are read row by row with
+  their header row, JSON by its records or keys (minified too), JSON Lines by its lines, YAML by its keys and TOML by
+  its tables. Lock files aren't read, and in a code project records are read only with the code.
 
 ### Changed
 
@@ -54,11 +57,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com); versions follow
 - `sift-it service install` installs the engine's LaunchAgent with the indexer's.
 - serve's events: `ready` says whether search by meaning is loaded, and `meaning` (loading, ready, unavailable,
   unloaded) replaces `encoder`.
-- Kinds are plaintext, document (PDFs included), image, screenshot, audio, video and code: `--kind pdf` becomes
-  `--kind document`.
+- Kinds are plaintext, document (PDFs included), structured, image, screenshot, audio, video and code: `--kind pdf`
+  becomes `--kind document`.
 - `sources.ignore` takes patterns for files as well as folders, such as `*.psd` or `**/Exports/**`.
   `sift-it folders exclude` adds one.
 - The constants search ranks by move into `ranking`, with the same values.
+- Text is cut by its form: Markdown and plain text at their headings as well as their paragraphs, code at its
+  definitions (found by indentation, with the comments and attributes above them). A part too long to be whole is cut
+  at its next weaker breaks, and its pieces are embedded with its first line: a heading, a signature, a key. A long
+  paragraph is cut into pieces of about the passage size. Notebook cells are cut as code or as Markdown.
+- A text or code result opens at the line with the most of the query's words.
+- serve's `preview` refuses a `kind` it doesn't know, instead of drawing the file as a picture.
+- The code is laid out in parts with one job each (docs/architecture.md): the query path, the index, the ingest path,
+  the plans for memory, and the embedding model in a crate of its own (`sift-it-llama`).
 
 ### Removed
 
@@ -76,6 +87,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com); versions follow
   again).
 - A recording or video the indexer stopped writing down right after its last stretch is no longer marked as failed:
   it went on from its very end, which AVFoundation can't read. After its last stretch a file is written down.
+- Sound decodes the same on every read. AVFoundation's own resampling and its decoders' last buffers varied from read to
+  read; sound is now decoded at its own rate to the end of its tracks and resampled by one converter
+  (docs/audio-decoding.md). Recordings and videos are read again.
 
 ## [0.2.0] — 2026-10-16
 
@@ -94,16 +108,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com); versions follow
 
 ### Removed
 
-- `scripts/make-demo.sh`: the demo collection and its script live outside the repository, in the workspace's
-  `sift-it-data` folder (see docs/ranking.md).
+- `scripts/make-demo.sh`: the demo collection lives outside the repository (docs/ranking.md says how to make it).
 
 ## [0.1.3] — 2026-10-14
 
 ### Changed
 
-- Explain the DigUp relationship, ranking changes, terminal interface, and Raycast integration in the README.
+- Explain the DigUp relationship, ranking changes, terminal interface, and front-end integration in the README.
 - Preserve Abdur Rahim's MIT notice with the reference test files and in the project license.
-- Describe terminal and Raycast use in the generated Homebrew cask.
+- Describe terminal and front-end use in the generated Homebrew cask.
 
 ## [0.1.2] — 2026-10-14
 

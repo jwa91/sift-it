@@ -13,28 +13,19 @@ use crate::index::{FileRow, Writer};
 use anyhow::Result;
 use crawl::{Found, Rescan};
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 /// Crawls the chosen folders and brings the queue in step: new and changed files are queued, gone ones leave the index.
 pub fn sync(index: &Writer, config: &Config) -> Result<Event> {
     let started = Instant::now();
     let crawl = crawl::crawl(config);
-    let existing: HashMap<PathBuf, FileRow> = index.files()?.into_iter().map(|row| (row.path.clone(), row)).collect();
-    let found_paths: HashSet<&PathBuf> = crawl.found.iter().map(|f| &f.path).collect();
     let (added, changed, removed) = index.batch(|| {
-        let (added, mut changed) = queue_found(index, &crawl.found, &existing)?;
+        // What's in a folder that can't be read now stays.
+        let unavailable = |path: &Path| crawl.unavailable.iter().any(|root| path.starts_with(root));
+        let (added, changed, removed) = reconcile(index, &crawl.found, index.files()?, unavailable)?;
         // Files where some piece couldn't be embedded, or reading got stuck: once in a while, try them again.
-        changed += index.requeue_passing(6.0)?;
-        let mut removed = 0;
-        for (path, row) in &existing {
-            if found_paths.contains(path) || crawl.unavailable.iter().any(|root| path.starts_with(root)) {
-                continue;
-            }
-            index.remove_file(row.id)?;
-            removed += 1;
-        }
-        Ok((added, changed, removed))
+        Ok((added, changed + index.requeue_passing(6.0)?, removed))
     })?;
     Ok(Event::Sync {
         files: crawl.found.len(),
@@ -58,19 +49,11 @@ pub fn sync_paths(index: &Writer, config: &Config, paths: &[PathBuf]) -> Result<
                 Rescan::Skipped => Vec::new(),
                 Rescan::Found(found) => found,
             };
-            let existing: HashMap<PathBuf, FileRow> =
-                index.files_under(path)?.into_iter().map(|row| (row.path.clone(), row)).collect();
-            let (a, c) = queue_found(index, &found, &existing)?;
-            let found_paths: HashSet<&PathBuf> = found.iter().map(|f| &f.path).collect();
-            for (existing_path, row) in &existing {
-                if !found_paths.contains(existing_path) {
-                    index.remove_file(row.id)?;
-                    removed += 1;
-                }
-            }
+            let (a, c, r) = reconcile(index, &found, index.files_under(path)?, |_| false)?;
             files += found.len();
             added += a;
             changed += c;
+            removed += r;
         }
         Ok(())
     })?;
@@ -85,8 +68,16 @@ pub fn sync_paths(index: &Writer, config: &Config, paths: &[PathBuf]) -> Result<
     })
 }
 
-fn queue_found(index: &Writer, found: &[Found], existing: &HashMap<PathBuf, FileRow>) -> Result<(usize, usize)> {
-    let (mut added, mut changed) = (0, 0);
+/// Brings the index in step with what was `found` where `existing` was: new and changed files are queued, and those not
+/// found leave, unless `kept`. Returns how many were added, changed and removed.
+fn reconcile(
+    index: &Writer,
+    found: &[Found],
+    existing: Vec<FileRow>,
+    kept: impl Fn(&Path) -> bool,
+) -> Result<(usize, usize, usize)> {
+    let existing: HashMap<PathBuf, FileRow> = existing.into_iter().map(|row| (row.path.clone(), row)).collect();
+    let (mut added, mut changed, mut removed) = (0, 0, 0);
     for file in found {
         match existing.get(&file.path) {
             None => {
@@ -101,7 +92,14 @@ fn queue_found(index: &Writer, found: &[Found], existing: &HashMap<PathBuf, File
             Some(_) => {}
         }
     }
-    Ok((added, changed))
+    let found: HashSet<&Path> = found.iter().map(|file| file.path.as_path()).collect();
+    for (path, row) in &existing {
+        if !found.contains(path.as_path()) && !kept(path) {
+            index.remove_file(row.id)?;
+            removed += 1;
+        }
+    }
+    Ok((added, changed, removed))
 }
 
 /// Changed, or to be read another way.

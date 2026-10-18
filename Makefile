@@ -1,4 +1,4 @@
-.PHONY: llama build install dev check selftest testbed eval release snapshot clean
+.PHONY: llama build install check selftest testbed eval release snapshot clean
 
 BIN_DIR ?= $(HOME)/.local/bin
 LLAMA := vendor/llama-build/TAG
@@ -18,8 +18,6 @@ install: build
 	install -m 0755 target/release/sift-it target/release/sift-it-transcribe $(BIN_DIR)/
 	@echo "installed sift-it and sift-it-transcribe to $(BIN_DIR)"
 	@echo "ensure $(BIN_DIR) is on your PATH"
-
-dev: install
 
 check: $(LLAMA)
 	cargo fmt --all --check

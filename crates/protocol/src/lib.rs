@@ -105,10 +105,8 @@ pub enum FolderAction {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Preview {
     pub path: String,
-    /// What to draw: `image`, `pdf` (a page), `video` (a frame) or `waveform` (a recording's, with the stretch from
-    /// `loc` to `loc_end` seconds highlighted).
-    #[serde(default = "default_preview")]
-    pub kind: String,
+    #[serde(default)]
+    pub kind: Drawn,
     #[serde(default)]
     pub loc: Option<f64>,
     #[serde(default)]
@@ -118,8 +116,18 @@ pub struct Preview {
     pub size: u32,
 }
 
-fn default_preview() -> String {
-    "image".into()
+/// What a preview draws.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Drawn {
+    #[default]
+    Image,
+    /// A page, `loc`.
+    Pdf,
+    /// The frame at `loc` seconds.
+    Video,
+    /// A recording's, with the stretch from `loc` to `loc_end` seconds highlighted.
+    Waveform,
 }
 
 fn default_size() -> u32 {
@@ -316,6 +324,7 @@ pub struct Stats {
 
 /// What a file is, for a search to filter by.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
 #[serde(rename_all = "lowercase")]
 pub enum Kind {
     /// Plain text and Markdown.
@@ -483,7 +492,7 @@ mod tests {
         let Op::Preview(preview) = request(r#"{"id":6,"op":"preview","path":"/a.pdf","kind":"pdf","loc":3}"#).op else {
             panic!()
         };
-        assert_eq!((preview.kind.as_str(), preview.loc, preview.size), ("pdf", Some(3.0), 640));
+        assert_eq!((preview.kind, preview.loc, preview.size), (Drawn::Pdf, Some(3.0), 640));
         assert!(serde_json::from_str::<Request>(r#"{"id":7,"op":"fly"}"#).is_err());
     }
 

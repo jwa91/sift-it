@@ -6,7 +6,7 @@ use protocol::{Kind, Search};
 
 /// "code: retry with backoff": a search of code, and only of code. Without the prefix (or the code filter), a search
 /// never shows code: a project's thousands of stretches would bury everything else.
-pub const CODE_PREFIX: &str = "code:";
+const CODE_PREFIX: &str = "code:";
 
 /// A search request, understood.
 pub struct Query {
@@ -48,6 +48,11 @@ impl Query {
         }
     }
 
+    /// The words a search for `q` looks for: what a client marks in its results.
+    pub fn words_in(q: &str) -> Vec<String> {
+        Self::of(&Search { q: q.to_string(), ..Default::default() }).words
+    }
+
     /// Whether it shows files of this kind: only code in a search of code, else the kinds asked for, never code.
     pub fn wants(&self, kind: Kind) -> bool {
         if self.code {
@@ -69,7 +74,7 @@ fn has_prefix(q: &str) -> bool {
 }
 
 /// The words of a query, as the full-text index splits them (letters and digits; everything else separates).
-pub fn words_of(query: &str) -> Vec<String> {
+fn words_of(query: &str) -> Vec<String> {
     query
         .split(|c: char| !c.is_alphanumeric())
         .filter(|word| !word.is_empty())

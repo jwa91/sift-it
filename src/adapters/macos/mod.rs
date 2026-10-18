@@ -14,7 +14,8 @@ use objc2_core_foundation::{
     CFBoolean, CFDictionary, CFNumber, CFRetained, CFString, CFType, CFURL, CGFloat, CGPoint, CGRect, CGSize,
 };
 use objc2_core_graphics::{
-    CGColorSpace, CGContext, CGImage, CGInterpolationQuality, CGPDFBox, CGPDFDocument, kCGColorSpaceSRGB,
+    CGBitmapContextCreate, CGBitmapContextCreateImage, CGColorSpace, CGContext, CGImage, CGImageAlphaInfo,
+    CGInterpolationQuality, CGPDFBox, CGPDFDocument, kCGColorSpaceSRGB,
 };
 use objc2_foundation::{NSArray, NSDictionary};
 use objc2_image_io::{
@@ -30,23 +31,6 @@ use objc2_vision::{
 };
 use std::ffi::c_void;
 use std::path::Path;
-use std::ptr::NonNull;
-
-unsafe extern "C-unwind" {
-    // objc2-core-graphics leaves this one out (its buffer is the caller's to keep alive).
-    fn CGBitmapContextCreate(
-        data: *mut c_void,
-        width: usize,
-        height: usize,
-        bits_per_component: usize,
-        bytes_per_row: usize,
-        space: Option<&CGColorSpace>,
-        bitmap_info: u32,
-    ) -> Option<NonNull<CGContext>>;
-}
-
-/// kCGImageAlphaNoneSkipLast with the default byte order: R, G, B, unused.
-const RGBX: u32 = 5;
 
 fn dictionary(pairs: &[(&CFString, &CFType)]) -> CFRetained<CFDictionary<CFString, CFType>> {
     let keys: Vec<&CFString> = pairs.iter().map(|(key, _)| *key).collect();
@@ -113,7 +97,7 @@ pub fn pixels(image: &CGImage) -> Result<Image> {
         bail!("empty picture");
     }
     let mut rgbx = vec![0u8; width * height * 4];
-    let context = bitmap(&mut rgbx, width, height)?;
+    let context = bitmap(&mut rgbx, width, height, CGImageAlphaInfo::NoneSkipLast)?;
     let rect = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(width as CGFloat, height as CGFloat));
     CGContext::set_rgb_fill_color(Some(&context), 1.0, 1.0, 1.0, 1.0);
     CGContext::fill_rect(Some(&context), rect);
@@ -122,12 +106,12 @@ pub fn pixels(image: &CGImage) -> Result<Image> {
     Ok(Image { width: width as u32, height: height as u32, rgb: rgbx_to_rgb(&rgbx) })
 }
 
-fn bitmap(buffer: &mut [u8], width: usize, height: usize) -> Result<CFRetained<CGContext>> {
+/// An sRGB context that draws into `buffer`, 4 bytes a pixel: R, G, B and alpha (or unused, NoneSkipLast).
+fn bitmap(buffer: &mut [u8], width: usize, height: usize, alpha: CGImageAlphaInfo) -> Result<CFRetained<CGContext>> {
     let space = CGColorSpace::with_name(Some(unsafe { kCGColorSpaceSRGB })).ok_or_else(|| anyhow!("no sRGB"))?;
-    let context =
-        unsafe { CGBitmapContextCreate(buffer.as_mut_ptr().cast(), width, height, 8, width * 4, Some(&space), RGBX) }
-            .ok_or_else(|| anyhow!("can't make a {width}×{height} bitmap"))?;
-    let context = unsafe { CFRetained::from_raw(context) };
+    let data = buffer.as_mut_ptr().cast();
+    let context = unsafe { CGBitmapContextCreate(data, width, height, 8, width * 4, Some(&space), alpha.0) }
+        .ok_or_else(|| anyhow!("can't make a {width}×{height} bitmap"))?;
     CGContext::set_interpolation_quality(Some(&context), CGInterpolationQuality::High);
     Ok(context)
 }
@@ -138,11 +122,6 @@ fn rgbx_to_rgb(rgbx: &[u8]) -> Vec<u8> {
         rgb.extend_from_slice(&pixel[..3]);
     }
     rgb
-}
-
-fn image_from_rgbx(rgbx: &mut [u8], width: usize, height: usize) -> Result<CFRetained<CGImage>> {
-    let context = bitmap(rgbx, width, height)?;
-    objc2_core_graphics::CGBitmapContextCreateImage(Some(&context)).ok_or_else(|| anyhow!("can't make the picture"))
 }
 
 /// A PDF page (from 1) drawn on white, at most `max_side` pixels on the long side.
@@ -160,7 +139,7 @@ pub fn render_pdf_page(path: &Path, page_number: usize, max_side: u32) -> Result
     let (width, height) =
         ((page_width * scale).round().max(1.0) as usize, (page_height * scale).round().max(1.0) as usize);
     let mut rgbx = vec![0u8; width * height * 4];
-    let context = bitmap(&mut rgbx, width, height)?;
+    let context = bitmap(&mut rgbx, width, height, CGImageAlphaInfo::NoneSkipLast)?;
     let rect = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(width as CGFloat, height as CGFloat));
     CGContext::set_rgb_fill_color(Some(&context), 1.0, 1.0, 1.0, 1.0);
     CGContext::fill_rect(Some(&context), rect);
@@ -171,19 +150,18 @@ pub fn render_pdf_page(path: &Path, page_number: usize, max_side: u32) -> Result
         objc2_core_graphics::CGPDFPage::drawing_transform(Some(&page), CGPDFBox::CropBox, unscaled, 0, true);
     CGContext::concat_ctm(Some(&context), transform);
     CGContext::draw_pdf_page(Some(&context), Some(&page));
-    drop(context);
-    image_from_rgbx(&mut rgbx, width, height)
+    CGBitmapContextCreateImage(Some(&context)).ok_or_else(|| anyhow!("can't make the picture"))
 }
 
-/// Writes a JPEG.
-pub fn save_jpeg(image: &CGImage, path: &Path, quality: f64) -> Result<()> {
-    let jpeg = CFString::from_str("public.jpeg");
-    let destination = unsafe { CGImageDestination::with_url(&*url(path)?, &jpeg, 1, None) }
+/// Writes a PNG (for transparency, like the waveform's), or else a JPEG.
+pub fn save(image: &CGImage, path: &Path, png: bool) -> Result<()> {
+    let format = CFString::from_str(if png { "public.png" } else { "public.jpeg" });
+    let destination = unsafe { CGImageDestination::with_url(&*url(path)?, &format, 1, None) }
         .ok_or_else(|| anyhow!("can't write {}", path.display()))?;
-    let quality = CFNumber::new_f64(quality);
+    let quality = CFNumber::new_f64(0.82);
     let properties = dictionary(&[(unsafe { kCGImageDestinationLossyCompressionQuality }, quality.as_ref())]);
     unsafe {
-        destination.add_image(image, Some(properties.as_opaque()));
+        destination.add_image(image, (!png).then(|| properties.as_opaque()));
         if !destination.finalize() {
             bail!("couldn't write {}", path.display());
         }
@@ -217,7 +195,7 @@ pub fn recognize_text(image: &CGImage) -> Result<String> {
         // Vision's origin is bottom left: higher y comes first.
         lines.push((-(bounds.origin.y + bounds.size.height), bounds.origin.x, best.string().to_string()));
     }
-    // Rows top to bottom (lines within half a line's height count as one row), each left to right.
+    // Rows top to bottom (lines whose tops are within 1% of the picture's height count as one row), each left to right.
     lines.sort_by(|a, b| a.0.total_cmp(&b.0));
     let mut rows: Vec<Vec<(f64, String)>> = Vec::new();
     let mut last_top = f64::NEG_INFINITY;
@@ -243,7 +221,7 @@ pub fn recognize_text(image: &CGImage) -> Result<String> {
 pub fn signature(image: &CGImage) -> Result<Vec<u8>> {
     let (width, height) = (16usize, 9usize);
     let mut rgbx = vec![0u8; width * height * 4];
-    let context = bitmap(&mut rgbx, width, height)?;
+    let context = bitmap(&mut rgbx, width, height, CGImageAlphaInfo::NoneSkipLast)?;
     let rect = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(width as CGFloat, height as CGFloat));
     CGContext::set_interpolation_quality(Some(&context), CGInterpolationQuality::Low);
     CGContext::draw_image(Some(&context), rect, Some(image));
@@ -262,32 +240,13 @@ pub fn pdf_pages(path: &Path) -> Option<usize> {
     Some(CGPDFDocument::number_of_pages(Some(&document)))
 }
 
-/// Writes a PNG (for pictures with transparency, like the waveform).
-pub fn save_png(image: &CGImage, path: &Path) -> Result<()> {
-    let png = CFString::from_str("public.png");
-    let destination = unsafe { CGImageDestination::with_url(&*url(path)?, &png, 1, None) }
-        .ok_or_else(|| anyhow!("can't write {}", path.display()))?;
-    unsafe {
-        destination.add_image(image, None);
-        if !destination.finalize() {
-            bail!("couldn't write {}", path.display());
-        }
-    }
-    Ok(())
-}
-
 /// A recording's waveform: one bar per column (`levels`, 0–1), on a transparent background so it reads in light and
 /// dark mode, with the columns in `highlight` (the stretch that matched) in blue on a light blue band.
 pub fn waveform(levels: &[f32], height: usize, highlight: Option<(usize, usize)>) -> Result<CFRetained<CGImage>> {
     const BAR: usize = 3; // pixels per column: a 2 px bar and a 1 px gap
     let width = levels.len().max(1) * BAR;
     let mut rgba = vec![0u8; width * height * 4];
-    let space = CGColorSpace::with_name(Some(unsafe { kCGColorSpaceSRGB })).ok_or_else(|| anyhow!("no sRGB"))?;
-    // kCGImageAlphaPremultipliedLast: R, G, B, A.
-    let context =
-        unsafe { CGBitmapContextCreate(rgba.as_mut_ptr().cast(), width, height, 8, width * 4, Some(&space), 1) }
-            .ok_or_else(|| anyhow!("can't make a {width}×{height} bitmap"))?;
-    let context = unsafe { CFRetained::from_raw(context) };
+    let context = bitmap(&mut rgba, width, height, CGImageAlphaInfo::PremultipliedLast)?;
     let middle = height as CGFloat / 2.0;
     if let Some((first, last)) = highlight {
         CGContext::set_rgb_fill_color(Some(&context), 0.04, 0.52, 1.0, 0.16);
@@ -306,10 +265,10 @@ pub fn waveform(levels: &[f32], height: usize, highlight: Option<(usize, usize)>
         let rect = CGRect::new(CGPoint::new((column * BAR) as CGFloat, middle - bar / 2.0), CGSize::new(2.0, bar));
         CGContext::fill_rect(Some(&context), rect);
     }
-    objc2_core_graphics::CGBitmapContextCreateImage(Some(&context)).ok_or_else(|| anyhow!("can't make the waveform"))
+    CGBitmapContextCreateImage(Some(&context)).ok_or_else(|| anyhow!("can't make the waveform"))
 }
 
-/// How much memory the Mac has, in bytes (read once; 8 GB, the least sift-it runs on, if it can't be read).
+/// How much memory the Mac has, in bytes (read once; 8 GB, the least a Mac with Apple silicon has, if it can't be read).
 pub fn memory() -> u64 {
     static MEMORY: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
     *MEMORY.get_or_init(|| {

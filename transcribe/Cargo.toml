@@ -1,9 +1,9 @@
 [package]
 name = "sift-it-transcribe"
-version = "0.2.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 description = "sift-it's speech-to-text helper: transcribe.cpp in a process of its own, beside the engine's llama.cpp"
-license = "MIT"
+license.workspace = true
 publish = false
 
 [[bin]]

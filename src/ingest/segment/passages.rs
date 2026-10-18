@@ -13,7 +13,7 @@ use super::code::{self, Code};
 use super::prose::{self, Prose};
 use super::records::{self, Json, Rows};
 use crate::config::Settings;
-use crate::ingest::discover::crawl::extension_of;
+use crate::config::extension_of;
 use protocol::Kind;
 use std::path::Path;
 
@@ -309,13 +309,7 @@ impl Cutter {
         let mut bits = std::mem::take(&mut self.part);
         // Blank lines the text starts with aren't a piece's.
         bits.drain(..bits.iter().position(|bit| !bit.text.trim().is_empty()).unwrap_or(0));
-        let mut whole = String::new();
-        for bit in &bits {
-            if bit.starts && !whole.is_empty() {
-                whole.push('\n');
-            }
-            whole.push_str(&bit.text);
-        }
+        let mut whole = joined(&bits);
         let (mut line, mut order) = (bits[0].line, bits[0].order);
         while whole.len() > self.max {
             let cut = cut_point(&whole, self.target);
@@ -344,15 +338,8 @@ impl Cutter {
         let blank = |bit: &Bit| bit.text.trim().is_empty();
         let first = bits.iter().position(|bit| !blank(bit))?;
         let last = bits.iter().rposition(|bit| !blank(bit))?;
-        let mut text = String::new();
-        for bit in &bits[first..=last] {
-            if bit.starts && !text.is_empty() {
-                text.push('\n');
-            }
-            text.push_str(&bit.text);
-        }
         Some(Passage {
-            text: text.trim_end().to_string(),
+            text: joined(&bits[first..=last]).trim_end().to_string(),
             first_line: bits[first].line,
             last_line: bits[last].line,
             context: self.context(bits[first].order),
@@ -390,6 +377,18 @@ impl Cutter {
             None => self.open = Some(passage),
         }
     }
+}
+
+/// Bits as text: the lines they start on their own lines.
+fn joined(bits: &[Bit]) -> String {
+    let mut text = String::new();
+    for bit in bits {
+        if bit.starts && !text.is_empty() {
+            text.push('\n');
+        }
+        text.push_str(&bit.text);
+    }
+    text
 }
 
 /// A line as context: trimmed, and at most about 200 characters.

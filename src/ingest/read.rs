@@ -7,8 +7,8 @@ use super::segment::passages::{self, Form, Text};
 use super::segment::pictures;
 use super::segment::sound::Windows;
 use super::{extract, prepare};
+use crate::config::is_pdf;
 use crate::config::{Depth, Settings};
-use crate::ingest::discover::crawl::is_pdf;
 use anyhow::Result;
 use embedder::AUDIO_RATE;
 use embedder::imaging::Image;
@@ -41,11 +41,10 @@ pub struct Piece {
 pub type Sink<'a> = &'a mut dyn FnMut(Piece) -> Result<()>;
 
 /// Goes up when the way a kind is read changes in a way that matters for what's indexed, or it learns to read files
-/// it couldn't: the files it read (or failed to) are read again, and the index keeps what it has meanwhile.
+/// it couldn't: the files it read (or failed to) are read again.
 pub fn version(kind: Kind) -> u32 {
     match kind {
         Kind::Structured | Kind::Image => 1,
-        // 2: sound decoded the same on every read (docs/audio-decoding.md), and text cut by its form.
         Kind::Plaintext | Kind::Document | Kind::Screenshot | Kind::Audio | Kind::Video | Kind::Code => 2,
     }
 }
@@ -136,11 +135,11 @@ impl<'a> Content<'a> {
         Ok(())
     }
 
-    /// A whole text of a form at one place in the file (a page's text layer, a notebook cell's source): its passages
-    /// keep that place.
-    pub fn text(&mut self, segment: Segment, loc: f64, text: &str, form: Form) -> Result<()> {
+    /// A whole text of a form at one place in the file (a page's text layer, a notebook cell's source, text read off
+    /// a picture): its passages keep that place.
+    pub fn text(&mut self, segment: Segment, loc: Option<f64>, text: &str, form: Form) -> Result<()> {
         for passage in passages::passages(text, form, self.settings) {
-            self.passage(segment, Some(loc), None, passage)?;
+            self.passage(segment, loc, None, passage)?;
         }
         Ok(())
     }
@@ -157,7 +156,7 @@ impl<'a> Content<'a> {
             self.send(Segment::Picture, None, words, prepare::picture(image, budget)?)?;
         }
         if cut.passages {
-            self.read_off(text, None)?;
+            self.text(Segment::Ocr, None, text, Form::Prose)?;
         }
         Ok(pictures::long(text))
     }
@@ -167,14 +166,14 @@ impl<'a> Content<'a> {
         let loc = Some(page as f64);
         let cut = pictures::cut(text, self.settings.embeds(), true);
         if cut.passages {
-            return self.read_off(text, loc);
+            return self.text(Segment::Ocr, loc, text, Form::Prose);
         }
         // Nothing to read: what the page shows, then.
         let words = cut.words.then(|| text.to_string());
         self.send(Segment::Picture, loc, words, prepare::picture(image, self.settings.text_tokens)?)
     }
 
-    /// A video's frame at `at` seconds, with its thumbnail (mac::signature) to tell shots apart.
+    /// A video's frame at `at` seconds, with its thumbnail (macos::signature) to tell shots apart.
     pub fn frame(&mut self, at: f64, image: &CGImage, thumbnail: &[u8]) -> Result<()> {
         if !self.shots.keep(at, thumbnail) {
             return Ok(());
@@ -193,14 +192,6 @@ impl<'a> Content<'a> {
     pub fn end_sound(&mut self) -> Result<()> {
         let Self { sound, sink, windows, .. } = self;
         sound.finish(&mut |start, window| send_window(sink, windows, start, window))
-    }
-
-    /// Text read off a picture, as passages.
-    fn read_off(&mut self, text: &str, loc: Option<f64>) -> Result<()> {
-        for passage in passages::passages(text, Form::Prose, self.settings) {
-            self.passage(Segment::Ocr, loc, None, passage)?;
-        }
-        Ok(())
     }
 
     fn passage(

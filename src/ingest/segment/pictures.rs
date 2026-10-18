@@ -4,7 +4,7 @@
 //! is shown to the model, and any text is passages.
 
 /// Text read from a picture becomes passages of its own from this many characters on.
-pub const MIN_TEXT: usize = 40;
+const MIN_TEXT: usize = 40;
 
 /// What a picture with text read off it becomes.
 #[derive(Debug, PartialEq)]

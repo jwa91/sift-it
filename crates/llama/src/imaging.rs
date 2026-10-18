@@ -22,7 +22,7 @@ const SIDE: u32 = PATCH * POOLING;
 
 /// The size (width, height) the reference gives an image of this size for `budget` tokens, or None for an image too
 /// thin to hold even one row of tokens.
-pub fn target_size(width: u32, height: u32, budget: u32) -> Option<(u32, u32)> {
+fn target_size(width: u32, height: u32, budget: u32) -> Option<(u32, u32)> {
     if width == 0 || height == 0 {
         return None;
     }
@@ -52,7 +52,7 @@ pub fn fit(image: &Image, budget: u32) -> Result<Image> {
     resize(image, width, height)
 }
 
-pub fn resize(image: &Image, width: u32, height: u32) -> Result<Image> {
+fn resize(image: &Image, width: u32, height: u32) -> Result<Image> {
     if (width, height) == (image.width, image.height) {
         return Ok(image.clone());
     }

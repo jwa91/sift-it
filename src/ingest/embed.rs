@@ -69,7 +69,7 @@ impl Embed {
                 _ => "",
             })
             .collect();
-        let vectors = self.media_model()?.embed_texts(&texts);
+        let vectors = self.model(true)?.embed_texts(&texts);
         let failed = vectors.is_err();
         let mut vectors = vectors.unwrap_or_default().into_iter();
         Ok(pieces.into_iter().map(|(file, piece)| (file, segment(piece, vectors.next()), failed)).collect())
@@ -80,8 +80,8 @@ impl Embed {
     pub fn one(&mut self, piece: Piece) -> Result<(NewSegment, bool)> {
         let vector = match &piece.payload {
             Payload::None | Payload::Text(_) => Ok(None),
-            Payload::Image(image) => self.media_model()?.embed_image(image).map(Some),
-            Payload::Audio(samples) => self.media_model()?.embed_audio(samples).map(Some),
+            Payload::Image(image) => self.model(true)?.embed_image(image).map(Some),
+            Payload::Audio(samples) => self.model(true)?.embed_audio(samples).map(Some),
         };
         let failed = vector.is_err();
         Ok((segment(piece, vector.ok().flatten()), failed))
@@ -93,31 +93,21 @@ impl Embed {
         if texts.is_empty() {
             return Ok(Vec::new());
         }
-        Ok(self.text_model()?.embed_texts(texts).unwrap_or_default())
+        Ok(self.model(false)?.embed_texts(texts).unwrap_or_default())
     }
 
     /// Loads the model with its encoders now, if it isn't: the reading needs it, and it isn't loaded twice.
     pub fn load_media(&mut self) -> Result<()> {
-        self.media_model().map(drop)
+        self.model(true).map(drop)
     }
 
-    /// A model for text: the loaded one, or else the text model alone.
-    fn text_model(&mut self) -> Result<&mut Embedder> {
-        if self.embedder.is_none() {
-            let files = ModelFiles::in_folder(&self.models)?;
-            self.embedder = Some(Embedder::load(&files, true)?);
-            self.media = false;
-        }
-        Ok(self.embedder.as_mut().expect("just loaded"))
-    }
-
-    /// The model with its image and audio encoders: the loaded one, or loaded now.
-    fn media_model(&mut self) -> Result<&mut Embedder> {
-        if self.embedder.is_none() || !self.media {
+    /// The loaded model, or one loaded now: with its image and audio encoders when `media` needs them, else the text
+    /// model alone. A text model makes way for one with the encoders, never the other way.
+    fn model(&mut self, media: bool) -> Result<&mut Embedder> {
+        if self.embedder.is_none() || (media && !self.media) {
             self.embedder = None;
-            let files = ModelFiles::in_folder(&self.models)?;
-            self.embedder = Some(Embedder::load(&files, false)?);
-            self.media = true;
+            self.embedder = Some(Embedder::load(&ModelFiles::in_folder(&self.models)?, !media)?);
+            self.media = media;
         }
         Ok(self.embedder.as_mut().expect("just loaded"))
     }

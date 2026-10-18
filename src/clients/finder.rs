@@ -8,16 +8,16 @@
 //! selected result's preview needs.
 
 use crate::clients::Client;
-use crate::clients::open::{self, Place, timestamp};
+use crate::clients::open::{self, Place, Target};
+use crate::clients::present::{folder, kind_label, place};
 use crate::clients::preview;
 use crate::clients::term;
 use crate::config;
-use crate::ingest::discover::crawl;
-use crate::query::understand::words_of;
+use crate::query::{self, Query, timestamp};
 use anyhow::Result;
-use protocol::Kind;
 use protocol::Mode;
 use protocol::Segment;
+use protocol::{Drawn, Kind};
 use protocol::{Hit, MeaningState, Results, Search};
 use ratatui::Frame;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -368,33 +368,33 @@ fn spawn_previewer(hits: Receiver<Hit>, previews: Sender<(i64, Preview)>) -> Res
 
 fn make_preview(client: &mut Client, hit: &Hit, folder: &Path) -> Preview {
     let path = Path::new(&hit.path);
-    let picture = |kind: &str, loc: Option<f64>| {
+    let picture = |kind: Drawn, loc: Option<f64>| {
         preview::thumbnail(path, kind, loc, 900, folder).ok().and_then(|png| image::open(png).ok())
     };
     let levels = || {
         let columns = 80;
         let levels = preview::levels(path, columns, folder).ok()?;
         let start = hit.loc.unwrap_or(0.0);
-        Some((term::stretch(&levels), preview::span(path, columns, start, hit.loc_end.unwrap_or(start + 30.0))))
+        Some((term::stretch(&levels), preview::span(path, columns, start, hit.loc_end)))
     };
     let segment_text = |client: &mut Client| client.segment_text(hit.segment_id).ok().flatten();
     let mut preview = Preview::default();
     match hit.kind {
-        Kind::Image => preview.picture = picture("image", None),
+        Kind::Image => preview.picture = picture(Drawn::Image, None),
         Kind::Screenshot => {
-            preview.picture = picture("image", None);
+            preview.picture = picture(Drawn::Image, None);
             preview.text = if hit.segment == Segment::Ocr {
                 segment_text(client)
             } else {
                 client.file_text(&hit.path).ok().flatten()
             };
         }
-        Kind::Document if crawl::is_pdf(Path::new(&hit.path)) => {
-            preview.picture = picture("pdf", Some(hit.loc.unwrap_or(1.0)));
+        Kind::Document if config::is_pdf(Path::new(&hit.path)) => {
+            preview.picture = picture(Drawn::Pdf, Some(hit.loc.unwrap_or(1.0)));
             preview.text = segment_text(client);
         }
         Kind::Video => {
-            preview.picture = picture("video", hit.loc);
+            preview.picture = picture(Drawn::Video, hit.loc);
             if matches!(hit.segment, Segment::Sound | Segment::Speech) {
                 preview.levels = levels();
             }
@@ -452,33 +452,6 @@ fn draw_query(frame: &mut Frame, app: &App, area: Rect) {
     frame.set_cursor_position((x.min(area.x + area.width.saturating_sub(1)), area.y));
 }
 
-/// Where in the file it matched, said shortly.
-fn place(hit: &Hit) -> String {
-    match (hit.segment, hit.loc) {
-        (Segment::Sound | Segment::Speech, Some(start)) => timestamp(start),
-        (Segment::Frame, Some(at)) => timestamp(at),
-        (Segment::Page | Segment::Ocr | Segment::Picture, Some(page)) if hit.kind == Kind::Document => {
-            format!("p. {page}")
-        }
-        (Segment::Passage, Some(cell)) if hit.path.ends_with(".ipynb") => format!("cell {cell}"),
-        (Segment::Passage, Some(line)) if line > 1.0 => format!("line {line}"),
-        _ => String::new(),
-    }
-}
-
-fn kind_label(kind: Kind) -> &'static str {
-    match kind {
-        Kind::Plaintext => "text",
-        Kind::Document => "document",
-        Kind::Structured => "data",
-        Kind::Image => "picture",
-        Kind::Screenshot => "screenshot",
-        Kind::Audio => "recording",
-        Kind::Video => "video",
-        Kind::Code => "code",
-    }
-}
-
 fn draw_results(frame: &mut Frame, app: &mut App, area: Rect) {
     let title = if app.query.trim().is_empty() {
         " recent ".to_string()
@@ -503,10 +476,7 @@ fn draw_results(frame: &mut Frame, app: &mut App, area: Rect) {
         .hits
         .iter()
         .map(|hit| {
-            let right = {
-                let place = place(hit);
-                if place.is_empty() { kind_label(hit.kind).to_string() } else { place }
-            };
+            let right = place(hit).unwrap_or_else(|| kind_label(hit.kind).into());
             let room = inner_width.saturating_sub(right.chars().count() + 1);
             let name: String = if hit.name.chars().count() > room {
                 hit.name.chars().take(room.saturating_sub(1)).chain(std::iter::once('…')).collect()
@@ -535,12 +505,14 @@ fn draw_preview(frame: &mut Frame, app: &mut App, area: Rect) {
             .render_widget(Block::default().borders(Borders::ALL).border_style(Style::new().fg(Color::DarkGray)), area);
         return;
     };
-    let place = place(&hit);
-    let title = if place.is_empty() { format!(" {} ", hit.name) } else { format!(" {} · {place} ", hit.name) };
+    let title = match place(&hit) {
+        Some(place) => format!(" {} · {place} ", hit.name),
+        None => format!(" {} ", hit.name),
+    };
     let block = Block::default().borders(Borders::ALL).border_style(Style::new().fg(Color::DarkGray)).title(title);
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    let words = words_of(app.query.trim_start().strip_prefix("code:").unwrap_or(&app.query));
+    let words = Query::words_in(&app.query);
 
     let facts = facts(&hit);
     let Some(shown) = app.previews.get_mut(&hit.segment_id) else {
@@ -577,18 +549,13 @@ fn draw_preview(frame: &mut Frame, app: &mut App, area: Rect) {
             .iter()
             .enumerate()
             .map(|(i, level)| {
-                let block = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'][((level * 7.0).round() as usize).min(7)];
                 let style =
                     if i >= first && i <= last { Style::new().fg(ACCENT) } else { Style::new().fg(Color::DarkGray) };
-                Span::styled(block.to_string(), style)
+                Span::styled(term::block(*level).to_string(), style)
             })
             .collect();
         let verb = if hit.segment == Segment::Speech { "said" } else { "heard" };
-        let heard = match (hit.loc, hit.loc_end) {
-            (Some(start), Some(end)) => format!("{verb} at {}–{}", timestamp(start), timestamp(end)),
-            (Some(start), None) => format!("{verb} at {}", timestamp(start)),
-            _ => String::new(),
-        };
+        let heard = place(&hit).map(|at| format!("{verb} at {at}")).unwrap_or_default();
         let lines = vec![Line::from(spans), Line::styled(heard, Style::new().fg(Color::DarkGray))];
         frame.render_widget(Paragraph::new(lines), wave_area);
     }
@@ -607,10 +574,7 @@ fn draw_preview(frame: &mut Frame, app: &mut App, area: Rect) {
 
 /// "~/Documents · 3024 × 4032 · 1.2 MB"
 fn facts(hit: &Hit) -> String {
-    let folder = Path::new(&hit.path).parent().map(|p| p.display().to_string()).unwrap_or_default();
-    let home = config::dirs_home().display().to_string();
-    let folder = folder.strip_prefix(&home).map(|rest| format!("~{rest}")).unwrap_or(folder);
-    let mut parts = vec![folder];
+    let mut parts = vec![folder(Path::new(&hit.path))];
     if let (Some(w), Some(h)) =
         (hit.info.get("width").and_then(|v| v.as_u64()), hit.info.get("height").and_then(|v| v.as_u64()))
     {
@@ -676,14 +640,10 @@ fn prose_text(text: &str, words: &[String]) -> Text<'static> {
     Text::from(text.lines().map(|line| Line::from(marked(line, words, Style::new()))).collect::<Vec<_>>())
 }
 
-/// Code with line numbers, from the first line with the query's words.
+/// Code with line numbers, from the line with the query's words.
 fn code_text(text: &str, loc: Option<f64>, words: &[String]) -> Text<'static> {
     let lines: Vec<&str> = text.lines().collect();
-    let telling = |line: &str| {
-        let lower = line.to_lowercase();
-        words.iter().any(|w| (w.chars().count() > 3 || w.chars().any(char::is_numeric)) && lower.contains(w.as_str()))
-    };
-    let focus = lines.iter().position(|l| telling(l)).unwrap_or(0);
+    let focus = query::focus(text, words).unwrap_or(0);
     let first = loc.map(|l| l as i64 - focus as i64);
     let shown: Vec<Line> = lines
         .iter()
@@ -720,16 +680,10 @@ fn draw_keys(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn open_label(hit: &Hit) -> String {
-    match (hit.kind, hit.loc) {
-        (Kind::Audio | Kind::Video, Some(at)) => format!("play from {}", timestamp(at)),
-        (Kind::Document, Some(page)) if page > 1.0 && crawl::is_pdf(Path::new(&hit.path)) => {
-            format!("open at page {page}")
-        }
-        (Kind::Plaintext | Kind::Structured | Kind::Code, Some(line))
-            if line > 1.0 && !hit.path.ends_with(".ipynb") =>
-        {
-            format!("open at line {line}")
-        }
+    match Place::of(hit).target() {
+        Target::Moment(at) => format!("play from {}", timestamp(at)),
+        Target::Page(page) => format!("open at page {page}"),
+        Target::Line(line) if line > 1 => format!("open at line {line}"),
         _ => "open".into(),
     }
 }

@@ -51,7 +51,7 @@ impl Client {
                     client.wait_closed();
                 }
                 Err(error) if started => {
-                    let log = crate::config::home().join("engine.log");
+                    let log = launchd::ENGINE.log_path();
                     return Err(error).context(format!("the engine didn't start (see {})", log.display()));
                 }
                 Err(_) => {}
@@ -187,7 +187,7 @@ fn start() -> Result<()> {
     }
     let binary = std::env::current_exe()?;
     std::fs::create_dir_all(crate::config::home())?;
-    let log = std::fs::OpenOptions::new().create(true).append(true).open(crate::config::home().join("engine.log"))?;
+    let log = std::fs::OpenOptions::new().create(true).append(true).open(launchd::ENGINE.log_path())?;
     use std::os::unix::process::CommandExt;
     let mut command = Command::new(binary);
     command.arg("engine").stdin(Stdio::null()).stdout(log.try_clone()?).stderr(log);

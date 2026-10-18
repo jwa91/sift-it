@@ -2,7 +2,7 @@
 //! rules for a path, and the depth a file is read at.
 
 use super::Pattern;
-use crate::ingest::discover::crawl::extension_of;
+use super::extension_of;
 use protocol::Kind;
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -130,8 +130,8 @@ impl Reading {
     }
 }
 
-/// How deep a file is read. Each depth holds the ones before it, and every file is read whole at its depth: what
-/// was left to limits once (waiting, memory) the queue's order and streaming readers take care of.
+/// How deep a file is read. Each depth holds the ones before it, and every file is read whole at its depth: the
+/// queue's order and streaming readers keep the wait and the memory down, not limits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Depth {

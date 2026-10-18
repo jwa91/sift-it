@@ -13,24 +13,23 @@ use crate::config::{self, Budget};
 use crate::index::Form;
 use protocol::Scan;
 
-/// The share of the Mac's memory indexing takes with `indexing.memory_mb` at auto: 2 GB of 8, where the models take
-/// turns, and 6 GB of 24, where they run side by side.
+/// The share of the Mac's memory indexing takes with `indexing.memory_mb` at auto. From 9 GB of memory on, the models
+/// run side by side; with less, they take turns.
 const INGEST_SHARE: f64 = 0.25;
 
 /// The share of the Mac's memory searches may read with `search.memory_mb` at auto.
 const SEARCH_SHARE: f64 = 0.1;
 
-/// What the parts of indexing hold at their peak, measured on an 8 GB Mac: the embedding model with its image and
-/// audio encoders (0.92 GB), the speech helper with a three-minute stretch of sound (1.0 GB), and a reader with what
-/// it has decoded.
+/// What the parts of indexing hold at their peak, as measured: the embedding model with its image and audio encoders
+/// (0.92 GB), the speech helper with a three-minute stretch of sound (1.0 GB), and a reader with what it has decoded.
 const MODEL: u64 = 1 << 30;
 const SPEECH: u64 = 1 << 30;
 const READER: u64 = 128 << 20;
 
 /// How many segments a search with sketches scores exactly, at least: those whose sketches come closest to the query.
 /// Measured on Rust's books (7,400 vectors, all on one subject, so many come close): the closest 1,024 keep all of the
-/// exact top 20 for 45 queries, the closest 256 keep 99.3%.
-pub const CANDIDATES: usize = 4096;
+/// exact top 20 for 45 queries, the closest 256 keep 99.3%. Four times that is the margin for collections that differ.
+const CANDIDATES: usize = 4096;
 
 /// A budget in bytes: as set, or else `share` of the Mac's memory.
 fn bytes(budget: Budget, share: f64) -> u64 {
@@ -83,9 +82,9 @@ impl SearchPlan {
     }
 
     /// The form `scan` names, or with `auto` the most precise whose rows fit in `budget` bytes. With sketches,
-    /// CANDIDATES are scored exactly, or a 32nd of the rows in a larger index, as many rows as the sketches are bytes:
-    /// the share it takes to keep the exact top 20 falls as an index grows (its best matches stand further above the
-    /// rest), so a fixed share keeps up.
+    /// CANDIDATES are scored exactly, or in a larger index as many rows as reading them takes the bytes the sketches
+    /// do (a 32nd): the share it takes to keep the exact top 20 falls as an index grows (its best matches stand
+    /// further above the rest), so a fixed share keeps up.
     fn within(scan: Scan, budget: u64, rows: usize) -> Self {
         let form = match scan {
             Scan::ExactF32 => Form::F32,
@@ -96,7 +95,7 @@ impl SearchPlan {
                 [Form::F32, Form::F16].into_iter().find(fits).unwrap_or(Form::Sketch)
             }
         };
-        Self { form, candidates: CANDIDATES.max(rows / 32) }
+        Self { form, candidates: CANDIDATES.max(rows * Form::Sketch.row_bytes() / Form::F32.row_bytes()) }
     }
 
     /// The form, as `search.vectors` names it.
@@ -132,9 +131,9 @@ mod tests {
             let plan = IngestPlan::within(budget, cores);
             (plan.readers, plan.beside)
         };
-        // A quarter of 8 GB: the models take turns, and the cores decide the readers.
+        // 2 GB: the models take turns, and the cores decide the readers.
         assert_eq!(plan(2 * gb, 8), (2, false));
-        // A quarter of 24 GB, on ten cores: both models, three readers.
+        // 6 GB on ten cores: both models, three readers.
         assert_eq!(plan(6 * gb, 10), (3, true));
         // Little memory: one reader at a time.
         assert_eq!(plan(gb + READER, 8), (1, false));

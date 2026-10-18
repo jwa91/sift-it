@@ -11,8 +11,9 @@
 mod present;
 mod rank;
 mod retrieve;
-pub mod understand;
+mod understand;
 
+pub use present::{focus, timestamp};
 pub use understand::Query;
 
 use crate::config::{self, Ranking};
@@ -40,8 +41,8 @@ pub struct Searcher {
 }
 
 impl Searcher {
-    /// A searcher of the index at `path`, ranking by `ranking` and scanning the vectors as `search` says (config.json's).
-    /// It searches by words until vectors are loaded.
+    /// A searcher of the index at `path`, ranking by `ranking` and scanning the vectors as `search` says
+    /// (config.json's). It searches by words until vectors are loaded.
     pub fn open(path: &Path, ranking: Ranking, search: config::Search) -> Result<Self> {
         let mut searcher = Self {
             index: Reader::open(path)?,
@@ -197,16 +198,6 @@ impl Searcher {
         Ok(self.vectors.sketch_ranks(vector, &|kind| query.wants(kind), segments))
     }
 
-    /// A segment's whole text.
-    pub fn segment_text(&self, segment_id: i64) -> Result<Option<String>> {
-        self.index.segment_text(segment_id)
-    }
-
-    /// A file's text: its text segments in order (see Reader::file_text).
-    pub fn file_text(&self, path: &str) -> Result<Option<String>> {
-        self.index.file_text(path)
-    }
-
     /// Recently changed files, for an empty query.
     pub fn recent(&self, request: &Search) -> Result<Results> {
         let mut hits = Vec::new();
@@ -276,20 +267,19 @@ mod tests {
         let index = TempIndex::new("sketches");
         let mut store = Writer::open(&index.path).unwrap();
         // More segments than are scored exactly, and a code file the search mustn't show.
-        let files = crate::resources::CANDIDATES / 50 + 20;
-        for file in 0..files as u64 {
-            let passages = (0..50).map(|n| (format!("passage {n}"), Some(unit(file * 100 + n)))).collect();
+        for file in 0..20 {
+            let passages = (0..5).map(|n| (format!("passage {n}"), Some(unit(file * 100 + n)))).collect();
             add(&mut store, &format!("/a/{file}.txt"), Kind::Plaintext, passages);
         }
         add(&mut store, "/a/code.rs", Kind::Code, vec![("fn".into(), Some(unit(7 * 100 + 3)))]);
         let mut searcher = Searcher::open(&index.path, Ranking::default(), scanning(Scan::Sketch)).unwrap();
         searcher.load_vectors().unwrap();
         let request = Search { q: "zebra".into(), limit: 1, ..Default::default() };
-        let hits = searcher.search(&request, Some(&unit(7 * 100 + 3))).unwrap().hits;
+        let hits = searcher.search_in(&request, Some(&unit(7 * 100 + 3)), Form::Sketch, 10).unwrap().hits;
         assert_eq!((hits[0].name.as_str(), hits[0].loc), ("7.txt", Some(4.0)));
         assert!((hits[0].cosine.unwrap() - 1.0).abs() < 1e-5);
         let ranks = searcher.sketch_ranks(&request, &unit(7 * 100 + 3), &[hits[0].segment_id]).unwrap();
-        assert_eq!(ranks, (vec![Some(0)], files * 50));
+        assert_eq!(ranks, (vec![Some(0)], 100));
     }
 
     #[test]

@@ -197,9 +197,13 @@ pub fn stretch(levels: &[f32]) -> Vec<f32> {
     levels.iter().map(|l| ((l - floor) / (top - floor).max(1e-3)).clamp(0.0, 1.0)).collect()
 }
 
+/// A level from 0 to 1 as a block character, ▁ to █.
+pub fn block(level: f32) -> char {
+    ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'][((level.clamp(0.0, 1.0) * 7.0).round() as usize).min(7)]
+}
+
 /// A waveform in block characters, one per level; the columns from `first` to `last` in the accent colour.
 pub fn sparkline(terminal: &Terminal, levels: &[f32], highlight: Option<(usize, usize)>) -> String {
-    const BLOCKS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
     let mut out = String::new();
     let mut run = String::new();
     let mut lit = false;
@@ -210,7 +214,7 @@ pub fn sparkline(terminal: &Terminal, levels: &[f32], highlight: Option<(usize, 
             run.clear();
         }
         lit = now;
-        run.push(BLOCKS[((level.clamp(0.0, 1.0) * 7.0).round() as usize).min(7)]);
+        run.push(block(*level));
     }
     if !run.is_empty() {
         out.push_str(&if lit { terminal.accent(&run) } else { terminal.dim(&run) });
@@ -229,9 +233,7 @@ mod tests {
     #[test]
     fn wraps_and_cuts() {
         let lines = wrap("one two three four five six seven eight nine ten eleven twelve", 20, 2);
-        assert_eq!(lines.len(), 2);
-        assert!(lines.iter().all(|l| l.chars().count() <= 21));
-        assert!(lines[1].ends_with('…'));
+        assert_eq!(lines, ["one two three four", "five six seven eigh…"]);
     }
 
     #[test]
@@ -244,7 +246,6 @@ mod tests {
 
     #[test]
     fn sparkline_has_a_block_per_level() {
-        let line = sparkline(&plain(), &[0.0, 0.5, 1.0], Some((1, 1)));
-        assert_eq!(line.chars().count(), 3);
+        assert_eq!(sparkline(&plain(), &[0.0, 0.5, 1.0], Some((1, 1))), "▁▅█");
     }
 }

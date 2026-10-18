@@ -4,11 +4,9 @@
 //! `sift-it open 2` opens the second.
 
 use crate::config;
-use crate::ingest::discover::crawl;
+use crate::query::timestamp;
 use anyhow::{Context, Result, bail};
-use protocol::Hit;
-use protocol::Kind;
-use protocol::Segment;
+use protocol::{Hit, Kind};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -18,13 +16,12 @@ use std::process::Command;
 pub struct Place {
     pub path: PathBuf,
     pub kind: Kind,
-    pub segment: Option<Segment>,
     pub loc: Option<f64>,
 }
 
 impl Place {
     pub fn of(hit: &Hit) -> Self {
-        Self { path: PathBuf::from(&hit.path), kind: hit.kind, segment: Some(hit.segment), loc: hit.loc }
+        Self { path: PathBuf::from(&hit.path), kind: hit.kind, loc: hit.loc }
     }
 
     /// A file named on the command line, with a place in it (a page, a second, a line) or not.
@@ -33,9 +30,30 @@ impl Place {
             bail!("no such file: {}", path.display());
         }
         let sources = config::Config::load().unwrap_or_default().sources;
-        let kind = sources.kind_of(&crawl::extension_of(path)).unwrap_or(Kind::Document);
-        Ok(Self { path: path.to_path_buf(), kind, segment: None, loc: at })
+        let kind = sources.kind_of(&config::extension_of(path)).unwrap_or(Kind::Document);
+        Ok(Self { path: path.to_path_buf(), kind, loc: at })
     }
+
+    pub fn target(&self) -> Target {
+        match (self.kind, self.loc) {
+            (Kind::Audio | Kind::Video, Some(seconds)) => Target::Moment(seconds),
+            (Kind::Document, Some(page)) if page > 1.0 && config::is_pdf(&self.path) => Target::Page(page as usize),
+            (Kind::Plaintext | Kind::Structured | Kind::Code, Some(line))
+                if config::extension_of(&self.path) != "ipynb" =>
+            {
+                Target::Line(line.max(1.0) as usize)
+            }
+            _ => Target::File,
+        }
+    }
+}
+
+/// What opening a place does: play from a moment, open a PDF at a page or text at a line, or just open the file.
+pub enum Target {
+    Moment(f64),
+    Page(usize),
+    Line(usize),
+    File,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -74,33 +92,29 @@ pub fn open(place: &Place, reveal: bool) -> Result<String> {
         run("open", &["-R".as_ref(), place.path.as_os_str()])?;
         return Ok(format!("Showing {name} in Finder"));
     }
-    let loc = place.loc;
-    match (place.kind, loc) {
-        (Kind::Audio | Kind::Video, Some(seconds)) => {
+    match place.target() {
+        Target::Moment(seconds) => {
             if play_at(&place.path, seconds).is_ok() {
                 return Ok(format!("Playing {name} from {}", timestamp(seconds)));
             }
             open_file(&place.path)?;
             Ok(format!("Opened {name}; the match is at {}", timestamp(seconds)))
         }
-        (Kind::Document, Some(page)) if page > 1.0 && crawl::is_pdf(&place.path) => {
-            if open_pdf_at(&place.path, page as usize).is_ok() {
+        Target::Page(page) => {
+            if open_pdf_at(&place.path, page).is_ok() {
                 return Ok(format!("Opened {name} at page {page}"));
             }
             run("open", &["-a".as_ref(), "Preview".as_ref(), place.path.as_os_str()])?;
             Ok(format!("Opened {name}; the match is on page {page} (Preview's Go to Page needs Accessibility access)"))
         }
-        (Kind::Plaintext | Kind::Structured | Kind::Code, Some(line))
-            if !place.path.to_string_lossy().ends_with(".ipynb") =>
-        {
-            let line = line.max(1.0) as usize;
+        Target::Line(line) => {
             if let Some(editor) = open_in_editor(&place.path, line)? {
                 return Ok(format!("Opened {name} at line {line} in {editor}"));
             }
             open_file(&place.path)?;
             Ok(format!("Opened {name}; the match is at line {line} (set $EDITOR to open at the line)"))
         }
-        _ => {
+        Target::File => {
             open_file(&place.path)?;
             Ok(format!("Opened {name}"))
         }
@@ -189,13 +203,4 @@ fn open_in_editor(path: &Path, line: usize) -> Result<Option<String>> {
         bail!("{program} failed ({status})");
     }
     Ok(Some(name))
-}
-
-pub fn timestamp(seconds: f64) -> String {
-    let s = seconds.max(0.0) as u64;
-    if s >= 3600 {
-        format!("{}:{:02}:{:02}", s / 3600, s % 3600 / 60, s % 60)
-    } else {
-        format!("{}:{:02}", s / 60, s % 60)
-    }
 }

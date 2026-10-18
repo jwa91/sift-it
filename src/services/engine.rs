@@ -129,6 +129,19 @@ impl Meaning {
             Meaning::Unavailable(_) => MeaningState::Unavailable,
         }
     }
+
+    /// Why search by meaning is unavailable, when it is.
+    fn error(&self) -> Option<String> {
+        match self {
+            Meaning::Unavailable(error) => Some(error.clone()),
+            _ => None,
+        }
+    }
+
+    /// The event that says what it is now.
+    fn event(&self) -> Event {
+        Event::Meaning { state: self.state(), error: self.error() }
+    }
 }
 
 struct Loaded {
@@ -177,10 +190,10 @@ impl Core {
             Op::Search(search) if !search.q.trim().is_empty() => reply(self.search(search)?),
             Op::Search(search) | Op::Recent(search) => reply(self.with_searcher(|searcher| searcher.recent(search))?),
             Op::Text { segment_id: Some(id), .. } => {
-                reply(Text { text: self.with_searcher(|searcher| searcher.segment_text(*id))? })
+                reply(Text { text: self.with_searcher(|searcher| searcher.index().segment_text(*id))? })
             }
             Op::Text { path: Some(path), .. } => {
-                reply(Text { text: self.with_searcher(|searcher| searcher.file_text(path))? })
+                reply(Text { text: self.with_searcher(|searcher| searcher.index().file_text(path))? })
             }
             Op::Text { .. } => bail!("which segment or file?"),
             Op::Status => reply(self.status()?),
@@ -214,13 +227,9 @@ impl Core {
             Ok((searcher.vector_count(), searcher.plan().scan(), searcher.vectors_resident(), stats))
         })?;
         let meaning = self.meaning.lock().unwrap();
-        let error = match &meaning.meaning {
-            Meaning::Unavailable(error) => Some(error.clone()),
-            _ => None,
-        };
         Ok(Status {
             meaning: meaning.meaning.state(),
-            error,
+            error: meaning.meaning.error(),
             vectors,
             scan,
             resident,
@@ -340,25 +349,15 @@ impl Core {
             // Unloaded meanwhile: what was loaded goes with this thread.
             return;
         }
-        let event = match loaded {
-            Ok((embedder, vectors)) => {
-                let installed = self.with_searcher(|searcher| searcher.set_vectors(vectors));
-                match installed {
-                    Ok(()) => {
-                        state.meaning = Meaning::Ready(embedder);
-                        Event::Meaning { state: MeaningState::Ready, error: None }
-                    }
-                    Err(error) => {
-                        state.meaning = Meaning::Unavailable(format!("{error:#}"));
-                        Event::Meaning { state: MeaningState::Unavailable, error: Some(format!("{error:#}")) }
-                    }
-                }
-            }
-            Err(error) => {
-                state.meaning = Meaning::Unavailable(format!("{error:#}"));
-                Event::Meaning { state: MeaningState::Unavailable, error: Some(format!("{error:#}")) }
-            }
+        let installed = loaded.and_then(|(embedder, vectors)| {
+            self.with_searcher(|searcher| searcher.set_vectors(vectors))?;
+            Ok(embedder)
+        });
+        state.meaning = match installed {
+            Ok(embedder) => Meaning::Ready(embedder),
+            Err(error) => Meaning::Unavailable(format!("{error:#}")),
         };
+        let event = state.meaning.event();
         drop(state);
         self.loaded.notify_all();
         (self.events)(&event);

@@ -8,7 +8,7 @@
 //!
 //! A file counts by its best segment, and the best of many segments fits nearly any query a little: a book has a
 //! passage about church bells, a crying baby and Christmas presents. So a long file's lift is lowered by about what
-//! its length alone explains, and a book no longer outranks the recording of church bells.
+//! its length alone explains, and a book doesn't outrank the recording of church bells.
 //!
 //! Words: a segment with every word of the query (the last one as a prefix, while typing) gets a bonus. For words the
 //! model can't read, a number or a code (INV-2024-0113), the bonus is large: no vector holds them exactly. The model
@@ -19,7 +19,7 @@ use super::understand::Query;
 use crate::config::Ranking;
 use std::collections::HashMap;
 
-/// How many segments found by meaning are in the running, at most.
+/// How many segments found by meaning are in the running, at most: far more than a list of results shows.
 const BY_MEANING: usize = 5000;
 
 /// A segment as retrieval found it.
@@ -227,8 +227,8 @@ mod tests {
         let penalties = length_penalties(&files, &ranking);
         assert_eq!(penalties[0], 0.0);
         assert_eq!(penalties[files.len() - 1], 0.0);
+        // Each ten times the length lowers it by the same.
         let (forty, four_hundred) = (penalties[4], penalties[44]);
-        assert!((forty - ranking.length_penalty * 10f32.ln()).abs() < 1e-6);
-        assert!(four_hundred > forty && four_hundred < 0.06);
+        assert!(forty > 0.0 && (four_hundred - 2.0 * forty).abs() < 1e-6);
     }
 }

@@ -1,5 +1,5 @@
-//! Text files, code and records: their lines, decoded as they come (UTF-8, UTF-16 with a byte order mark, or Latin-1), so a
-//! file of any size streams.
+//! Text files, code and records: their lines, decoded as they come (UTF-8, UTF-16 with a byte order mark, or Latin-1),
+//! so a file of any size streams.
 
 use crate::ingest::Content;
 use anyhow::Result;

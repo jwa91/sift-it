@@ -2,19 +2,27 @@
 members = ["crates/llama", "crates/protocol", "transcribe"]
 default-members = [".", "crates/llama", "crates/protocol", "transcribe"]
 
-[package]
-name = "sift-it"
+# One version for the binary and its crates: a release bumps it here.
+[workspace.package]
 version = "0.2.0"
 edition = "2024"
+license = "MIT"
+
+[package]
+name = "sift-it"
+description = "Local file search for macOS: search files by what's in them"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
 
 [dependencies]
 anyhow = "1.0.104"
 base64 = "0.23.1"
 block2 = "0.6.2"
 clap = { version = "4.6.7", features = ["derive"] }
-crossterm = "0.29.0"
 embedder = { package = "sift-it-llama", path = "crates/llama" }
-image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
+image = { version = "0.25.10", default-features = false, features = ["png"] }
 libc = "0.2"
 notify = "8"
 objc2 = "0.6.5"

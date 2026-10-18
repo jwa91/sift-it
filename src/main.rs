@@ -15,7 +15,7 @@ use config::Config;
 use protocol::{Kind, MeaningState, Mode, Search};
 use std::path::PathBuf;
 
-/// Sift It: search your files by what's in them, with EmbeddingGemma 2 on this Mac.
+/// Sift It: search your files by what's in them, with EmbeddingGemma 2 on your own Mac.
 #[derive(Parser)]
 #[command(name = "sift-it", version)]
 struct Cli {
@@ -52,9 +52,9 @@ enum Command {
     /// Search the index
     Search {
         words: Vec<String>,
-        /// Only these kinds: plaintext, document, image, screenshot, audio, video, code
+        /// Only these kinds
         #[arg(long, value_delimiter = ',')]
-        kind: Vec<String>,
+        kind: Vec<Kind>,
         #[arg(short = 'n', default_value_t = 10)]
         limit: usize,
         /// By words or by meaning (config.json's `search.mode` when not said)
@@ -129,9 +129,6 @@ enum Command {
         #[arg(long, default_value_t = 200_000)]
         vectors: usize,
     },
-    /// Print the query vectors of these queries, one JSON array per line (for analysis)
-    #[command(hide = true)]
-    EmbedQuery { queries: Vec<String> },
     /// Check that this build makes the reference vectors
     Selftest {
         /// A folder with vectors.json and its inputs (default: the ones built in)
@@ -167,8 +164,6 @@ enum ServiceAction {
     Uninstall,
     /// Whether it's installed and running
     Status,
-    /// Print the LaunchAgent plists it would install
-    Plist,
 }
 
 #[derive(Subcommand)]
@@ -227,7 +222,7 @@ fn run(cli: Cli) -> Result<()> {
             Ok(())
         }
         Command::Index { json, reindex } => index(json, reindex),
-        Command::Search { words, kind, limit, by, json } => search_once(&words.join(" "), &kind, limit, by, json),
+        Command::Search { words, kind, limit, by, json } => search_once(&words.join(" "), kind, limit, by, json),
         Command::Open { target, at, reveal } => {
             let place = match target.parse::<usize>() {
                 Ok(number) if !std::path::Path::new(&target).exists() => clients::open::recall(number)?,
@@ -255,10 +250,6 @@ fn run(cli: Cli) -> Result<()> {
             ServiceAction::Install => services::launchd::install(),
             ServiceAction::Uninstall => services::launchd::uninstall(),
             ServiceAction::Status => services::launchd::status(),
-            ServiceAction::Plist => {
-                print!("{}", services::launchd::plists()?);
-                Ok(())
-            }
         },
         Command::Status { json } => status(json),
         Command::Model { action } => match action {
@@ -296,9 +287,8 @@ fn run(cli: Cli) -> Result<()> {
         Command::Read { path, tokens } => {
             let path = config::expand(&path.to_string_lossy());
             let config = Config::load()?;
-            let kind = ingest::discover::crawl::kind_of(&config, &path).ok_or_else(|| {
-                anyhow::anyhow!("Sift It doesn't read .{} files", ingest::discover::crawl::extension_of(&path))
-            })?;
+            let kind = ingest::discover::crawl::kind_of(&config, &path)
+                .ok_or_else(|| anyhow::anyhow!("Sift It doesn't read .{} files", config::extension_of(&path)))?;
             let settings = config.reading.resolve(&path, kind);
             let mut model = if tokens {
                 Some(embedder::Embedder::load(&embedder::ModelFiles::in_folder(&config::models_dir())?, true)?)
@@ -321,7 +311,9 @@ fn run(cli: Cli) -> Result<()> {
                         None => format!("text, {} chars", text.len()),
                     },
                     ingest::Payload::Image(image) => format!("picture {}×{}", image.width, image.height),
-                    ingest::Payload::Audio(samples) => format!("sound {:.1} s", samples.len() as f64 / 16000.0),
+                    ingest::Payload::Audio(samples) => {
+                        format!("sound {:.1} s", samples.len() as f64 / embedder::AUDIO_RATE as f64)
+                    }
                 };
                 let at = piece.loc.map(|l| format!(" at {l}")).unwrap_or_default();
                 let text = piece.text.as_deref().unwrap_or("").replace('\n', " ");
@@ -341,15 +333,6 @@ fn run(cli: Cli) -> Result<()> {
         }
         Command::BenchSearch { vectors } => tools::bench::search(vectors),
         Command::BenchEmbed => tools::bench::embed(),
-        Command::EmbedQuery { queries } => {
-            let files = embedder::ModelFiles::in_folder(&config::models_dir())?;
-            let mut encoder = embedder::Embedder::load(&files, true)?;
-            for query in queries {
-                let prompt = query::Query::of(&Search { q: query, ..Default::default() }).prompt();
-                println!("{}", serde_json::to_string(&encoder.embed_text(&prompt)?)?);
-            }
-            Ok(())
-        }
         Command::Selftest { folder } => {
             let models = embedder::ModelFiles::in_folder(&config::models_dir())?;
             match folder {
@@ -450,7 +433,7 @@ fn index(json: bool, reindex: bool) -> Result<()> {
         return Err(error);
     }
     // Then what's said in recordings and videos that's left, when the speech model is there.
-    if !indexer.index.transcripts_pending(1)?.is_empty() {
+    if indexer.index.next_transcript()?.is_some() {
         match helper.map_or_else(adapters::speech::Transcriber::start, Ok) {
             Ok(mut transcriber) => {
                 if !json {
@@ -468,11 +451,7 @@ fn index(json: bool, reindex: bool) -> Result<()> {
     Ok(())
 }
 
-fn search_once(q: &str, kinds: &[String], limit: usize, by: Option<Mode>, json: bool) -> Result<()> {
-    let kinds = kinds
-        .iter()
-        .map(|name| Kind::parse(name).ok_or_else(|| anyhow::anyhow!("no such kind: {name}")))
-        .collect::<Result<Vec<_>>>()?;
+fn search_once(q: &str, kinds: Vec<Kind>, limit: usize, by: Option<Mode>, json: bool) -> Result<()> {
     // By meaning, it waits for the engine to load the model if it hasn't yet.
     let request = Search { q: q.to_string(), mode: by, kinds, limit, wait: true, ..Default::default() };
     let mut client = clients::Client::connect()?;

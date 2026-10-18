@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 /// A LaunchAgent: a `sift-it` command launchd runs at login, and again if it crashes.
 pub struct Agent {
-    pub label: &'static str,
+    label: &'static str,
     command: &'static str,
     log: &'static str,
     /// Runs at a lower priority (Nice, low-priority I/O), out of the way of everything else.
@@ -24,6 +24,11 @@ pub const ENGINE: Agent =
 const AGENTS: [&Agent; 2] = [&INDEXER, &ENGINE];
 
 impl Agent {
+    /// Where it writes what it says, in the data folder.
+    pub fn log_path(&self) -> PathBuf {
+        config::home().join(self.log)
+    }
+
     fn plist_path(&self) -> PathBuf {
         config::dirs_home().join(format!("Library/LaunchAgents/{}.plist", self.label))
     }
@@ -48,9 +53,9 @@ impl Agent {
     }
 
     /// The LaunchAgent for this binary: runs the command at login, and again if it crashes.
-    pub fn plist(&self) -> Result<String> {
+    fn plist(&self) -> Result<String> {
         let binary = stable_binary()?;
-        let log = config::home().join(self.log);
+        let log = self.log_path();
         let mut environment = String::new();
         for name in ["SIFT_IT_HOME", "SIFT_IT_MODELS"] {
             if let Ok(value) = std::env::var(name) {
@@ -184,27 +189,18 @@ pub fn uninstall() -> Result<()> {
 }
 
 pub fn status() -> Result<()> {
-    let engine = crate::clients::Client::running().is_some();
-    let status: serde_json::Map<String, serde_json::Value> = AGENTS
-        .iter()
-        .map(|agent| {
-            let running =
-                if agent.label == INDEXER.label { crate::services::indexer::running_pid().is_some() } else { engine };
-            let key = if agent.label == INDEXER.label { "indexer" } else { "engine" };
-            let value = serde_json::json!({
-                "installed": agent.plist_path().exists(),
-                "loaded": loaded(&agent.service()),
-                "running": running,
-                "plist": agent.plist_path().display().to_string(),
-            });
-            (key.to_string(), value)
+    let entry = |agent: &Agent, running: bool| {
+        serde_json::json!({
+            "installed": agent.plist_path().exists(),
+            "loaded": loaded(&agent.service()),
+            "running": running,
+            "plist": agent.plist_path().display().to_string(),
         })
-        .collect();
+    };
+    let status = serde_json::json!({
+        "indexer": entry(&INDEXER, super::indexer::running_pid().is_some()),
+        "engine": entry(&ENGINE, super::engine::connect().is_ok()),
+    });
     println!("{}", serde_json::to_string_pretty(&status)?);
     Ok(())
-}
-
-/// The plists `service install` would write.
-pub fn plists() -> Result<String> {
-    Ok(AGENTS.iter().map(|agent| agent.plist()).collect::<Result<Vec<_>>>()?.join("\n"))
 }

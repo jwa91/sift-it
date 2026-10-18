@@ -6,7 +6,7 @@
 //! write down.
 
 use crate::config;
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
@@ -20,9 +20,7 @@ pub const MODEL_BYTES: u64 = 740_363_168;
 pub const MODEL_SHA256: &str = "007a59761e9258779f189df396b50d12b83bb5b79e66df4b955c230d2f2a0a59";
 
 /// What wrote the transcripts: stored with the index, so a change of model or engine writes them again.
-pub fn source() -> &'static str {
-    "parakeet-ultra-q8_0/transcribe.cpp-0.4.0/v1"
-}
+pub const SOURCE: &str = "parakeet-ultra-q8_0/transcribe.cpp-0.4.0/v1";
 
 /// The speech model's file: in the models folder (`sift-it model download`), or else Handy's copy of the same file,
 /// so both apps share one download.
@@ -39,24 +37,23 @@ pub fn model_path() -> Option<PathBuf> {
 }
 
 /// The helper, beside this binary (the release and `make install` put it there; cargo builds it beside it too).
-pub fn helper_path() -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os("SIFT_IT_TRANSCRIBE") {
-        return Some(PathBuf::from(path)).filter(|path| path.exists());
-    }
+fn helper_path() -> Option<PathBuf> {
     let binary = std::env::current_exe().ok()?.canonicalize().ok()?;
     let helper = binary.parent()?.join("sift-it-transcribe");
     helper.exists().then_some(helper)
 }
 
+/// The helper and the model, or why speech can't be written down now.
+fn paths() -> Result<(PathBuf, PathBuf), String> {
+    let helper = helper_path().ok_or("sift-it-transcribe isn't installed beside sift-it")?;
+    let model = model_path()
+        .ok_or_else(|| format!("the speech model isn't downloaded (sift-it model download): no {MODEL_FILE}"))?;
+    Ok((helper, model))
+}
+
 /// Why speech can't be written down now, if it can't.
 pub fn unavailable() -> Option<String> {
-    if helper_path().is_none() {
-        return Some("sift-it-transcribe isn't installed beside sift-it".into());
-    }
-    if model_path().is_none() {
-        return Some(format!("the speech model isn't downloaded (sift-it model download): no {MODEL_FILE}"));
-    }
-    None
+    paths().err()
 }
 
 /// A sentence or a few, as the model heard it, with its time in seconds.
@@ -88,10 +85,7 @@ pub struct Transcriber {
 impl Transcriber {
     /// Starts the helper, at a lower priority than everything else, and waits until its model has loaded.
     pub fn start() -> Result<Transcriber> {
-        if let Some(why) = unavailable() {
-            bail!(why);
-        }
-        let (helper, model) = (helper_path().expect("checked"), model_path().expect("checked"));
+        let (helper, model) = paths().map_err(|why| anyhow!(why))?;
         let mut command = Command::new(&helper);
         command.arg(&model).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
         // Searching and the first pass come first.

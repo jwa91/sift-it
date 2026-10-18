@@ -22,7 +22,7 @@ mod reading;
 mod sources;
 
 pub use reading::{Depth, Reading, Settings};
-pub use sources::{Pattern, Sources};
+pub use sources::{Pattern, Sources, extension_of, is_pdf};
 
 use anyhow::{Context, Result, anyhow, bail};
 use protocol::{FolderAction, Folders, Kind, Mode, Scan};
@@ -76,11 +76,8 @@ pub struct Config {
 
 impl Config {
     pub fn load() -> Result<Self> {
-        Self::load_from(&config_path())
-    }
-
-    pub fn load_from(path: &Path) -> Result<Self> {
-        match std::fs::read(path) {
+        let path = config_path();
+        match std::fs::read(&path) {
             Ok(bytes) => {
                 let mut config: Config =
                     serde_json::from_slice(&bytes).with_context(|| format!("can't read {}", path.display()))?;
@@ -216,8 +213,8 @@ pub struct Ranking {
     /// length_free segments (a photo, a few pages, a minute and a half of sound) not at all. That is about how far the
     /// best of n segments stands above a typical one by chance alone: the expected maximum of n draws, at the usual
     /// spread of a query's scores (0.03), less that of length_free. A 3-minute video loses 0.03, a novel 0.05–0.07.
-    /// On a folder of 520 mixed files and eight books (docs/ranking.md), a book had come first for 21 of 95 queries
-    /// about something else; now 1.
+    /// On a folder of 520 mixed files and eight books (docs/ranking.md), without it a book comes first for 21 of 95
+    /// queries about something else; with it, for 1.
     pub length_penalty: f32,
     pub length_free: f32,
     /// Segments of one file within this much of its best are close enough for words to choose between them.
@@ -252,9 +249,9 @@ impl Default for Ranking {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Indexing {
-    /// How much memory indexing may take, in MB: how many files are read at once, and whether what's said in
-    /// recordings is written down beside the reading or after it (resources::IngestPlan). What's written is the same either
-    /// way. At `auto`, a quarter of the Mac's memory.
+    /// How much memory indexing may take, in MB: how many files are read at once, and whether what's said in recordings
+    /// is written down beside the reading or after it (resources::IngestPlan). What's written is the same either way.
+    /// At `auto`, a quarter of the Mac's memory.
     pub memory_mb: Budget,
     /// Index while on battery power. In Low Power Mode it always waits.
     pub on_battery: bool,
@@ -413,7 +410,9 @@ mod tests {
         assert_eq!(config, Config::default());
         // A config.json with only some of it takes the rest from the defaults.
         let partial: Config = serde_json::from_str(r#"{"reading": {"video": {"keep_every_s": 10}}}"#).unwrap();
-        assert_eq!(partial.reading.resolve(Path::new("/a.mov"), Kind::Video).tokens, 70);
+        let video = partial.reading.resolve(Path::new("/a.mov"), Kind::Video);
+        let default = Config::default().reading.resolve(Path::new("/a.mov"), Kind::Video);
+        assert_eq!((video.keep_every_s, video.tokens), (10.0, default.tokens));
         assert_eq!(partial.sources.kind_of("mov"), Some(Kind::Video));
     }
 }

@@ -14,7 +14,7 @@ use std::path::Path;
 const REPOSITORY: &str = "ggml-org/embeddinggemma-2-GGUF";
 const REVISION: &str = "bfcd298762cc34d0357ece5ebdd31791a3a374d8";
 
-pub struct RemoteFile {
+struct RemoteFile {
     pub repository: &'static str,
     pub revision: &'static str,
     pub name: &'static str,
@@ -23,7 +23,7 @@ pub struct RemoteFile {
 }
 
 /// The text model first: with it alone, search works. The speech model last: the rest works without it.
-pub const FILES: [RemoteFile; 3] = [
+const FILES: [RemoteFile; 3] = [
     RemoteFile {
         repository: REPOSITORY,
         revision: REVISION,

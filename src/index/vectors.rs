@@ -16,8 +16,8 @@
 //!
 //! The next generation: rows whose segments are gone stay until a quarter of a partition is dead, and the sketches keep
 //! the mean they were made against until the partition's mean moves away from it. Then, while the indexer is idle, it
-//! writes the partition's next generation from the live rows, moves their segments to their new rows in one transaction,
-//! and removes the old files. A reader that still maps them keeps them until it lets go.
+//! writes the partition's next generation from the live rows, moves their segments to their new rows in one
+//! transaction, and removes the old files. A reader that still maps them keeps them until it lets go.
 
 use anyhow::{Context, Result, bail};
 use embedder::DIM;
@@ -72,9 +72,8 @@ const ROW_MAJOR: i32 = 101;
 const NO_TRANS: i32 = 111;
 
 /// How a file holds its rows.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Form {
-    #[default]
     F32,
     F16,
     Sketch,
@@ -251,8 +250,8 @@ impl Sums {
     }
 }
 
-/// Writes rows to the partition called `partition`, after the ones it counts, and returns its id and the first new
-/// row. They're on disk when this returns, so the transaction `conn` is in, which points segments at them, commits after
+/// Writes rows to the partition called `partition`, after the ones it counts, and returns its id and the first new row.
+/// They're on disk when this returns, so the transaction `conn` is in, which points segments at them, commits after
 /// them. It has to hold the write lock (BEGIN IMMEDIATE): no other writer may append between here and its commit.
 pub fn append(conn: &Connection, folder: &Path, partition: &str, rows: &[&[f32]]) -> Result<(i64, i64)> {
     debug_assert!(!rows.is_empty(), "a mean of no rows");
@@ -434,8 +433,8 @@ pub fn tidy(conn: &mut Connection, folder: &Path) -> Result<()> {
     Ok(())
 }
 
-/// A file of rows, mapped read-only. Its pages belong to the file: under memory pressure macOS drops them and reads them
-/// again when they're needed, where a copy in memory would be swapped out.
+/// A file of rows, mapped read-only. Its pages belong to the file: under memory pressure macOS drops them and reads
+/// them again when they're needed, where a copy in memory would be swapped out.
 pub struct Map {
     address: *mut libc::c_void,
     length: usize,

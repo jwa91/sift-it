@@ -4,15 +4,13 @@
 //! after `indexing.release_model_s` with nothing to do. A change to config.json counts at once, with a full sync.
 //!
 //! It writes down what's said in recordings and videos (ingest/listen.rs), a chunk at a time: beside the reading when
-//! `indexing.memory_mb` allows both models (resources::IngestPlan), else once everything is read. Anything that changes in the
-//! folders comes first, and the writing down goes on where it stopped.
+//! `indexing.memory_mb` allows both models (resources::IngestPlan), else once everything is read. Anything that changes
+//! in the folders comes first, and the writing down goes on where it stopped.
 //!
 //! With nothing left to do, it writes the next generation of a vector partition that's due one (index/vectors.rs).
 //!
-//! It says what it's doing in status.json (for `sift-it status` and front ends), and listens to signals:
-//!   SIGUSR1  look for changes now (a full sync)
-//!   SIGUSR2  pause or resume
-//!   SIGTERM  stop (what isn't finished stays queued)
+//! It says what it's doing in status.json (for `sift-it status` and front ends), and listens to signals: SIGUSR1  look
+//! for changes now (a full sync) SIGUSR2  pause or resume SIGTERM  stop (what isn't finished stays queued)
 //!
 //! One runs at a time (daemon.lock). With `indexing.on_battery` off it waits for a charger; in Low Power Mode it always
 //! waits. When a reader gets stuck (ingest::Stuck), it exits, and launchd starts a new one.
@@ -21,6 +19,7 @@ use crate::adapters::speech::Transcriber;
 use crate::config::{self, Config};
 use crate::index::{self, Writer};
 use crate::ingest::{Event, Indexer, Stuck};
+use crate::query::timestamp;
 use crate::resources::{self, IngestPlan};
 use anyhow::{Context, Result, bail};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
@@ -103,7 +102,7 @@ impl Reporter {
             // Beside the reading, the reading's progress is what's shown.
             Event::Transcribing { path, at, duration } if self.status.state == IndexerState::Transcribing => {
                 self.status.current = Some(path.clone());
-                self.status.detail = Some(format!("{} of {}", clock(*at), clock(*duration)));
+                self.status.detail = Some(format!("{} of {}", timestamp(*at), timestamp(*duration)));
             }
             Event::Transcribing { .. } => {}
             Event::Transcribed { path, passages, seconds, ms } => {
@@ -148,49 +147,23 @@ fn file_name(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
 
-/// "12:34", or "1:02:03" past the hour.
-fn clock(seconds: f64) -> String {
-    let s = seconds.max(0.0) as u64;
-    if s >= 3600 {
-        format!("{}:{:02}:{:02}", s / 3600, s % 3600 / 60, s % 60)
-    } else {
-        format!("{}:{:02}", s / 60, s % 60)
-    }
-}
-
+/// A line of the log, after the time ("2026-10-14 12:34:56", in the Mac's time zone).
 fn log(line: &str) {
-    let now = chrono_like(SystemTime::now());
-    eprintln!("{now} {line}");
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    unsafe { libc::localtime_r(&libc::time(std::ptr::null_mut()), &mut tm) };
+    let (year, month, day) = (tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday);
+    eprintln!("{year:04}-{month:02}-{day:02} {:02}:{:02}:{:02} {line}", tm.tm_hour, tm.tm_min, tm.tm_sec);
 }
 
-/// "2026-10-14 12:34:56" in UTC, without a date library.
-fn chrono_like(time: SystemTime) -> String {
-    let seconds = time.duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-    let (days, rest) = (seconds / 86_400, seconds % 86_400);
-    // Civil from days (Howard Hinnant's algorithm).
-    let z = days as i64 + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = yoe + era * 400 + if month <= 2 { 1 } else { 0 };
-    format!("{year:04}-{month:02}-{day:02} {:02}:{:02}:{:02}", rest / 3600, rest % 3600 / 60, rest % 60)
-}
-
-/// Holds daemon.lock for as long as it lives: one indexer at a time.
-struct Lock(#[allow(dead_code)] File);
-
-fn lock() -> Result<Lock> {
+/// Locks daemon.lock, held for as long as the file is: one indexer at a time.
+fn lock() -> Result<File> {
     std::fs::create_dir_all(config::home())?;
     let file = File::options().create(true).truncate(false).write(true).open(lock_path())?;
     if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
         bail!("another sift-it daemon is running (pid {})", running_pid().map(|p| p.to_string()).unwrap_or("?".into()));
     }
     std::fs::write(lock_path(), std::process::id().to_string())?;
-    Ok(Lock(file))
+    Ok(file)
 }
 
 fn lock_path() -> PathBuf {
@@ -206,6 +179,14 @@ pub fn running_pid() -> Option<i32> {
         return None;
     }
     std::fs::read_to_string(lock_path()).ok()?.trim().parse().ok()
+}
+
+/// Whether the work in hand should make way: the indexer stops, pauses or syncs again, or config.json changed.
+fn interrupted(config_path: &Path, config_time: Option<SystemTime>) -> bool {
+    SHUTDOWN.load(Ordering::SeqCst)
+        || TOGGLE_PAUSE.load(Ordering::SeqCst)
+        || RESYNC.load(Ordering::SeqCst)
+        || modified(config_path) != config_time
 }
 
 fn modified(path: &Path) -> Option<SystemTime> {
@@ -406,12 +387,7 @@ pub fn run() -> Result<()> {
                 if !crate::models::status(&config::models_dir()).media {
                     reporter.set(IndexerState::Waiting, Some("Waiting for the model to download".into()));
                 } else {
-                    let stop = || {
-                        SHUTDOWN.load(Ordering::SeqCst)
-                            || TOGGLE_PAUSE.load(Ordering::SeqCst)
-                            || RESYNC.load(Ordering::SeqCst)
-                            || modified(&config_path) != config_time
-                    };
+                    let stop = || interrupted(&config_path, config_time);
                     let mut events = |event: Event| reporter.event(&event);
                     let mut take = || changes.take();
                     // Speech beside the reading, when memory allows both models.
@@ -439,7 +415,7 @@ pub fn run() -> Result<()> {
         } else {
             // Everything is read: what's said in recordings and videos is written down meanwhile.
             let to_write = !paused
-                && indexer.index.transcripts_pending(1).map(|rows| !rows.is_empty()).unwrap_or(false)
+                && indexer.index.next_transcript().is_ok_and(|next| next.is_some())
                 && resources::wait(&config.indexing).is_none();
             let may_start = speech_failed_at.is_none_or(|at| at.elapsed() > SPEECH_RETRY);
             if to_write && transcriber.is_none() && may_start {
@@ -472,11 +448,7 @@ pub fn run() -> Result<()> {
                 // Between chunks it makes way for anything that changes in the folders (synced, and read first).
                 let arrived = std::cell::RefCell::new(Vec::new());
                 let stop = || {
-                    if SHUTDOWN.load(Ordering::SeqCst)
-                        || TOGGLE_PAUSE.load(Ordering::SeqCst)
-                        || RESYNC.load(Ordering::SeqCst)
-                        || modified(&config_path) != config_time
-                    {
+                    if interrupted(&config_path, config_time) {
                         return true;
                     }
                     while let Ok(event) = changes.receiver.try_recv() {
@@ -549,7 +521,7 @@ fn sleep_interruptibly(duration: Duration) {
 
 /// Keeps the log (where launchd sends stderr) from growing without end: past `max` bytes, its older half goes.
 fn trim_log(max: u64) {
-    let path = config::home().join("indexer.log");
+    let path = super::launchd::INDEXER.log_path();
     let Ok(metadata) = std::fs::metadata(&path) else { return };
     if metadata.len() <= max {
         return;

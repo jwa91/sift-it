@@ -119,11 +119,11 @@ impl Reader {
     }
 
     /// Files waiting to be indexed, cheapest first (newest first among equals).
-    pub fn pending(&self, limit: usize) -> Result<Vec<FileRow>> {
+    pub fn pending(&self) -> Result<Vec<FileRow>> {
         let mut statement = self.conn.prepare(&format!(
-            "SELECT {FILE_COLUMNS} FROM files WHERE state = 'pending' ORDER BY cost, modified DESC LIMIT ?1"
+            "SELECT {FILE_COLUMNS} FROM files WHERE state = 'pending' ORDER BY cost, modified DESC"
         ))?;
-        let rows = statement.query_map([limit.min(i64::MAX as usize) as i64], file_row)?;
+        let rows = statement.query_map([], file_row)?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 
@@ -148,21 +148,23 @@ impl Reader {
         Ok(Queued { files, seconds, heaviest })
     }
 
-    /// Recordings and videos whose speech is still to be written down (or was, partway: `at`), newest first. The
-    /// second of each is where to go on from.
-    pub fn transcripts_pending(&self, limit: usize) -> Result<Vec<(FileRow, f64)>> {
-        let mut statement = self.conn.prepare(&format!(
+    /// The newest recording or video whose speech is still to be written down (or was, partway: `at`), with the
+    /// second to go on from.
+    pub fn next_transcript(&self) -> Result<Option<(FileRow, f64)>> {
+        let query = format!(
             "SELECT {FILE_COLUMNS}, transcript FROM files
-             WHERE {SPEECH} AND (transcript IS NULL OR transcript LIKE 'at:%') ORDER BY modified DESC LIMIT ?1",
-        ))?;
-        let rows = statement.query_map([limit as i64], |row| {
-            let progress: Option<String> = row.get(7)?;
-            Ok((
-                file_row(row)?,
-                progress.and_then(|p| p.strip_prefix("at:").and_then(|at| at.parse().ok())).unwrap_or(0.0),
-            ))
-        })?;
-        Ok(rows.collect::<std::result::Result<_, _>>()?)
+             WHERE {SPEECH} AND (transcript IS NULL OR transcript LIKE 'at:%') ORDER BY modified DESC LIMIT 1",
+        );
+        Ok(self
+            .conn
+            .query_row(&query, [], |row| {
+                let progress: Option<String> = row.get(7)?;
+                Ok((
+                    file_row(row)?,
+                    progress.and_then(|p| p.strip_prefix("at:").and_then(|at| at.parse().ok())).unwrap_or(0.0),
+                ))
+            })
+            .optional()?)
     }
 
     /// How many recordings and videos have their speech written down, how many in all, and how much sound is left.
@@ -195,7 +197,8 @@ impl Reader {
             .flatten())
     }
 
-    /// A file's text: its text segments in order, at most about 8,000 characters.
+    /// A file's text, for a preview: its text segments in order, until there are some 8,000 bytes (more than a
+    /// preview shows).
     pub fn file_text(&self, path: &str) -> Result<Option<String>> {
         let mut statement = self.conn.prepare(
             "SELECT s.text FROM segments s JOIN files f ON f.id = s.file_id
@@ -382,7 +385,7 @@ impl Writer {
                  modified REAL NOT NULL,
                  reading TEXT NOT NULL,                   -- how it's read (ingest::fingerprint)
                  speech INTEGER NOT NULL,                 -- what's said in it is to be written down
-                 cost REAL NOT NULL,                      -- about how long reading it takes, in seconds (estimate::cost)
+                 cost REAL NOT NULL,                      -- about how long reading it takes, in seconds (discover::cost)
                  state TEXT NOT NULL DEFAULT 'pending',   -- pending | done | failed
                  error TEXT,
                  info TEXT,                               -- JSON: pages, duration, width, height, tags
@@ -414,18 +417,18 @@ impl Writer {
         Ok(())
     }
 
-    pub fn set_meta(&self, key: &str, value: &str) -> Result<()> {
+    fn set_meta(&self, key: &str, value: &str) -> Result<()> {
         self.conn.execute("INSERT OR REPLACE INTO meta VALUES (?1, ?2)", [key, value])?;
         Ok(())
     }
 
     /// A new or changed file: (re)queued, with what was indexed from it before gone. `cost` is about how long reading
-    /// it takes (estimate::cost): the queue goes cheapest first.
+    /// it takes (discover::cost): the queue goes cheapest first.
     pub fn queue(&self, file: &NewFile, existing: Option<i64>, cost: f64) -> Result<i64> {
         let path = file.path.to_string_lossy();
         let (kind, size, reading, speech) = (file.kind.as_str(), file.size as i64, &file.reading, file.speech);
         if let Some(id) = existing {
-            self.delete_segments(id)?;
+            delete_segments(&self.conn, id)?;
             self.conn.execute(
                 "UPDATE files SET kind = ?2, size = ?3, modified = ?4, reading = ?5, speech = ?6, cost = ?7,
                  state = 'pending', error = NULL, info = NULL, indexed_at = NULL, transcript = NULL WHERE id = ?1",
@@ -445,11 +448,7 @@ impl Writer {
     /// Whether what's said in a file is to be written down, when only that changed: nothing is read again. What was
     /// written down goes either way (it's to do, or not wanted).
     pub fn set_speech(&self, id: i64, speech: bool) -> Result<()> {
-        self.conn.execute(
-            "DELETE FROM words WHERE rowid IN (SELECT id FROM segments WHERE file_id = ?1 AND segment = 'speech')",
-            [id],
-        )?;
-        self.conn.execute("DELETE FROM segments WHERE file_id = ?1 AND segment = 'speech'", [id])?;
+        delete_speech(&self.conn, id)?;
         self.conn.execute(
             "UPDATE files SET speech = ?2, transcript = NULL, info = json_remove(info, '$.speech') WHERE id = ?1",
             params![id, speech],
@@ -458,13 +457,9 @@ impl Writer {
     }
 
     pub fn remove_file(&self, id: i64) -> Result<()> {
-        self.delete_segments(id)?;
+        delete_segments(&self.conn, id)?;
         self.conn.execute("DELETE FROM files WHERE id = ?1", [id])?;
         Ok(())
-    }
-
-    fn delete_segments(&self, file_id: i64) -> Result<()> {
-        delete_segments(&self.conn, file_id)
     }
 
     /// Writes a part of a big file's segments while the rest is still being read, so memory doesn't grow with the
@@ -503,8 +498,8 @@ impl Writer {
         self.write_file(row, &[], &serde_json::json!({}), false, Some(error))
     }
 
-    /// A file whose reading got stuck (ingest::schedule::STUCK): failed like one that couldn't be read, but tried again later
-    /// (requeue_passing), since what got stuck is more likely the framework reading it than the file.
+    /// A file whose reading got stuck (ingest::schedule::STUCK): failed like one that couldn't be read, but tried again
+    /// later (requeue_passing), since what got stuck is more likely the framework reading it than the file.
     pub fn set_aside(&mut self, row: &FileRow, error: &str) -> Result<bool> {
         self.write_file(row, &[], &serde_json::json!({ "stuck": true }), false, Some(error))
     }
@@ -543,10 +538,10 @@ impl Writer {
         Ok(true)
     }
 
-    /// Writes down a stretch of what's said in a file (speech segments with their vectors), and how far that goes:
-    /// `upto` seconds, or `done`. The first stretch (from 0) replaces what was written before, and takes the file's
-    /// tags, which go into the keyword index with its name. Nothing is written (false) when the file changed since
-    /// it was handed out: it's being indexed again.
+    /// Writes down a stretch of what's said in a file (speech segments with their vectors), and how far that goes
+    /// (`progress`: `at:<seconds>`, `done`, or why it failed). The first stretch (from 0) replaces what was written
+    /// before, and takes the file's tags, which go into the keyword index with its name. Nothing is written (false)
+    /// when the file changed since it was handed out: it's being indexed again.
     pub fn add_transcript(
         &mut self,
         row: &FileRow,
@@ -557,27 +552,18 @@ impl Writer {
     ) -> Result<bool> {
         let folder = self.vectors_folder();
         let tx = self.reader.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let current: Option<(String, i64, f64, String, Option<String>)> = tx
-            .query_row("SELECT path, size, modified, state, info FROM files WHERE id = ?1", [row.id], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
-            })
-            .optional()?;
-        let Some((path, size, modified, state, info)) = current else { return Ok(false) };
-        if Path::new(&path) != row.path
-            || size as u64 != row.size
-            || (modified - row.modified).abs() >= 0.001
-            || state != "done"
-        {
+        if !as_handed_out(&tx, row)? {
+            return Ok(false);
+        }
+        let (state, info): (String, Option<String>) =
+            tx.query_row("SELECT state, info FROM files WHERE id = ?1", [row.id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        if state != "done" {
             return Ok(false);
         }
         let mut info: serde_json::Value =
             info.and_then(|info| serde_json::from_str(&info).ok()).unwrap_or_else(|| serde_json::json!({}));
         if from == 0.0 {
-            tx.execute(
-                "DELETE FROM words WHERE rowid IN (SELECT id FROM segments WHERE file_id = ?1 AND segment = 'speech')",
-                [row.id],
-            )?;
-            tx.execute("DELETE FROM segments WHERE file_id = ?1 AND segment = 'speech'", [row.id])?;
+            delete_speech(&tx, row.id)?;
             if let Some(tags) = tags.filter(|tags| tags.as_object().is_some_and(|tags| !tags.is_empty())) {
                 info["tags"] = tags.clone();
                 // The file's other segments are found by its tags too.
@@ -599,33 +585,32 @@ impl Writer {
     }
 
     /// Makes sure what's written down of recordings comes from the speech model that writes it now (`source`, see
-    /// speech::source). When it doesn't, all of it is written down again. True then.
+    /// speech::SOURCE). When it doesn't, all of it is written down again. True then.
     pub fn adopt_speech_source(&self, source: &str) -> Result<bool> {
-        let stored = self.meta("speech_source")?;
-        let stale = stored.as_deref().is_some_and(|stored| stored != source);
-        if stale {
-            self.conn.execute_batch(
+        self.adopt("speech_source", source, || {
+            Ok(self.conn.execute_batch(
                 "DELETE FROM words WHERE rowid IN (SELECT id FROM segments WHERE segment = 'speech');
                  DELETE FROM segments WHERE segment = 'speech';
                  UPDATE files SET transcript = NULL;",
-            )?;
-        }
-        if stored.as_deref() != Some(source) {
-            self.set_meta("speech_source", source)?;
-        }
-        Ok(stale)
+            )?)
+        })
     }
 
     /// Makes sure the index's vectors come from the pipeline that makes new ones (`source`, see
     /// embedder::vector_source). When they don't, every file is queued again; true then.
     pub fn adopt_vector_source(&self, source: &str) -> Result<bool> {
-        let stored = self.meta("vector_source")?;
+        self.adopt("vector_source", source, || self.requeue_all())
+    }
+
+    /// Records the `source` under `key`, after `reset` when another one was recorded. True then.
+    fn adopt(&self, key: &str, source: &str, reset: impl FnOnce() -> Result<()>) -> Result<bool> {
+        let stored = self.meta(key)?;
         let stale = stored.as_deref().is_some_and(|stored| stored != source);
         if stale {
-            self.requeue_all()?;
+            reset()?;
         }
         if stored.as_deref() != Some(source) {
-            self.set_meta("vector_source", source)?;
+            self.set_meta(key, source)?;
         }
         Ok(stale)
     }
@@ -700,6 +685,16 @@ fn delete_segments(conn: &Connection, file_id: i64) -> Result<()> {
     Ok(())
 }
 
+/// Drops what's written down of what's said in a file.
+fn delete_speech(conn: &Connection, file_id: i64) -> Result<()> {
+    conn.execute(
+        "DELETE FROM words WHERE rowid IN (SELECT id FROM segments WHERE file_id = ?1 AND segment = 'speech')",
+        [file_id],
+    )?;
+    conn.execute("DELETE FROM segments WHERE file_id = ?1 AND segment = 'speech'", [file_id])?;
+    Ok(())
+}
+
 /// Writes a file's segments, each with its words (and the file's, `name`) in the keyword index. Their vectors are
 /// appended to the file's partition first (`folder`), and the segments point at their rows: `conn`'s transaction holds
 /// the write lock (BEGIN IMMEDIATE), and commits after the rows are on disk.
@@ -766,26 +761,10 @@ pub fn now() -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::index::testing::TempIndex;
-
-    /// A writer of an index in a folder of its own, removed when the test ends.
-    struct TempStore(Writer, TempIndex);
-    impl TempStore {
-        fn new(name: &str) -> Self {
-            let folder = TempIndex::new(name);
-            Self(Writer::open(&folder.path).unwrap(), folder)
-        }
-    }
+    use crate::index::testing::{TempIndex, add, file};
 
     fn found(path: &str) -> NewFile {
-        NewFile {
-            path: PathBuf::from(path),
-            kind: Kind::Plaintext,
-            size: 10,
-            modified: 100.0,
-            reading: "words".into(),
-            speech: false,
-        }
+        file(path, Kind::Plaintext)
     }
 
     fn passage(text: &str) -> NewSegment {
@@ -803,41 +782,44 @@ mod tests {
 
     #[test]
     fn a_job_for_a_renamed_file_is_not_written_to_its_new_row() {
-        let mut store = TempStore::new("rename");
-        store.0.queue(&found("/folder/old.txt"), None, 0.0).unwrap();
-        let job = store.0.pending(10).unwrap().remove(0);
+        let index = TempIndex::new("rename");
+        let mut store = Writer::open(&index.path).unwrap();
+        store.queue(&found("/folder/old.txt"), None, 0.0).unwrap();
+        let job = store.pending().unwrap().remove(0);
         // Renamed while it was being read: its row goes, and the new path's row may get the same id.
-        store.0.remove_file(job.id).unwrap();
-        let renamed = store.0.queue(&found("/folder/new.txt"), None, 0.0).unwrap();
+        store.remove_file(job.id).unwrap();
+        let renamed = store.queue(&found("/folder/new.txt"), None, 0.0).unwrap();
         assert_eq!(renamed, job.id);
-        assert!(!store.0.fail_file(&job, "no such file").unwrap());
-        assert!(!store.0.finish_file(&job, &[], &serde_json::json!({}), false).unwrap());
-        assert_eq!(store.0.pending(10).unwrap()[0].path, PathBuf::from("/folder/new.txt"));
+        assert!(!store.fail_file(&job, "no such file").unwrap());
+        assert!(!store.finish_file(&job, &[], &serde_json::json!({}), false).unwrap());
+        assert_eq!(store.pending().unwrap()[0].path, PathBuf::from("/folder/new.txt"));
     }
 
     #[test]
     fn a_file_read_with_old_values_is_not_written() {
-        let mut store = TempStore::new("reading");
-        let id = store.0.queue(&found("/a/note.txt"), None, 0.0).unwrap();
-        let job = store.0.pending(10).unwrap().remove(0);
+        let index = TempIndex::new("reading");
+        let mut store = Writer::open(&index.path).unwrap();
+        let id = store.queue(&found("/a/note.txt"), None, 0.0).unwrap();
+        let job = store.pending().unwrap().remove(0);
         // The reading values changed while it was read: it's queued again, to be read the new way.
         let shorter = NewFile { reading: "shorter passages".into(), ..found("/a/note.txt") };
-        store.0.queue(&shorter, Some(id), 0.0).unwrap();
-        assert!(!store.0.finish_file(&job, &[], &serde_json::json!({}), false).unwrap());
-        let again = store.0.pending(10).unwrap().remove(0);
+        store.queue(&shorter, Some(id), 0.0).unwrap();
+        assert!(!store.finish_file(&job, &[], &serde_json::json!({}), false).unwrap());
+        let again = store.pending().unwrap().remove(0);
         assert_eq!(again.reading, shorter.reading);
-        assert!(store.0.finish_file(&again, &[], &serde_json::json!({}), false).unwrap());
+        assert!(store.finish_file(&again, &[], &serde_json::json!({}), false).unwrap());
     }
 
     #[test]
     fn the_queue_goes_cheapest_first_and_says_what_is_heaviest() {
-        let store = TempStore::new("cost");
-        store.0.queue(&found("/a/podcast.txt"), None, 3600.0).unwrap();
-        store.0.queue(&found("/a/memo.txt"), None, 0.5).unwrap();
-        store.0.queue(&found("/a/book.txt"), None, 60.0).unwrap();
-        let order: Vec<_> = store.0.pending(10).unwrap().into_iter().map(|row| row.path).collect();
+        let index = TempIndex::new("cost");
+        let store = Writer::open(&index.path).unwrap();
+        store.queue(&found("/a/podcast.txt"), None, 3600.0).unwrap();
+        store.queue(&found("/a/memo.txt"), None, 0.5).unwrap();
+        store.queue(&found("/a/book.txt"), None, 60.0).unwrap();
+        let order: Vec<_> = store.pending().unwrap().into_iter().map(|row| row.path).collect();
         assert_eq!(order, ["/a/memo.txt", "/a/book.txt", "/a/podcast.txt"].map(PathBuf::from));
-        let queued = store.0.queued(2).unwrap();
+        let queued = store.queued(2).unwrap();
         assert_eq!((queued.files, queued.seconds), (3, 3660.5));
         assert_eq!(
             queued.heaviest.iter().map(|heavy| heavy.path.as_str()).collect::<Vec<_>>(),
@@ -847,47 +829,43 @@ mod tests {
 
     #[test]
     fn a_big_file_is_written_in_parts() {
-        let mut store = TempStore::new("parts");
-        let id = store.0.queue(&found("/a/book.txt"), None, 0.0).unwrap();
-        let job = store.0.pending(1).unwrap().remove(0);
+        let index = TempIndex::new("parts");
+        let mut store = Writer::open(&index.path).unwrap();
+        let id = store.queue(&found("/a/book.txt"), None, 0.0).unwrap();
+        let job = store.pending().unwrap().remove(0);
         // What an earlier, unfinished read left goes with the first part.
-        store.0.write_part(&job, &[passage("left over")], true).unwrap();
-        assert!(store.0.write_part(&job, &[passage("one")], true).unwrap());
-        assert!(store.0.write_part(&job, &[passage("two")], false).unwrap());
-        assert_eq!(texts(&store.0, id), ["one", "two"]);
+        store.write_part(&job, &[passage("left over")], true).unwrap();
+        assert!(store.write_part(&job, &[passage("one")], true).unwrap());
+        assert!(store.write_part(&job, &[passage("two")], false).unwrap());
+        assert_eq!(texts(&store, id), ["one", "two"]);
         let info = serde_json::json!({"tags": {"title": "Moby"}});
-        assert!(store.0.finish_file(&job, &[passage("three")], &info, true).unwrap());
-        assert_eq!(texts(&store.0, id), ["one", "two", "three"]);
+        assert!(store.finish_file(&job, &[passage("three")], &info, true).unwrap());
+        assert_eq!(texts(&store, id), ["one", "two", "three"]);
         // The parts are found by the tags that came at the end.
         let named: i64 = store
-            .0
             .conn
             .query_row("SELECT COUNT(*) FROM words WHERE words MATCH 'name:moby'", [], |row| row.get(0))
             .unwrap();
         assert_eq!(named, 3);
         // A file that changed meanwhile isn't written to.
-        store.0.queue(&NewFile { size: 20, ..found("/a/book.txt") }, Some(id), 0.0).unwrap();
-        assert!(!store.0.write_part(&job, &[passage("four")], false).unwrap());
+        store.queue(&NewFile { size: 20, ..found("/a/book.txt") }, Some(id), 0.0).unwrap();
+        assert!(!store.write_part(&job, &[passage("four")], false).unwrap());
     }
 
     #[test]
     fn an_index_of_another_version_is_made_again() {
-        let store = TempStore::new("version");
-        store.0.queue(&found("/a/note.txt"), None, 0.0).unwrap();
-        store.0.set_meta("schema", "3").unwrap();
-        let reopened = Writer::open(&store.1.path).unwrap();
+        let index = TempIndex::new("version");
+        let store = Writer::open(&index.path).unwrap();
+        store.queue(&found("/a/note.txt"), None, 0.0).unwrap();
+        store.set_meta("schema", "3").unwrap();
+        let reopened = Writer::open(&index.path).unwrap();
         assert_eq!(reopened.files().unwrap().len(), 0);
         assert_eq!(reopened.meta("schema").unwrap().as_deref(), Some(SCHEMA_VERSION.to_string().as_str()));
     }
 
     /// A file of `kind` with a passage for each of `vectors`, written.
     fn add_vectors(store: &mut Writer, path: &str, kind: Kind, vectors: &[Vec<f32>]) -> i64 {
-        let id = store.queue(&NewFile { kind, ..found(path) }, None, 0.0).unwrap();
-        let job = store.pending(100).unwrap().into_iter().find(|row| row.id == id).unwrap();
-        let segments: Vec<NewSegment> =
-            vectors.iter().map(|vector| NewSegment { vector: Some(vector.clone()), ..passage("words") }).collect();
-        assert!(store.finish_file(&job, &segments, &serde_json::json!({}), false).unwrap());
-        id
+        add(store, path, kind, vectors.iter().map(|vector| ("words".into(), Some(vector.clone()))).collect())
     }
 
     /// A file's vectors, read from where its segments say they are.
@@ -928,48 +906,50 @@ mod tests {
 
     #[test]
     fn vectors_get_a_next_generation_when_a_quarter_is_dead_or_the_mean_moved() {
-        let mut store = TempStore::new("vectors");
+        let index = TempIndex::new("vectors");
+        let mut store = Writer::open(&index.path).unwrap();
         let unit = vectors::unit;
-        let gone = add_vectors(&mut store.0, "/a/gone.txt", Kind::Plaintext, &[unit(1), unit(2), unit(3)]);
-        let kept = add_vectors(&mut store.0, "/a/kept.txt", Kind::Plaintext, &[unit(4), unit(5)]);
-        add_vectors(&mut store.0, "/a/main.rs", Kind::Code, &[unit(6)]);
-        assert_eq!((partition(&store.0, "main").rows, partition(&store.0, "code").rows), (5, 1));
-        assert_eq!(stored(&store.0, kept), [unit(4), unit(5)]);
+        let gone = add_vectors(&mut store, "/a/gone.txt", Kind::Plaintext, &[unit(1), unit(2), unit(3)]);
+        let kept = add_vectors(&mut store, "/a/kept.txt", Kind::Plaintext, &[unit(4), unit(5)]);
+        add_vectors(&mut store, "/a/main.rs", Kind::Code, &[unit(6)]);
+        assert_eq!((partition(&store, "main").rows, partition(&store, "code").rows), (5, 1));
+        assert_eq!(stored(&store, kept), [unit(4), unit(5)]);
 
         // The sketches were made against the first file's mean, and five rows have another: they're made again, and
         // the rows stay where they are.
-        assert_eq!(store.0.compact_vectors().unwrap(), ["main"]);
-        assert_eq!((partition(&store.0, "main").generation, partition(&store.0, "main").rows), (1, 5));
-        assert_eq!(stored(&store.0, kept), [unit(4), unit(5)]);
-        assert!(store.0.compact_vectors().unwrap().is_empty());
+        assert_eq!(store.compact_vectors().unwrap(), ["main"]);
+        assert_eq!((partition(&store, "main").generation, partition(&store, "main").rows), (1, 5));
+        assert_eq!(stored(&store, kept), [unit(4), unit(5)]);
+        assert!(store.compact_vectors().unwrap().is_empty());
 
         // Three of five rows dead: the live ones move to a generation of their own.
-        store.0.remove_file(gone).unwrap();
-        assert_eq!(partition(&store.0, "main").dead, 3);
-        assert_eq!(store.0.compact_vectors().unwrap(), ["main"]);
-        let main = partition(&store.0, "main");
+        store.remove_file(gone).unwrap();
+        assert_eq!(partition(&store, "main").dead, 3);
+        assert_eq!(store.compact_vectors().unwrap(), ["main"]);
+        let main = partition(&store, "main");
         assert_eq!((main.generation, main.rows, main.dead), (2, 2, 0));
-        assert_eq!(stored(&store.0, kept), [unit(4), unit(5)]);
+        assert_eq!(stored(&store, kept), [unit(4), unit(5)]);
         let names = ["code.0.f16", "code.0.f32", "code.0.sketch", "main.2.f16", "main.2.f32", "main.2.sketch"];
-        assert_eq!(files(&store.0), names);
+        assert_eq!(files(&store), names);
 
         // Everything again: the partitions start over, and their files go.
-        store.0.requeue_all().unwrap();
-        store.0.tidy_vectors().unwrap();
-        assert_eq!((partition(&store.0, "main").generation, partition(&store.0, "main").rows), (3, 0));
-        assert!(files(&store.0).is_empty());
+        store.requeue_all().unwrap();
+        store.tidy_vectors().unwrap();
+        assert_eq!((partition(&store, "main").generation, partition(&store, "main").rows), (3, 0));
+        assert!(files(&store).is_empty());
     }
 
     #[test]
     fn rows_a_crash_left_are_written_over() {
         use std::io::Write;
-        let mut store = TempStore::new("leftovers");
-        add_vectors(&mut store.0, "/a/one.txt", Kind::Plaintext, &[vectors::unit(1)]);
+        let index = TempIndex::new("leftovers");
+        let mut store = Writer::open(&index.path).unwrap();
+        add_vectors(&mut store, "/a/one.txt", Kind::Plaintext, &[vectors::unit(1)]);
         // A crash between appending and committing leaves rows nothing points at.
-        let path = partition(&store.0, "main").path(&store.0.vectors_folder(), vectors::Form::F32);
+        let path = partition(&store, "main").path(&store.vectors_folder(), vectors::Form::F32);
         std::fs::OpenOptions::new().append(true).open(&path).unwrap().write_all(&[7; 1000]).unwrap();
-        let two = add_vectors(&mut store.0, "/a/two.txt", Kind::Plaintext, &[vectors::unit(2)]);
-        assert_eq!(stored(&store.0, two), [vectors::unit(2)]);
+        let two = add_vectors(&mut store, "/a/two.txt", Kind::Plaintext, &[vectors::unit(2)]);
+        assert_eq!(stored(&store, two), [vectors::unit(2)]);
         assert_eq!(std::fs::metadata(&path).unwrap().len(), 2 * DIM as u64 * 4);
     }
 }

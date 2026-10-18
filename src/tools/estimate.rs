@@ -1,5 +1,5 @@
-//! `sift-it estimate <folder>...`: what indexing a folder means, before it starts: how many files of each kind, and about
-//! how long the first pass takes (ingest/discover/cost.rs).
+//! `sift-it estimate <folder>...`: what indexing a folder means, before it starts: how many files of each kind, and
+//! about how long the first pass takes (ingest/discover/cost.rs).
 
 use crate::config::Config;
 use crate::ingest::discover::{cost, crawl};

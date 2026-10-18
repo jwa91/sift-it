@@ -1,12 +1,13 @@
 //! The ingest path: keeping the index in step with the chosen folders. Its stages, each owning what it works on:
 //!
-//! - discover (discover.rs): which files are new or changed, queued with what reading each costs, and which are gone.
-//! - read (read.rs): a file extracted (extract/), cut into segments (segment/) and prepared for the model
-//!   (prepare.rs), as a stream of pieces.
+//! - discover (discover/): which files are new or changed, queued with what reading each costs, and which are gone.
+//! - read (read.rs): a file extracted (extract/), cut into segments (segment/) and prepared for the model (prepare.rs),
+//!   as a stream of pieces.
 //! - embed (embed.rs): the model's only owner. It batches texts and hands back vectors.
 //! - write (write.rs): files put together from their segments and written, whole or in parts. The index's writer
 //!   (index::Writer) is the Indexer's, and only it writes.
-//! - schedule (schedule.rs): what's read first, how many files at once (resources::IngestPlan), and the run that joins the stages.
+//! - schedule (schedule.rs): what's read first, how many files at once (resources::IngestPlan), and the run that joins
+//!   the stages.
 //! - listen (listen.rs): what's said in recordings and videos, written down on a lane of its own, beside the reading
 //!   when memory allows, else after it. Speech is an extractor too (extract/speech.rs): sound in, sentences with their
 //!   times out, cut into passages and embedded like any text.
@@ -15,12 +16,12 @@
 
 pub mod discover;
 mod embed;
-pub mod extract;
+mod extract;
 mod listen;
-pub mod prepare;
+mod prepare;
 mod read;
 mod schedule;
-pub mod segment;
+mod segment;
 mod write;
 
 pub use read::{Content, Payload, Piece, fingerprint, read, transcribes};
@@ -108,7 +109,7 @@ impl Indexer {
         if index.adopt_vector_source(&embedder::vector_source())? {
             eprintln!("the index was made by another model or pipeline: everything is indexed again");
         }
-        if index.adopt_speech_source(crate::adapters::speech::source())? {
+        if index.adopt_speech_source(crate::adapters::speech::SOURCE)? {
             eprintln!("what's said in recordings was written down by another speech model: it's written down again");
         }
         index.tidy_vectors()?;
@@ -124,7 +125,7 @@ impl Indexer {
         self.embed.loaded()
     }
 
-    /// Crawls the chosen folders and brings the queue in step with them (discover.rs).
+    /// Crawls the chosen folders and brings the queue in step with them (discover/).
     pub fn sync(&mut self, config: &Config) -> Result<Event> {
         discover::sync(&self.index, config)
     }

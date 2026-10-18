@@ -9,7 +9,7 @@ use protocol::Kind;
 use std::path::Path;
 
 /// Pictures are decoded at most this large: plenty for any token budget, and a 48-megapixel photo decodes quickly.
-pub const DECODE_SIDE: u32 = 2048;
+const DECODE_SIDE: u32 = 2048;
 
 pub fn read(path: &Path, kind: Kind, settings: &Settings, content: &mut Content) -> Result<serde_json::Value> {
     if kind == Kind::Image && !settings.embeds() {

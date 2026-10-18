@@ -167,7 +167,8 @@ pub fn read_samples(path: &Path, from: f64, on_samples: &mut dyn FnMut(&[f32]) -
 }
 
 /// The tags a recording or video carries (ID3, iTunes, QuickTime): its title, artist, album and the like, as
-/// {"title": …, "artist": …}. Empty when it has none.
+/// {"title": …, "artist": …}. Empty when it has none. Each is cut at 500 characters: they travel with every result in
+/// its file's info, and a description tag can hold a whole text.
 pub fn tags(path: &Path) -> serde_json::Value {
     const KEYS: [(&str, &str); 6] = [
         ("title", "title"),
@@ -199,36 +200,17 @@ pub fn tags(path: &Path) -> serde_json::Value {
 
 /// A recording's loudness in `columns` slices (peak of each, scaled so the loudest is 1), for a waveform.
 pub fn envelope(path: &Path, columns: usize) -> Result<Vec<f32>> {
-    let asset = asset(path);
-    let audio = unsafe { AVMediaTypeAudio }.ok_or_else(|| anyhow!("no audio media type"))?;
-    let tracks = unsafe { asset.tracksWithMediaType(audio) };
-    if tracks.count() == 0 {
-        bail!("no sound in it");
-    }
-    let seconds = duration(path).max(0.1);
-    let per_column = ((seconds * AUDIO_RATE as f64) / columns as f64).max(1.0);
+    let per_column = ((duration(path).max(0.1) * AUDIO_RATE as f64) / columns as f64).max(1.0);
     let mut peaks = vec![0.0f32; columns];
     let mut sample = 0usize;
-    let mut resumes = 0;
-    loop {
-        let start = sample;
-        let pass = read_pass(&asset, &tracks, start as f64 / AUDIO_RATE as f64, &mut |samples| {
-            for value in samples {
-                let column = ((sample as f64 / per_column) as usize).min(columns - 1);
-                peaks[column] = peaks[column].max(value.abs());
-                sample += 1;
-            }
-            Ok(())
-        })?;
-        match pass {
-            Pass::Finished => break,
-            Pass::Failed(_) if resumes < 50 => {
-                resumes += 1;
-                sample += AUDIO_RATE;
-            }
-            Pass::Failed(reason) => bail!("AVFoundation stopped reading it: {reason}"),
+    read_samples(path, 0.0, &mut |samples| {
+        for value in samples {
+            let column = ((sample as f64 / per_column) as usize).min(columns - 1);
+            peaks[column] = peaks[column].max(value.abs());
+            sample += 1;
         }
-    }
+        Ok(())
+    })?;
     // Loudness by ear: a square root lifts quiet speech so it shows next to loud passages.
     let loudest = peaks.iter().cloned().fold(0.0f32, f32::max).max(1e-6);
     Ok(peaks.into_iter().map(|peak| (peak / loudest).sqrt()).collect())
@@ -249,8 +231,8 @@ pub struct VideoInfo {
     pub height: u32,
 }
 
-fn generator(path: &Path, max_side: u32, tolerance: f64) -> Retained<AVAssetImageGenerator> {
-    let generator = unsafe { AVAssetImageGenerator::assetImageGeneratorWithAsset(&asset(path)) };
+fn generator(asset: &AVURLAsset, max_side: u32, tolerance: f64) -> Retained<AVAssetImageGenerator> {
+    let generator = unsafe { AVAssetImageGenerator::assetImageGeneratorWithAsset(asset) };
     unsafe {
         generator.setAppliesPreferredTrackTransform(true);
         generator.setMaximumSize(CGSize::new(max_side as CGFloat, max_side as CGFloat));
@@ -263,7 +245,7 @@ fn generator(path: &Path, max_side: u32, tolerance: f64) -> Retained<AVAssetImag
 
 /// One frame, at most `max_side` pixels on the long side (for previews).
 pub fn frame_at(path: &Path, seconds: f64, max_side: u32) -> Result<Retained<CGImage>> {
-    let generator = generator(path, max_side, 0.0);
+    let generator = generator(&asset(path), max_side, 0.0);
     let time = unsafe { CMTime::with_seconds(seconds.max(0.0), 600) };
     unsafe { generator.copyCGImageAtTime_actualTime_error(time, std::ptr::null_mut()) }
         .map_err(|error| anyhow!("AVFoundation: {}", error.localizedDescription()))
@@ -285,7 +267,7 @@ pub fn read_video(
         bail!("it has no length");
     }
     let step = FRAME_STEP.max(duration / MAX_SAMPLES);
-    let generator = generator(path, max_side, step / 2.0);
+    let generator = generator(&asset, max_side, step / 2.0);
     let mut time = 0.0f64;
     while time < duration {
         autoreleasepool(|_| -> Result<()> {

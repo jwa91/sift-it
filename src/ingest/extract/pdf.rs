@@ -13,7 +13,7 @@ use protocol::Segment;
 use std::path::Path;
 
 /// A page with fewer characters than this has no real text layer: it's a scan.
-pub const SCANNED_BELOW: usize = 40;
+const SCANNED_BELOW: usize = 40;
 /// Scanned pages are drawn this large for OCR.
 const SCAN_SIDE: u32 = 2200;
 
@@ -44,7 +44,7 @@ pub fn read(path: &Path, content: &mut Content) -> Result<serde_json::Value> {
             content.scan(number, &page, &text)?;
             continue;
         }
-        content.text(Segment::Page, number as f64, &text, Form::Prose)?;
+        content.text(Segment::Page, Some(number as f64), &text, Form::Prose)?;
     }
     Ok(serde_json::json!({ "pages": pages, "scanned_pages": scanned }))
 }

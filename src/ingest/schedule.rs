@@ -1,7 +1,7 @@
-//! Scheduling the reading: the queued files are read cheapest first (discover.rs), on a few worker threads (resources::IngestPlan), which
-//! stream their pieces to the thread that runs the stages: embedding (embed.rs, the model's owner) and writing
-//! (write.rs). Each worker has a small channel of its own, and they're taken from in turn, so a file with hundreds of
-//! pieces (a long recording) can't keep a short one waiting behind it.
+//! Scheduling the reading: the queued files are read cheapest first (discover/), on a few worker threads
+//! (resources::IngestPlan), which stream their pieces to the thread that runs the stages: embedding (embed.rs, the
+//! model's owner) and writing (write.rs). Each worker has a small channel of its own, and they're taken from in turn,
+//! so a file with hundreds of pieces (a long recording) can't keep a short one waiting behind it.
 //!
 //! While it runs, files that appear go to the front of the queue (`changes`): a new screenshot is searchable in a
 //! second or two even while a long video is being read. Beside it, when memory allows, what's said in recordings is
@@ -35,7 +35,7 @@ enum Message {
 /// A reader that hands over nothing for this long is stuck. Vision's text recognition can be: right after it compiles
 /// its models for the Neural Engine (once per binary, the first time it reads text), it sometimes waits forever, and
 /// cancelling the request doesn't help. That compile is also the longest real wait: almost five minutes for one
-/// picture on an 8 GB Mac under memory pressure, and a reader queued behind it waits too (Vision reads text in one
+/// picture on a Mac under memory pressure, and a reader queued behind it waits too (Vision reads text in one
 /// picture at a time). Time asleep doesn't count: Instant stands still while the Mac sleeps.
 const STUCK: Duration = if cfg!(test) { Duration::from_secs(1) } else { Duration::from_secs(600) };
 
@@ -69,7 +69,7 @@ impl Indexer {
         changes: &mut dyn FnMut() -> Vec<PathBuf>,
         helper: Option<&mut Option<Transcriber>>,
     ) -> Result<()> {
-        let pending = self.index.pending(usize::MAX)?;
+        let pending = self.index.pending()?;
         if pending.is_empty() {
             return Ok(());
         }
@@ -112,7 +112,8 @@ impl Indexer {
                     if send(Message::Start(id, Instant::now())).is_err() {
                         break;
                     }
-                    // Read with this run's values. A file queued for other ones meanwhile isn't written (Writer::write_file).
+                    // Read with this run's values. A file queued for other ones meanwhile isn't written
+                    // (Writer::finish_file).
                     let settings = reading.resolve(&row.path, row.kind);
                     mark(Some(id));
                     // A reader that panics (a file no one expected) is a file that couldn't be read, not a lost run.
@@ -157,12 +158,8 @@ impl Indexer {
                 let changed = changes();
                 if !changed.is_empty() {
                     on_event(discover::sync_paths(&self.index, config, &changed)?);
-                    let fresh: Vec<FileRow> = self
-                        .index
-                        .pending(usize::MAX)?
-                        .into_iter()
-                        .filter(|row| !known.contains_key(&row.id))
-                        .collect();
+                    let fresh: Vec<FileRow> =
+                        self.index.pending()?.into_iter().filter(|row| !known.contains_key(&row.id)).collect();
                     if !fresh.is_empty() {
                         on_event(Event::Queued { count: fresh.len() });
                         let mut queue = queue.lock().unwrap();
@@ -255,7 +252,7 @@ impl Indexer {
         match message {
             Message::Start(id, started) => files.start(&known[&id], started),
             Message::Piece(id, piece) => {
-                if !files.wanted(&known[&id]) {
+                if !files.keeps(id) {
                     return Ok(());
                 }
                 if matches!(piece.payload, Payload::Text(_)) {
@@ -272,7 +269,7 @@ impl Indexer {
             }
             Message::Done(id, result) => {
                 self.flush(files)?;
-                files.end(&known[&id], result, &mut self.index, on_event)?;
+                files.end(id, result, &mut self.index, on_event)?;
             }
         }
         Ok(())

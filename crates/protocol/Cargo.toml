@@ -1,9 +1,9 @@
 [package]
 name = "sift-it-protocol"
-version = "0.2.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 description = "What sift-it's clients and its engine say to each other: requests, replies, events and their types"
-license = "MIT"
+license.workspace = true
 publish = false
 
 [features]

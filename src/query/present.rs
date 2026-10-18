@@ -1,5 +1,5 @@
 //! Presenting: a ranked file as a result. Of its segments that score about the same, it opens at the one with the
-//! most of the query's words, and in text and code at the first line with one of them. Its excerpt is the text around
+//! most of the query's words, and in text and code at the line with the most of them. Its excerpt is the text around
 //! the first of them.
 
 use super::rank::{Candidate, Ranked};
@@ -47,6 +47,7 @@ fn telling(word: &str) -> bool {
 /// A segment as a result, unscored: its file, its place, and its excerpt around the words.
 pub fn hit(index: &Reader, segment_id: i64, words: &[String]) -> Result<Option<Hit>> {
     let Some(row) = index.segment(segment_id)? else { return Ok(None) };
+    let focus = row.text.as_deref().and_then(|text| focus(text, words));
     let mut hit = Hit {
         name: Path::new(&row.path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
         path: row.path,
@@ -66,33 +67,37 @@ pub fn hit(index: &Reader, segment_id: i64, words: &[String]) -> Result<Option<H
         words: false,
         strong: false,
     };
-    // In text, records and code, open at the first line with one of the query's telling words, not at the passage's
-    // top. (A notebook's places are cells, not lines.)
+    // In text, records and code, open at the line the query is about, not at the passage's top. (A notebook's places
+    // are cells, not lines.)
     let notebook = hit.path.ends_with(".ipynb");
-    if let (Segment::Passage, Kind::Code | Kind::Structured | Kind::Plaintext, Some(first), false) =
-        (hit.segment, hit.kind, hit.loc, notebook)
-        && let Some(offset) = focus_line(index, segment_id, words)?
+    if let (Segment::Passage, Kind::Code | Kind::Structured | Kind::Plaintext, Some(first), false, Some(focus)) =
+        (hit.segment, hit.kind, hit.loc, notebook, focus)
     {
-        hit.loc = Some(first + offset as f64);
+        hit.loc = Some(first + focus as f64);
     }
     Ok(Some(hit))
 }
 
-/// The line of a segment (from 0) with the most of the telling words, the first of those: in a passage of several
-/// sections or records, the one the query is about.
-fn focus_line(index: &Reader, segment_id: i64, words: &[String]) -> Result<Option<usize>> {
+/// The line of a text (from 0) with the most of the query's telling words, the first of those: in a passage of
+/// several sections or records, the one the query is about. Clients number a passage's lines from it.
+pub fn focus(text: &str, words: &[String]) -> Option<usize> {
     let telling: Vec<&String> = words.iter().filter(|word| telling(word)).collect();
-    if telling.is_empty() {
-        return Ok(None);
+    let found = |line: &str| {
+        let line = line.to_lowercase();
+        telling.iter().filter(|word| line.contains(word.as_str())).count()
+    };
+    let lines = text.lines().enumerate().map(|(at, line)| (found(line), Reverse(at)));
+    lines.filter(|(found, _)| *found > 0).max().map(|(_, Reverse(at))| at)
+}
+
+/// A moment in a recording or video: "12:34", or "1:02:03" past the hour.
+pub fn timestamp(seconds: f64) -> String {
+    let s = seconds.max(0.0) as u64;
+    if s >= 3600 {
+        format!("{}:{:02}:{:02}", s / 3600, s % 3600 / 60, s % 60)
+    } else {
+        format!("{}:{:02}", s / 60, s % 60)
     }
-    Ok(index.segment_text(segment_id)?.and_then(|text| {
-        let found = |line: &str| {
-            let line = line.to_lowercase();
-            telling.iter().filter(|word| line.contains(word.as_str())).count()
-        };
-        let lines = text.lines().enumerate().map(|(at, line)| (found(line), Reverse(at)));
-        lines.filter(|(found, _)| *found > 0).max().map(|(_, Reverse(at))| at)
-    }))
 }
 
 /// About 300 characters of the text, around the first of the query's words in it when there is one.

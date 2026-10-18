@@ -23,6 +23,7 @@ pub fn text_matches(
     wanted: &dyn Fn(i64) -> bool,
     per_file: usize,
 ) -> Result<Vec<Match>> {
+    // With quoted parts, only the segments with them are in the running: more of them are.
     let limit = if query.phrases.is_empty() { 1000 } else { 5000 };
     let mut counts: HashMap<i64, usize> = HashMap::new();
     let mut matches = Vec::new();

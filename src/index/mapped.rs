@@ -239,9 +239,9 @@ impl Vectors {
         median(&vectors::dots(&self.sample.rows, query))
     }
 
-    /// The query's cosine with each vector of a kind `wanted` takes, from the rows in `form`: every one exactly, or with
-    /// sketches the `candidates` whose sketches come closest. And with each of `also` (places in `ids`), exactly. None
-    /// for the others.
+    /// The query's cosine with each vector of a kind `wanted` takes, from the rows in `form`: every one exactly, or
+    /// with sketches the `candidates` whose sketches come closest. And with each of `also` (places in `ids`), exactly.
+    /// None for the others.
     pub fn cosines(
         &self,
         query: &[f32],

@@ -70,6 +70,16 @@ fn kinds_over_defaults<'de, D: Deserializer<'de>>(
     Ok(kinds)
 }
 
+/// A file's type: its extension, in lowercase (empty without one).
+pub fn extension_of(path: &Path) -> String {
+    path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default()
+}
+
+/// PDFs are documents read page by page (PDFKit), where other documents are text (textutil).
+pub fn is_pdf(path: &Path) -> bool {
+    extension_of(path) == "pdf"
+}
+
 impl Sources {
     /// The kind a file type is read as, if it's one at all (code too, whether or not code is read).
     pub fn kind_of(&self, extension: &str) -> Option<Kind> {

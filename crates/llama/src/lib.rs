@@ -3,9 +3,8 @@
 //! Every input becomes one mean-pooled, L2-normalized 768-dimensional vector in the same space.
 //!
 //! Inputs are framed the way the reference implementation (transformers) frames them: `<bos> text <eos>`, and
-//! `<bos> <image soft tokens> <eos>` (the same for audio). The model has no causal mask and no KV cache to keep, so each
-//! input goes through the text model in one `llama_process` call; several short texts share one call as separate
-//! sequences.
+//! `<bos> <image soft tokens> <eos>` (the same for audio). The model has no causal mask and no KV cache to keep, so each input
+//! goes through the text model in one `llama_process` call; several short texts share one call as separate sequences.
 
 pub mod imaging;
 
@@ -465,10 +464,6 @@ pub fn normalize(vector: &mut [f32]) {
         let scale = (1.0 / norm) as f32;
         vector.iter_mut().for_each(|v| *v *= scale);
     }
-}
-
-pub fn dot(a: &[f32], b: &[f32]) -> f32 {
-    a.iter().zip(b).map(|(x, y)| x * y).sum()
 }
 
 /// EmbeddingGemma 2's task prompts (from its model card). Images and audio take none.

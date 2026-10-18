@@ -1,9 +1,9 @@
 [package]
 name = "sift-it-llama"
-version = "0.2.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 description = "The embedding model, EmbeddingGemma 2, on llama.cpp with Metal: its native build, bindings and inputs"
-license = "MIT"
+license.workspace = true
 publish = false
 links = "llama"
 

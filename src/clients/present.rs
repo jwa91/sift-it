@@ -1,16 +1,15 @@
-//! `sift-it search` in a terminal: each result numbered (for `sift-it open <n>`), its name a link to the file, where
-//! it matched, and a body that fits its kind: the passage with the query's words marked, the lines of code, a
-//! recording's waveform with the matched stretch lit, a picture or video frame inline where the terminal shows pictures.
+//! `sift-it search` in a terminal: each result numbered (for `sift-it open <n>`), its name a link to the file, where it
+//! matched, and a body that fits its kind: the passage with the query's words marked, the lines of code, a recording's
+//! waveform with the matched stretch lit, a picture or video frame inline where the terminal shows pictures.
 
 use crate::clients::Client;
-use crate::clients::open::timestamp;
 use crate::clients::preview;
 use crate::clients::term::{self, Images, Terminal};
 use crate::config;
-use crate::query::understand::words_of;
+use crate::query::{self, Query, timestamp};
 use anyhow::Result;
-use protocol::Kind;
 use protocol::Segment;
+use protocol::{Drawn, Kind};
 use protocol::{Hit, Results};
 use std::path::Path;
 
@@ -22,7 +21,7 @@ const PASSAGE_LINES: usize = 3;
 const CODE_LINES: usize = 5;
 
 pub fn print(terminal: &Terminal, response: &Results, query: &str, client: &mut Client) -> Result<()> {
-    let words = words_of(query.trim_start().strip_prefix("code:").unwrap_or(query));
+    let words = Query::words_in(query);
     if response.hits.is_empty() {
         println!(
             "{}",
@@ -55,7 +54,8 @@ pub fn print(terminal: &Terminal, response: &Results, query: &str, client: &mut 
 /// " 1  agreement.pdf · page 3                     ~/Documents/Housing"
 fn header(terminal: &Terminal, number: usize, hit: &Hit) -> String {
     let path = Path::new(&hit.path);
-    let place = place(hit);
+    let place =
+        place(hit).or_else(|| matches!(hit.kind, Kind::Image | Kind::Screenshot).then(|| kind_label(hit.kind).into()));
     let left_plain =
         format!("{number:>2}  {}{}", hit.name, place.as_deref().map(|p| format!(" · {p}")).unwrap_or_default());
     let left = format!(
@@ -78,9 +78,8 @@ fn header(terminal: &Terminal, number: usize, hit: &Hit) -> String {
     format!("{left}{}{}", " ".repeat(gap.min(terminal.width)), terminal.dim(&folder))
 }
 
-/// Where in the file it matched, said shortly.
-fn place(hit: &Hit) -> Option<String> {
-    let notebook = hit.path.ends_with(".ipynb");
+/// Where in the file it matched, said shortly: "0:20–0:50", "page 3", "line 12".
+pub(super) fn place(hit: &Hit) -> Option<String> {
     match (hit.segment, hit.loc) {
         (Segment::Sound | Segment::Speech, Some(start)) => Some(match hit.loc_end {
             Some(end) => format!("{}–{}", timestamp(start), timestamp(end)),
@@ -90,17 +89,29 @@ fn place(hit: &Hit) -> Option<String> {
         (Segment::Page | Segment::Ocr | Segment::Picture, Some(page)) if hit.kind == Kind::Document => {
             Some(format!("page {page}"))
         }
-        (Segment::Passage, Some(cell)) if notebook => Some(format!("cell {cell}")),
+        (Segment::Passage, Some(cell)) if config::extension_of(Path::new(&hit.path)) == "ipynb" => {
+            Some(format!("cell {cell}"))
+        }
         (Segment::Passage, Some(line)) if line > 1.0 => Some(format!("line {line}")),
-        _ => match hit.kind {
-            Kind::Image => Some("picture".into()),
-            Kind::Screenshot => Some("screenshot".into()),
-            _ => None,
-        },
+        _ => None,
     }
 }
 
-fn folder(path: &Path) -> String {
+pub(super) fn kind_label(kind: Kind) -> &'static str {
+    match kind {
+        Kind::Plaintext => "text",
+        Kind::Document => "document",
+        Kind::Structured => "data",
+        Kind::Image => "picture",
+        Kind::Screenshot => "screenshot",
+        Kind::Audio => "recording",
+        Kind::Video => "video",
+        Kind::Code => "code",
+    }
+}
+
+/// The file's folder, with the home folder as "~".
+pub(super) fn folder(path: &Path) -> String {
     let folder = path.parent().map(|p| p.display().to_string()).unwrap_or_default();
     let home = config::dirs_home().display().to_string();
     match folder.strip_prefix(&home) {
@@ -127,26 +138,16 @@ fn body(terminal: &Terminal, hit: &Hit, words: &[String], client: &mut Client) -
     let width = terminal.width.saturating_sub(INDENT.len() + 2).max(30);
     let mut out = String::new();
     let previews = config::previews_dir();
-    let picture = |kind: &str, loc: Option<f64>| -> Option<String> {
+    let picture = |kind: Drawn, loc: Option<f64>| -> Option<String> {
         if terminal.images == Images::None {
             return None;
         }
         let thumbnail = preview::thumbnail(Path::new(&hit.path), kind, loc, 360, &previews).ok()?;
         terminal.picture(&thumbnail, PICTURE_ROWS).map(|p| format!("{INDENT}{p}"))
     };
-    // What's said there, when that's what matched.
-    let speech = |out: &mut String, hit: &Hit| {
-        if hit.segment != Segment::Speech {
-            return;
-        }
-        let said = hit.excerpt.as_deref().map(|text| format!("“{text}”"));
-        for line in said.map(|t| passage(terminal, &t, width, PASSAGE_LINES, words)).unwrap_or_default() {
-            push_line(out, &line);
-        }
-    };
     match hit.kind {
         Kind::Image | Kind::Screenshot => {
-            if let Some(shown) = picture("image", None) {
+            if let Some(shown) = picture(Drawn::Image, None) {
                 out.push_str(&shown);
             } else if let Some(about) = picture_facts(hit) {
                 push_line(&mut out, &terminal.dim(&about));
@@ -158,27 +159,25 @@ fn body(terminal: &Terminal, hit: &Hit, words: &[String], client: &mut Client) -
                 push_line(&mut out, &text_line);
             }
         }
-        Kind::Audio => {
-            if let Some(wave) = waveform(terminal, hit, width) {
-                push_line(&mut out, &wave);
-            }
-            speech(&mut out, hit);
-        }
-        Kind::Video => {
-            if let Some(shown) = picture("video", hit.loc) {
+        Kind::Audio | Kind::Video => {
+            if hit.kind == Kind::Video
+                && let Some(shown) = picture(Drawn::Video, hit.loc)
+            {
                 out.push_str(&shown);
             }
             match (hit.segment, hit.loc) {
-                (Segment::Sound, _) => {
+                (Segment::Sound | Segment::Speech, _) => {
                     if let Some(wave) = waveform(terminal, hit, width) {
                         push_line(&mut out, &wave);
                     }
-                }
-                (Segment::Speech, _) => {
-                    if let Some(wave) = waveform(terminal, hit, width) {
-                        push_line(&mut out, &wave);
+                    // What's said there, when that's what matched.
+                    let said = hit.excerpt.as_deref().filter(|_| hit.segment == Segment::Speech);
+                    for line in said
+                        .map(|t| passage(terminal, &format!("“{t}”"), width, PASSAGE_LINES, words))
+                        .unwrap_or_default()
+                    {
+                        push_line(&mut out, &line);
                     }
-                    speech(&mut out, hit);
                 }
                 (_, Some(at)) => push_line(&mut out, &terminal.dim(&format!("seen at {}", timestamp(at)))),
                 _ => {}
@@ -220,13 +219,9 @@ fn waveform(terminal: &Terminal, hit: &Hit, width: usize) -> Option<String> {
     let columns = width.saturating_sub(34).clamp(16, 60);
     let levels = preview::levels(path, columns, &config::previews_dir()).ok()?;
     let levels = term::stretch(&levels);
-    let start = hit.loc.unwrap_or(0.0);
-    let highlight = preview::span(path, columns, start, hit.loc_end.unwrap_or(start + 30.0));
+    let highlight = preview::span(path, columns, hit.loc.unwrap_or(0.0), hit.loc_end);
     let length = hit.info.get("duration").and_then(|d| d.as_f64()).map(|d| format!(" of {}", timestamp(d)));
-    let heard = match hit.loc_end {
-        Some(end) => format!("heard at {}–{}", timestamp(start), timestamp(end)),
-        None => format!("heard at {}", timestamp(start)),
-    };
+    let heard = place(hit).map(|at| format!("heard at {at}")).unwrap_or_default();
     Some(format!(
         "{}   {}",
         term::sparkline(terminal, &levels, Some(highlight)),
@@ -234,14 +229,10 @@ fn waveform(terminal: &Terminal, hit: &Hit, width: usize) -> Option<String> {
     ))
 }
 
-/// A few lines of the code that matched, numbered, from the first line with the query's words.
+/// A few lines of the code that matched, numbered, from the line with the query's words.
 fn code_lines(terminal: &Terminal, text: &str, loc: Option<f64>, words: &[String], width: usize) -> Vec<String> {
     let lines: Vec<&str> = text.lines().collect();
-    let telling = |line: &str| {
-        let lower = line.to_lowercase();
-        words.iter().any(|w| (w.chars().count() > 3 || w.chars().any(char::is_numeric)) && lower.contains(w.as_str()))
-    };
-    let focus = lines.iter().position(|l| telling(l)).unwrap_or(0);
+    let focus = query::focus(text, words).unwrap_or(0);
     // The hit's line is the focus line (search moves it there); count the others from it.
     let first_number = loc.map(|l| l as i64 - focus as i64);
     lines

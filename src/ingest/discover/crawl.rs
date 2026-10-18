@@ -2,7 +2,7 @@
 //! app bundles and libraries, build output, dependency folders, keys and other secrets, iCloud files that are only
 //! in the cloud (reading those would download them), or what `sources.ignore` leaves out.
 
-use crate::config::{Config, Settings};
+use crate::config::{Config, Settings, extension_of, is_pdf};
 use crate::index::NewFile;
 use crate::ingest;
 use protocol::Kind;
@@ -50,7 +50,6 @@ const PACKAGE_EXTENSIONS: &[&str] = &[
     "mpkg",
     "logicx",
     "band",
-    "photoslibrary",
     "aplibrary",
     "playground",
     "rtfd",
@@ -198,7 +197,8 @@ fn is_skipped_folder(path: &Path, in_project: bool) -> bool {
         || PACKAGE_EXTENSIONS.contains(&extension_of(path).as_str())
 }
 
-fn is_project(folder: &Path) -> bool {
+/// A folder with a project's marker in it: a code project.
+pub fn is_project(folder: &Path) -> bool {
     PROJECT_MARKERS.iter().any(|marker| folder.join(marker).exists())
 }
 
@@ -267,7 +267,7 @@ fn consider(path: &Path, name: &str, config: &Config, in_project: bool) -> Optio
     if is_secret(name, &extension) {
         return None;
     }
-    let kind = config.sources.kind_of(&extension)?;
+    let kind = kind_of(config, path)?;
     // In a code project only pictures, PDFs and recordings are read, unless code is: its text files, records and
     // documents are READMEs, configuration, fixtures and data, which would bury everything else.
     let text = matches!(kind, Kind::Plaintext | Kind::Structured) || (kind == Kind::Document && !is_pdf(path));
@@ -278,7 +278,6 @@ fn consider(path: &Path, name: &str, config: &Config, in_project: bool) -> Optio
     if is_cloud_only(&metadata) || metadata.len() == 0 {
         return None;
     }
-    let kind = if kind == Kind::Image && is_screenshot(path, name) { Kind::Screenshot } else { kind };
     let modified = metadata
         .modified()
         .ok()
@@ -294,22 +293,12 @@ fn consider(path: &Path, name: &str, config: &Config, in_project: bool) -> Optio
     })
 }
 
-pub fn extension_of(path: &Path) -> String {
-    path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default()
-}
-
-/// PDFs are documents read page by page (PDFKit), where other documents are text (textutil).
-pub fn is_pdf(path: &Path) -> bool {
-    extension_of(path) == "pdf"
-}
-
 fn is_secret(name: &str, extension: &str) -> bool {
     let lower = name.to_lowercase();
     SECRET_EXTENSIONS.contains(&extension)
         || lower.starts_with("id_rsa")
         || lower.starts_with("id_ed25519")
         || lower.starts_with("id_ecdsa")
-        || lower.starts_with(".env")
         || lower.contains("password")
         || lower.contains("wachtwoord")
         || lower.contains("secret")

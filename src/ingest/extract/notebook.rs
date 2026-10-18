@@ -48,7 +48,7 @@ pub fn read(path: &Path, content: &mut Content) -> Result<serde_json::Value> {
             "code" => Form::Code,
             _ => Form::Prose,
         };
-        content.text(Segment::Passage, (index + 1) as f64, &source, form)?;
+        content.text(Segment::Passage, Some((index + 1) as f64), &source, form)?;
     }
     Ok(serde_json::json!({ "cells": notebook.cells.len(), "passages": content.passages }))
 }

@@ -1,8 +1,8 @@
 //! Listening: what's said in recordings and videos the reading is done with, written down on a lane of its own. The
 //! speech extractor (extract/speech.rs) hands over a stretch of a file at a time; its sentences are cut into passages
 //! (segment/speech.rs), embedded and stored as soon as they're back, so a file stopped partway goes on from there. When
-//! memory allows (resources::IngestPlan), the lane runs beside the reading, on a thread of its own that talks to the speech helper;
-//! else `transcribe_next` writes down one file at a time once everything is read.
+//! memory allows (resources::IngestPlan), the lane runs beside the reading, on a thread of its own that talks to the
+//! speech helper; else `transcribe_next` writes down one file at a time once everything is read.
 
 use super::extract::speech::{self, Outcome};
 use super::{Event, Indexer, prepare, segment};
@@ -126,7 +126,7 @@ impl Indexer {
     /// The next recording or video waiting for what's said in it to be written down, from where it got to (one
     /// without sound is done at once), or None.
     fn next_listening(&mut self, on_event: &mut dyn FnMut(Event)) -> Result<Option<Listening>> {
-        while let Some((row, from)) = self.index.transcripts_pending(1)?.into_iter().next() {
+        while let Some((row, from)) = self.index.next_transcript()? {
             // The tags go in with the first stretch (they're read again when it starts over).
             let tags = (from == 0.0).then(|| crate::adapters::macos::av::tags(&row.path));
             if !crate::adapters::macos::av::has_audio(&row.path) {

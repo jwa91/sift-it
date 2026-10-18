@@ -4,6 +4,7 @@
 //! goes as it is.
 
 use super::Payload;
+use super::discover::crawl::is_project;
 use crate::adapters::macos;
 use crate::config::Settings;
 use anyhow::Result;
@@ -21,12 +22,11 @@ pub fn title(path: &Path, kind: Kind) -> String {
     path.file_stem().map(|s| s.to_string_lossy().replace(['_', '-'], " ")).unwrap_or_default()
 }
 
-/// The path from the project's root (the nearest folder up with .git or a project file), or the file name.
+/// The path from the project's root (the nearest folder up that's a project, as the crawl tells), or the file name.
 fn project_path(path: &Path) -> String {
-    const MARKERS: &[&str] = &[".git", "package.json", "Cargo.toml", "go.mod", "pyproject.toml", "Package.swift"];
     let mut folder = path.parent();
     while let Some(candidate) = folder {
-        if MARKERS.iter().any(|marker| candidate.join(marker).exists()) {
+        if is_project(candidate) {
             let root_name = candidate.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
             let inside = path.strip_prefix(candidate).map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
             return format!("{root_name}/{inside}");

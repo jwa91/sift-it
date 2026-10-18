@@ -1,38 +1,26 @@
-//! Speech: what's said in a recording or a video's sound, written down by the speech model (adapters/speech.rs). Sound goes to it
-//! in chunks of about three minutes, cut where it's quietest so no word is cut in two, and each chunk's sentences, with
-//! their times, are handed over as soon as they're back: a file stopped partway goes on from there later. A slow
-//! extractor, so it runs on a lane of its own (ingest/listen.rs).
+//! Speech: what's said in a recording or a video's sound, written down by the speech model (adapters/speech.rs). Sound
+//! goes to it in chunks of about three minutes, cut where it's quietest so no word is cut in two, and each chunk's
+//! sentences, with their times, are handed over as soon as they're back: a file stopped partway goes on from there
+//! later. A slow extractor, so it runs on a lane of its own (ingest/listen.rs).
 
 use crate::adapters::speech::{Spoken, Transcriber};
-use anyhow::Result;
+use crate::ingest::segment::sound::{SILENCE, rms};
+use anyhow::{Result, bail};
 use embedder::AUDIO_RATE;
 use std::path::Path;
 
 /// Sound goes to the model in chunks of about this many samples…
 const CHUNK: usize = 180 * AUDIO_RATE;
-/// …cut at the quietest tenth of a second within this many samples of the mark.
+/// …cut at the quietest tenth of a second within this many samples of the mark. A silent chunk isn't sent at all.
 const CUT_WINDOW: usize = 10 * AUDIO_RATE;
-/// A chunk quieter than this throughout (RMS, about −50 dBFS) isn't sent at all.
-const SILENCE: f32 = 0.003;
 
 /// How writing down a file went.
-#[derive(Debug, PartialEq)]
 pub enum Outcome {
     /// All of it, up to this second.
     Finished(f64),
     /// Stopped after a chunk (`on_chunk` said so); it goes on from where that chunk ended.
     Stopped,
 }
-
-/// Stops reading a file once a chunk is stored and `on_chunk` asks to stop.
-#[derive(Debug)]
-struct Stop;
-impl std::fmt::Display for Stop {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        f.write_str("stopped")
-    }
-}
-impl std::error::Error for Stop {}
 
 /// Writes down what's said in a file from `from` seconds on, a chunk at a time: after each, `on_chunk(start, end,
 /// sentences)` (seconds from the file's start) stores it and says whether to go on. After the last chunk the file is
@@ -54,6 +42,7 @@ pub fn transcribe(
             .collect();
         on_chunk(start, end, spoken)
     };
+    let mut stopped = false;
     let read = crate::adapters::macos::av::read_samples(path, from, &mut |samples| {
         buffer.extend_from_slice(samples);
         while buffer.len() >= CHUNK + CUT_WINDOW {
@@ -62,16 +51,17 @@ pub fn transcribe(
             let chunk_start = start;
             start += chunk.len() as f64 / AUDIO_RATE as f64;
             if !send(&chunk, chunk_start)? {
-                return Err(Stop.into());
+                // Stops reading the file: it goes on from here later.
+                stopped = true;
+                bail!("stopped");
             }
         }
         Ok(())
     });
-    match read {
-        Ok(_) => {}
-        Err(error) if error.downcast_ref::<Stop>().is_some() => return Ok(Outcome::Stopped),
-        Err(error) => return Err(error),
+    if stopped {
+        return Ok(Outcome::Stopped);
     }
+    read?;
     let end = start + buffer.len() as f64 / AUDIO_RATE as f64;
     if buffer.len() >= AUDIO_RATE / 2 {
         send(&buffer, start)?;
@@ -94,13 +84,6 @@ fn quiet_point(samples: &[f32], mark: usize) -> usize {
         at += frame;
     }
     best.1.clamp(1, samples.len())
-}
-
-fn rms(samples: &[f32]) -> f32 {
-    if samples.is_empty() {
-        return 0.0;
-    }
-    (samples.iter().map(|s| s * s).sum::<f32>() / samples.len() as f32).sqrt()
 }
 
 #[cfg(test)]

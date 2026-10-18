@@ -8,8 +8,8 @@ use super::passages::Cutter;
 
 /// The breaks: a definition at the outer level, one a level in, and a blank line.
 pub const OUTER: u8 = 3;
-pub const INNER: u8 = 2;
-pub const BLOCK: u8 = 1;
+const INNER: u8 = 2;
+const BLOCK: u8 = 1;
 
 pub enum Style {
     Code,

@@ -1,7 +1,6 @@
-//! `sift-it serve`: a front end's way to the engine (services/engine.rs), for the Raycast extension and the like. It
-//! relays JSON lines between its stdin and stdout and the engine's socket, starting the engine when it isn't running
-//! (or is another build), and makes previews itself: drawing a video frame or a PDF page is the work of the code that
-//! reads files, which stays out of the engine.
+//! `sift-it serve`: a front end's way to the engine (services/engine.rs). It relays JSON lines between its stdin and
+//! stdout and the engine's socket, starting the engine when it isn't running (or is another build), and makes previews
+//! itself: drawing a video frame or a PDF page is the work of the code that reads files, which stays out of the engine.
 //!
 //! Requests, replies and events are the protocol's (crates/protocol, docs/protocol.md). Two of them are this relay's
 //! own: `preview` (a thumbnail, a PDF page, a video frame or a waveform) and `quit`.
@@ -144,6 +143,6 @@ fn relay_replies(out: &Mutex<std::io::Stdout>, link: &(Mutex<Link>, Condvar)) {
 /// A preview's picture: a thumbnail, a PDF page, a video frame or a waveform.
 fn preview(request: &Preview) -> Result<Picture> {
     let Preview { path, kind, loc, loc_end, size } = request;
-    let image = preview::render(Path::new(path), kind, *loc, *loc_end, *size, &config::previews_dir())?;
+    let image = preview::render(Path::new(path), *kind, *loc, *loc_end, *size, &config::previews_dir())?;
     Ok(Picture { image: image.display().to_string() })
 }

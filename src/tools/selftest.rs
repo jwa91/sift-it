@@ -4,7 +4,7 @@
 
 use anyhow::{Context, Result, bail};
 use embedder::imaging;
-use embedder::{Decoded, Embedder, ModelFiles, dot, prompts};
+use embedder::{Decoded, Embedder, ModelFiles, prompts};
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -92,14 +92,14 @@ pub fn run(models: &ModelFiles, folder: &Path) -> Result<()> {
     made.insert("speech".into(), embedder.embed_audio(&samples)?);
     eprintln!(
         "speech ({:.1} s of audio) in {:.0} ms",
-        samples.len() as f64 / 16000.0,
+        samples.len() as f64 / embedder::AUDIO_RATE as f64,
         started.elapsed().as_secs_f64() * 1000.0
     );
 
     let mut worst = 1.0f32;
     for (name, vector) in &made {
         let Some(reference) = expected.get(name) else { bail!("no reference vector for {name}") };
-        let cosine = dot(vector, reference);
+        let cosine: f32 = vector.iter().zip(reference).map(|(a, b)| a * b).sum();
         worst = worst.min(cosine);
         println!("{name:<14} cosine {cosine:.5}{}", if cosine < AGREEMENT { "  ✗" } else { "" });
     }

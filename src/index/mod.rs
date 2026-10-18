@@ -101,7 +101,7 @@ pub struct SegmentRow {
 #[derive(Debug, Serialize)]
 pub struct Queued {
     pub files: usize,
-    /// About how long reading them takes (estimate::cost).
+    /// About how long reading them takes (discover::cost).
     pub seconds: f64,
     /// The dearest of them, dearest first.
     pub heaviest: Vec<Heavy>,
@@ -158,7 +158,7 @@ pub mod testing {
     /// A file of `kind` whose passages are these texts, with these vectors, written: its id.
     pub fn add(index: &mut Writer, path: &str, kind: Kind, passages: Vec<(String, Option<Vec<f32>>)>) -> i64 {
         index.queue(&file(path, kind), None, 0.0).unwrap();
-        let row = index.pending(usize::MAX).unwrap().into_iter().find(|row| row.path == Path::new(path)).unwrap();
+        let row = index.pending().unwrap().into_iter().find(|row| row.path == Path::new(path)).unwrap();
         let segments: Vec<NewSegment> = passages
             .into_iter()
             .enumerate()
