@@ -1,24 +1,25 @@
 # Ranking on a mixed folder
 
 The testbed (`make testbed`) is small and every file in it is short, so it can't show what long files and ordinary
-words do to the ranking. The demo folder can: `../sift-it-data/make-demo.sh` plus six more Project Gutenberg books, 522 files
-in all, eight books among photos, sounds, recordings, music, videos, PDFs and notes (6,500 vectors). Two problems
-showed up there, both fixed in the ranking (`src/query/rank.rs`).
+words do to the ranking. A demo folder can: 522 files from public collections, eight books among photos, sounds,
+recordings, music, videos, PDFs and notes (6,500 vectors). Two problems showed up there, both fixed in the ranking
+(`src/query/rank.rs`).
 
 ## Reproducing
 
-The optional demo collection and its generation script live in the sibling `sift-it-data` folder in the local
-workspace. They are not needed to build the engine or run `make eval`. Run these commands from the engine repository.
+The demo folder isn't part of the repository: its files come from public collections, each under its own license. The
+script that fetches them is in the repository's history, and six Project Gutenberg books go beside it:
 
 ```sh
-../sift-it-data/make-demo.sh                   # ../sift-it-data/demo, with two books
-mkdir -p ../sift-it-data/demo-books            # six more, in a folder of their own
+git show 647b4f3:scripts/make-demo.sh > /tmp/make-demo.sh
+bash /tmp/make-demo.sh /tmp/demo                # the demo, with two books
+mkdir -p /tmp/demo-books                        # six more, in a folder of their own
 for id in 11 21 46 84 132 11024; do
-  curl -fsSL -o ../sift-it-data/demo-books/"ebook $id.txt" "https://www.gutenberg.org/cache/epub/$id/pg$id.txt"
+  curl -fsSL -o /tmp/demo-books/"ebook $id.txt" "https://www.gutenberg.org/cache/epub/$id/pg$id.txt"
 done
-export SIFT_IT_HOME=/tmp/demo-home            # an index of its own
-sift-it folders add ../sift-it-data/demo && sift-it folders add ../sift-it-data/demo-books
-sift-it index                                 # about 10 minutes
+export SIFT_IT_HOME=/tmp/demo-home              # an index of its own
+sift-it folders add /tmp/demo /tmp/demo-books
+sift-it index                                   # about 10 minutes
 sift-it eval docs/demo-queries.json
 ```
 

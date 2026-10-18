@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
 # Releases sift-it: builds it, signs and notarizes it, publishes the archive as a GitHub release, and writes
-# Casks/sift-it.rb to jwa91/homebrew-tap. That's what GoReleaser does for the rest of the jwa91 family; sift-it does it here
-# because GoReleaser's Rust builder always runs `rustup target add`, which this machine's toolchain policy reserves for
-# mise (see CLAUDE.md, Exceptions). Same archive name, checksums file, cask and commit message as GoReleaser's.
+# Casks/sift-it.rb to jwa91/homebrew-tap. That's what GoReleaser does for the rest of the jwa91 family; sift-it does it
+# here because GoReleaser's Rust builder always runs `rustup target add`, which a toolchain not managed by rustup doesn't
+# allow (see CLAUDE.md, Exceptions). Same archive name, checksums file, cask and commit message as GoReleaser's.
 #
 #   scripts/release.sh X.Y.Z        a release (through `make release`)
 #   scripts/release.sh --snapshot   build, archive, and render the cask into dist/, unsigned; publish nothing
 #
-# It needs no secrets of its own: signing and notarizing use this Mac's keychain (scripts/codesign.sh), and the GitHub
-# release and the cask use your gh login.
+# It needs no secrets of its own: signing and notarizing use the releasing Mac's keychain (scripts/codesign.sh), and the
+# GitHub release and the cask use your gh login.
 set -euo pipefail
 
 OWNER=jwa91
 REPO=sift-it
 TAP=homebrew-tap
-DESCRIPTION="Local file search for the terminal and Raycast, written in Rust"
+DESCRIPTION="Local file search for macOS, written in Rust"
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"

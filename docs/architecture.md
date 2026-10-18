@@ -1,8 +1,7 @@
 # Architecture
 
-How sift-it's code is structured: the rules it follows, its parts and their boundaries, how today's code maps onto
-them, and the order in which it gets there. `docs/design.md` says what sift-it does; this says where each part of that
-lives. Nothing here changes behavior: every step on the way keeps `make check` and `make eval` as they were.
+How sift-it's code is structured: the rules it follows, its parts and their boundaries, and where each lives in the
+source. `docs/design.md` says what sift-it does; this says where each part of that lives.
 
 ## Rules
 
@@ -21,7 +20,7 @@ lives. Nothing here changes behavior: every step on the way keeps `make check` a
 ## The model
 
 ```
-clients     CLI · TUI · serve · web gateway · Mac app
+clients     CLI · TUI · serve · other front ends
                      │  protocol: requests, responses, events
 services    engine: search and control · indexer: ingest
                      │
@@ -41,7 +40,7 @@ adapters    index (SQLite and vector files) · embedder (llama.cpp) · transcrib
 - **Extract:** a file becomes a stream of content: lines of text, pages, pictures, sound. Extracting decodes; it decides
   nothing about cutting.
 - **Segment:** content becomes segments, each with its place in the file. One strategy per content type: prose and
-  Markdown, code, records (CSV, JSON, YAML), pages, frames, sound windows, speech. Pure, and tested on its own.
+  Markdown, code, records (CSV, JSON, YAML, TOML), pages, frames, sound windows, speech. Pure, and tested on its own.
 - **Prepare:** a segment becomes the model's input: the prompt with the file's title, a picture fitted to its token
   budget, a window of sound.
 - **Embed:** the model's only owner. It batches inputs and hands back vectors.
@@ -89,27 +88,24 @@ Speech is an extractor too: sound in, text with times out. A slow one, so the sc
 it yields is segmented and embedded like everything else, and "beside the reading or after it" is the scheduler's
 choice rather than code of its own.
 
-## Interfaces
+## Concrete parts
 
-Only where there's variation or a test needs a stand-in:
-
-- `Embedder`: llama.cpp, or a stand-in that makes vectors from a seed in tests.
-- `Transcriber`: the helper process, or a stand-in.
-- `Extractor`: one per container format.
-
-The index, the config and the policies are concrete: there's one of each, and an interface would only hide them.
+There are no traits. The embedder, the transcriber, the index, the config and the policies each exist once, and an
+extractor is a function per container format, chosen by a match on the kind. The policies are tested as pure
+functions, and the rest on real files: the testbed, the fixtures in `tests/`, and indexes in temporary folders. A trait
+comes when something varies.
 
 ## Crates
 
 Module boundaries first, with the rule that dependencies point inward. A crate of its own only where it pays:
 
 - **`sift-it-protocol`:** shared with every client, small, no heavy dependencies.
-- **`sift-it-llama`:** the embedder's adapter, with llama.cpp's native build and bindings. Built apart, it no longer
-  slows down every other build.
-- **`sift-it-transcribe`:** the speech helper, as today.
+- **`sift-it-llama`:** the embedder's adapter, with llama.cpp's native build and bindings, built apart so it doesn't
+  slow down every other build.
+- **`sift-it-transcribe`:** the speech helper, a binary of its own (`transcribe/`).
 
-It stays one `sift-it` binary: the CLI, and the services as its subcommands. The web UI and the Mac app talk to the
-engine through the protocol, not by linking code, as sibling tools in the family do.
+There is one `sift-it` binary: the CLI, with the services as its subcommands. Front ends talk to the engine through
+the protocol, not by linking code.
 
 ## The modules
 
@@ -154,32 +150,11 @@ transcribe/              sift-it-transcribe
 Watching the folders is the indexer service's: FSEvents, settled for a moment, is platform wiring, bound to its loop
 of pausing and waiting. It hands discover the paths that changed.
 
-## Where the code stands
-
-Where the tree says: the way there below is done, and every step of it kept `make check` and `make eval` as they
-were.
-
-## The way there
-
-Each step changes no behavior, and is checked by `make check` and `make eval` giving what they gave before. A step
-that touches segmenting also keeps every segment, and so every fingerprint and vector, as it was.
-
-1. **The protocol:** its types in `sift-it-protocol`, documented. The engine reports the indexer's progress and takes
-   settings and folders through it.
-2. **The query path:** understand, retrieve, rank and present as modules; ranking pure.
-3. **The index:** one facade with a writer and readers over the catalog and the vectors.
-4. **Extracting apart from segmenting:** extractors yield content, segmenters cut it.
-5. **The ingest path:** stages with owners, a scheduler, and speech as an extractor on a lane of its own.
-6. **Resources:** the plans in one module.
-7. **Crates:** `sift-it-llama`, and the modules in the tree above.
-
-Segmenting text by its form landed where it belongs: one cutter (`segment/passages.rs`) and a form per content type
-saying where its text breaks: prose and Markdown at paragraphs and headings, code at its definitions, records at their
-rows, records or keys.
+Text is cut by one cutter (`segment/passages.rs`), with a form per content type saying where its text breaks: prose
+and Markdown at paragraphs and headings, code at its definitions, records at their rows, records or keys.
 
 ## Not done on purpose
 
-- No interface for every part: only where something varies or a test needs a stand-in.
 - No plugin system.
 - No async runtime: threads and bounded channels suit work that waits on the CPU and the GPU.
 - No second binary for the services, and no library for the front ends to link: they speak the protocol.

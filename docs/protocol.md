@@ -1,8 +1,8 @@
 # Protocol
 
 What sift-it's clients and its engine say to each other. The CLI, the TUI and `sift-it serve` speak it, and so does
-any front end: the Raycast extension, a web UI, a Mac app. Its types are in `crates/protocol` (`sift-it-protocol`);
-this describes the wire for clients in other languages.
+any front end. Its types are in `crates/protocol` (`sift-it-protocol`); this describes the wire for clients in other
+languages.
 
 ## Getting there
 

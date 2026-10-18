@@ -1,9 +1,9 @@
 # sift-it
 
-Local file search for the terminal and Raycast, written in Rust.
+Local file search for macOS, written in Rust.
 
 Search selected folders by meaning or exact words. Use the interactive terminal interface, run commands from scripts,
-or search through [Sift It for Raycast](https://github.com/jwa91/sift-it-for-raycast).
+or search from another program through `sift-it serve`.
 Search and indexing run on your Mac with [EmbeddingGemma 2](https://huggingface.co/google/embeddinggemma-2) and
 [llama.cpp](https://github.com/ggml-org/llama.cpp).
 
@@ -16,9 +16,11 @@ recordings, videos, and code. DigUp also includes a CLI.
 - **Rust implementation:** the search engine, file readers, and background indexer use Rust.
 - **Terminal interface:** search interactively, preview results, and open files at the matching page, time, or line.
 - **Script integration:** use JSON output or pass search result paths to other commands.
-- **One engine for every search:** a resident process answers the terminal, scripts, and Raycast alike. It loads the
-  model and maps the vectors for the first search by meaning and keeps them, and a search by words loads nothing.
-- **Raycast integration:** a separate TypeScript extension uses `sift-it serve` for searches and previews.
+- **One engine for every search:** a resident process answers the terminal, scripts, and other programs alike. It
+  loads the model and maps the vectors for the first search by meaning and keeps them, and a search by words loads
+  nothing.
+- **A protocol for front ends:** other programs search, preview results, manage folders and follow indexing through
+  `sift-it serve`, with JSON lines.
 - **Ranking changes:** account for file length and give ordinary words less weight than numbers, code searches,
   and quoted phrases.
 - **Text cut by its form:** Markdown at its headings, code at its definitions, and records (CSV, JSON, YAML, TOML)
@@ -127,7 +129,7 @@ search scans:
   exactly: 4,096 of them, or a 32nd of the vectors in a larger index. On Rust's books (7,400 vectors) it keeps all of
   the exact top 20 for 45 queries.
 - `auto`, the default, scans the most precise form whose rows fit in `search.memory_mb`. That's a tenth of the Mac's
-  memory unless you set it: about 800 MB on an 8 GB Mac, enough for exact scores up to some 260,000 vectors.
+  memory unless you set it. 800 MB holds exact scores for some 260,000 vectors.
 
 Every form is always written, so a change takes effect at the next search. A result's lift is measured from the
 query's median over a fixed sample of 8,192 vectors, which the engine keeps in memory (24 MB), so it's the same
@@ -147,10 +149,7 @@ sift-it search "code: validate a configuration file"
 Code appears in `code:` searches or when you select the code filter.
 `NO_COLOR` disables colour. `SIFT_IT_IMAGES=0` disables inline pictures.
 
-### Raycast and other interfaces
-
-[Sift It for Raycast](https://github.com/jwa91/sift-it-for-raycast) provides search, folder management, and indexing status.
-The extension uses the same sift-it index and model.
+### Other programs
 
 Other programs can use `sift-it serve`. It accepts JSON requests through stdin and returns JSON replies through stdout,
 relayed to the engine over its socket, and it renders previews itself.
@@ -162,14 +161,15 @@ sift-it reads only the folders you select. It does not change, move, or upload y
 
 | File type | Search content |
 |---|---|
-| Documents | Text from txt, md, rtf, doc, docx, odt, and html files |
+| Documents | Text from txt, md, rtf, doc, docx, odt, and html files, Markdown cut at its headings |
 | PDFs | Individual pages, including text recognition for scanned pages |
 | Pictures | Image content in formats macOS can read, including HEIC and RAW |
 | Screenshots | Image content and recognized text |
 | Recordings | Overlapping 30-second windows, and what's said in them, with results at the matching time |
 | Videos | Frames from individual shots and long shots, plus audio windows and what's said |
 | Tags | The title, artist and album of recordings and videos, found by their words |
-| Code and notebooks | Source passages and notebook cells, with code indexing enabled |
+| Records | Rows of csv and tsv files, records of json and jsonl files, keys of yaml and toml files |
+| Code and notebooks | Definitions and notebook cells, with code indexing enabled |
 
 Text that contains mostly numbers uses word search only. Silent audio windows do not enter the index.
 The embedding model can miss or confuse sounds and pictures. See [the documented limitations](docs/ranking.md#results).
@@ -253,9 +253,8 @@ sift-it config indexing.memory_mb 4096
 
 `indexing.memory_mb` decides only how fast indexing goes, never what it writes. At `auto` it's a quarter of the
 Mac's memory. With room for the embedding model and the speech model together (about 1 GB each, plus 256 MB for two
-readers), what's said in recordings is written down beside the reading; with less, the models take turns. That's
-2 GB on an 8 GB Mac, where they take turns, and 6 GB on a 24 GB Mac, where they run together. Reading takes up to a
-third of the cores, two to four files at once, and a small budget makes that fewer. `sift-it status` shows the plan.
+readers), what's said in recordings is written down beside the reading; with less, the models take turns. Reading
+takes up to a third of the cores, two to four files at once, and a small budget makes that fewer. `sift-it status` shows the plan.
 
 A reading value resolves in four steps, and the last one that sets it wins: the top of `reading`, the kind
 (`reading.video`), the file type (`reading.types.mov`), then each rule in `reading.rules` whose path matches.
@@ -284,18 +283,9 @@ make install
 way dependencies point. [docs/protocol.md](docs/protocol.md) is what front ends say to the engine.
 
 After you download the model, `make selftest` checks output against the reference vectors from DigUp.
-`make eval` builds `testbed/` inside this repository and measures search quality. The engine's build and testbed
-commands work independently of the other workspace folders.
-The optional mixed-file evaluation requires a separate demo collection. [docs/ranking.md](docs/ranking.md) provides reproduction commands.
-
-In the local workspace, `../sift-it-data/make-demo.sh` fills `../sift-it-data/demo` with public photos, sounds,
-recordings, music, videos, PDFs, books, and notes. This optional script lives in the separate data folder, outside
-the engine repository. The files have camera-roll and Downloads-folder names; `CREDITS.csv` records their sources.
-
-The local workspace is organized as `sift-it/sift-it-engine` (this repository, including generated `testbed/`),
-`sift-it/sift-it-data` (the demo-generation script and demo files in `demo/`), `sift-it/sift-it-raycast` (the separate Raycast
-repository), and `sift-it/sift-it-web` (reserved for the web app). Run the engine's `make` commands from
-`sift-it-engine`. Both data-generation scripts accept an explicit output folder to override their defaults.
+`make eval` builds `testbed/` inside this repository and measures search quality on it.
+The mixed-file evaluation needs a larger demo collection, which isn't part of the repository;
+[docs/ranking.md](docs/ranking.md) says how to make it.
 
 ## Credits and license
 
