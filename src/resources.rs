@@ -8,9 +8,9 @@
 //!   them a search with sketches scores exactly.
 //! - `wait`: whether indexing waits for a charger.
 
+use crate::adapters::macos::{self, power};
 use crate::config::{self, Budget};
 use crate::index::Form;
-use crate::{mac, power};
 use protocol::Scan;
 
 /// The share of the Mac's memory indexing takes with `indexing.memory_mb` at auto: 2 GB of 8, where the models take
@@ -36,7 +36,7 @@ pub const CANDIDATES: usize = 4096;
 fn bytes(budget: Budget, share: f64) -> u64 {
     match budget {
         Budget::Mb(mb) => mb << 20,
-        Budget::Auto => (mac::memory() as f64 * share) as u64,
+        Budget::Auto => (macos::memory() as f64 * share) as u64,
     }
 }
 

@@ -1,7 +1,7 @@
-//! `sift-it serve`: a front end's way to the engine (engine.rs), for the Raycast extension and the like. It relays JSON
-//! lines between its stdin and stdout and the engine's socket, starting the engine when it isn't running (or is
-//! another build), and makes previews itself: drawing a video frame or a PDF page is the work of the code that reads
-//! files, which stays out of the engine.
+//! `sift-it serve`: a front end's way to the engine (services/engine.rs), for the Raycast extension and the like. It
+//! relays JSON lines between its stdin and stdout and the engine's socket, starting the engine when it isn't running
+//! (or is another build), and makes previews itself: drawing a video frame or a PDF page is the work of the code that
+//! reads files, which stays out of the engine.
 //!
 //! Requests, replies and events are the protocol's (crates/protocol, docs/protocol.md). Two of them are this relay's
 //! own: `preview` (a thumbnail, a PDF page, a video frame or a waveform) and `quit`.
@@ -10,9 +10,9 @@
 //! replies to later requests. When the engine stops (it crashed, or a client of another build replaced it), the
 //! requests waiting on it fail, it's started again, and a new `ready` follows. It ends when its stdin closes.
 
-use crate::client::Client;
+use crate::clients::Client;
+use crate::clients::preview;
 use crate::config;
-use crate::preview;
 use anyhow::Result;
 use protocol::{Done, Failure, Op, Picture, Preview, Request};
 use serde::Serialize;

@@ -8,7 +8,7 @@ this describes the wire for clients in other languages.
 
 - **The engine's socket:** a Unix socket, `engine.sock` in the data folder (`~/Library/Application Support/Sift It`,
   or `SIFT_IT_HOME`). Only this user can open it. When the data folder is too deep for a socket's name, the socket is
-  reached through a link in the user's temporary folder (engine.rs says how).
+  reached through a link in the user's temporary folder (services/engine.rs says how).
 - **`sift-it serve`:** the same lines over its stdin and stdout. It starts the engine when it isn't running, starts it
   again when it stops, and answers two requests itself: `preview` and `quit`.
 

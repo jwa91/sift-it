@@ -1,9 +1,9 @@
-//! Speech: what's said in a recording or a video's sound, written down by the speech model (speech.rs). Sound goes to it
+//! Speech: what's said in a recording or a video's sound, written down by the speech model (adapters/speech.rs). Sound goes to it
 //! in chunks of about three minutes, cut where it's quietest so no word is cut in two, and each chunk's sentences, with
 //! their times, are handed over as soon as they're back: a file stopped partway goes on from there later. A slow
 //! extractor, so it runs on a lane of its own (ingest/listen.rs).
 
-use crate::speech::{Spoken, Transcriber};
+use crate::adapters::speech::{Spoken, Transcriber};
 use anyhow::Result;
 use embedder::AUDIO_RATE;
 use std::path::Path;
@@ -54,7 +54,7 @@ pub fn transcribe(
             .collect();
         on_chunk(start, end, spoken)
     };
-    let read = crate::av::read_samples(path, from, &mut |samples| {
+    let read = crate::adapters::macos::av::read_samples(path, from, &mut |samples| {
         buffer.extend_from_slice(samples);
         while buffer.len() >= CHUNK + CUT_WINDOW {
             let cut = quiet_point(&buffer, CHUNK);

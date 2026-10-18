@@ -1,8 +1,8 @@
 //! The engine: one resident process that answers every search (`sift-it engine`, a LaunchAgent of its own beside the
 //! indexer's). A crash in a reader can't take search down, and search doesn't wait for a charger. Clients reach it
 //! through a Unix socket in the data folder: `sift-it serve` relays a front end's stdio to it, and `sift-it search` and
-//! the finder talk to it directly (client.rs). Results carry a path, kind and place; opening them, and previews, are the
-//! front end's.
+//! the finder talk to it directly (clients/client.rs). Results carry a path, kind and place; opening them, and
+//! previews, are the front end's.
 //!
 //! What clients and the engine say to each other is the protocol (crates/protocol, docs/protocol.md): JSON lines, one
 //! request per line and one reply per line carrying the request's `id`, and events (lines without an `id`) to every
@@ -90,8 +90,8 @@ fn user_temp_dir() -> io::Result<PathBuf> {
     Ok(PathBuf::from(OsString::from_vec(buffer)))
 }
 
-/// This build: the version, and the binary it runs from (its path, size and time), so two builds of one version
-/// differ too. A client of another build stops the engine and starts its own (client.rs). Taken once, when first
+/// This build: the version, and the binary it runs from (its path, size and time), so two builds of one version differ
+/// too. A client of another build stops the engine and starts its own (clients/client.rs). Taken once, when first
 /// asked: the binary on disk can be replaced while this process runs.
 pub fn build() -> &'static str {
     static BUILD: std::sync::OnceLock<String> = std::sync::OnceLock::new();

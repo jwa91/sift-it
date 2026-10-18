@@ -4,7 +4,7 @@
 //! `sift-it open 2` opens the second.
 
 use crate::config;
-use crate::crawl;
+use crate::ingest::discover::crawl;
 use anyhow::{Context, Result, bail};
 use protocol::Hit;
 use protocol::Kind;

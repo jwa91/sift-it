@@ -1,7 +1,7 @@
 //! Recordings, through AVFoundation: their sound decoded to 16 kHz mono, and their tags (title, artist, album). At
 //! `words` depth a recording is found by its name and tags only.
 
-use crate::av;
+use crate::adapters::macos::av;
 use crate::config::Settings;
 use crate::ingest::Content;
 use anyhow::Result;

@@ -1,7 +1,7 @@
 //! Speech: what's said, written down sentence by sentence with their times, joined into passages. A short sentence
 //! joins what follows closely, so each passage holds enough to mean something.
 
-use crate::speech::Spoken;
+use crate::adapters::speech::Spoken;
 
 /// Sentences shorter than this are joined to the next one (when it follows within MAX_GAP seconds).
 const MIN_PASSAGE: usize = 160;

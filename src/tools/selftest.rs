@@ -10,10 +10,10 @@ use std::path::Path;
 
 /// The reference inputs and vectors (tests/reference), built in, so an installed sift-it can check itself.
 const BUILT_IN: [(&str, &[u8]); 4] = [
-    ("vectors.json", include_bytes!("../tests/reference/vectors.json")),
-    ("photo.jpg", include_bytes!("../tests/reference/photo.jpg")),
-    ("screen.png", include_bytes!("../tests/reference/screen.png")),
-    ("speech.wav", include_bytes!("../tests/reference/speech.wav")),
+    ("vectors.json", include_bytes!("../../tests/reference/vectors.json")),
+    ("photo.jpg", include_bytes!("../../tests/reference/photo.jpg")),
+    ("screen.png", include_bytes!("../../tests/reference/screen.png")),
+    ("speech.wav", include_bytes!("../../tests/reference/speech.wav")),
 ];
 
 /// Runs against the built-in reference (written to a temporary folder: mtmd's decoders read files).

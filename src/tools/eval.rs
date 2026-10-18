@@ -8,8 +8,8 @@
 //! when it scores 256 to 8192 candidates exactly, and where the segments the exact top 20 found by meaning come by
 //! their sketches' estimates.
 
-use crate::engine::Core;
 use crate::index::Form;
+use crate::services::engine::Core;
 use anyhow::Result;
 use protocol::{Mode, Search};
 use serde::Deserialize;

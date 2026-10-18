@@ -17,11 +17,11 @@
 //! One runs at a time (daemon.lock). With `indexing.on_battery` off it waits for a charger; in Low Power Mode it always
 //! waits. When a reader gets stuck (ingest::Stuck), it exits, and launchd starts a new one.
 
+use crate::adapters::speech::Transcriber;
 use crate::config::{self, Config};
 use crate::index::{self, Writer};
 use crate::ingest::{Event, Indexer, Stuck};
 use crate::resources::{self, IngestPlan};
-use crate::speech::Transcriber;
 use anyhow::{Context, Result, bail};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use protocol::{IndexerState, IndexerStatus};
@@ -416,7 +416,7 @@ pub fn run() -> Result<()> {
                     let mut take = || changes.take();
                     // Speech beside the reading, when memory allows both models.
                     let beside = IngestPlan::of(&config.indexing).beside
-                        && crate::speech::unavailable().is_none()
+                        && crate::adapters::speech::unavailable().is_none()
                         && speech_failed_at.is_none_or(|at| at.elapsed() > SPEECH_RETRY);
                     let helper = beside.then_some(&mut transcriber);
                     if let Err(error) = indexer.index_pending(&config, &mut events, &stop, &mut take, helper) {

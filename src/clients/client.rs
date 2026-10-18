@@ -1,12 +1,12 @@
-//! Talking to the engine (engine.rs) over its socket: `sift-it serve` relays through it, and `sift-it search`, the
-//! finder and `sift-it status` ask it directly.
+//! Talking to the engine (services/engine.rs) over its socket: `sift-it serve` relays through it, and `sift-it search`,
+//! the finder and `sift-it status` ask it directly.
 //!
 //! Connecting starts the engine when it isn't running: through launchd when its LaunchAgent runs this binary for this
 //! data folder, else as a process of its own. An engine of another build (an upgrade, or a new build while developing)
 //! is stopped first, and this build's started in its place.
 
-use crate::engine::{self, build, socket_path};
-use crate::service;
+use crate::services::engine::{self, build, socket_path};
+use crate::services::launchd;
 use anyhow::{Context, Result, anyhow, bail};
 use protocol::{Event, MeaningState, Op, Request, Results, Search, Text};
 use serde::de::DeserializeOwned;
@@ -182,7 +182,7 @@ impl Client {
 /// Starts this build's engine: through launchd when its agent runs this binary for this data folder, else as a
 /// process of its own that outlives this one.
 fn start() -> Result<()> {
-    if service::ENGINE.installed_as_this() && service::ENGINE.kickstart().is_ok() {
+    if launchd::ENGINE.installed_as_this() && launchd::ENGINE.kickstart().is_ok() {
         return Ok(());
     }
     let binary = std::env::current_exe()?;

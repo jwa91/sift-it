@@ -8,7 +8,7 @@ use super::segment::prose::{self, Cutter};
 use super::segment::sound::Windows;
 use super::{extract, prepare};
 use crate::config::{Depth, Settings};
-use crate::crawl::is_pdf;
+use crate::ingest::discover::crawl::is_pdf;
 use anyhow::Result;
 use embedder::AUDIO_RATE;
 use embedder::imaging::Image;

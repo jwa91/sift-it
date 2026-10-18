@@ -116,16 +116,18 @@ engine through the protocol, not by linking code, as sibling tools in the family
 ```
 src/
   main.rs                the CLI: commands and arguments
-  config/                the schema and the cascade
+  config/                the schema (mod.rs), which files (sources.rs), and the cascade of reading values (reading.rs)
   resources.rs           the Mac's facts; plans for search and ingest
-  index/                 the facade: catalog (SQLite), vectors (files, generations, scanning)
+  models.rs              the model files: what's there, and downloading them
+  index/                 the facade: catalog (SQLite), vector files, the vectors as searches read them
   ingest/
-    discover.rs          crawling, watching, fingerprints, cost
-    extract/             per container: text, document, pdf, image, audio, video, speech
-    segment/             per content type: prose, markdown, code, records, pictures, frames, sound, speech
-    prepare.rs           prompts, fitting pictures, sound windows
-    embed.rs             the embedding stage
-    write.rs             the writer
+    discover/            what's new or changed (mod.rs), crawling (crawl.rs), what reading costs (cost.rs)
+    read.rs              extract, segment and prepare, joined
+    extract/             per container: text, document, notebook, pdf, image, audio, video, speech
+    segment/             per content type: prose, pictures, frames, sound, speech
+    prepare.rs           prompts, fitting pictures, sound
+    embed.rs             the embedding stage, the model's owner
+    write.rs             files put together and written
     schedule.rs          order, readers, the run
     listen.rs            speech's lane, beside the reading or after it
   query/
@@ -135,33 +137,26 @@ src/
     present.rs           excerpts and places
   services/
     engine.rs            the query service and control plane
-    indexer.rs           the ingest service
+    indexer.rs           the ingest service: watching the folders (FSEvents), waiting, status
     launchd.rs           installing the LaunchAgents
   adapters/
-    macos/               the frameworks: AVFoundation, ImageIO, PDFKit, Vision, textutil, FSEvents, power
+    macos/               the frameworks: ImageIO, CoreGraphics and Vision (mod.rs), AVFoundation (av.rs), power
     speech.rs            the helper process
-  clients/               the TUI, serve (relay and previews), opening results, the engine's client
-  tools/                 eval, the benches, selftest
+  clients/               the engine's client, the TUI, results in a terminal, previews, opening results, serve
+  tools/                 eval, the benches, selftest, estimate
 crates/
   protocol/              sift-it-protocol
-  llama/                 sift-it-llama
+  llama/                 sift-it-llama: the embedding model and its picture sizing, used as `embedder`
 transcribe/              sift-it-transcribe
 ```
 
-## Where today's code stands
+Watching the folders is the indexer service's: FSEvents, settled for a moment, is platform wiring, bound to its loop
+of pausing and waiting. It hands discover the paths that changed.
 
-| Part | Today | What's off |
-|---|---|---|
-| Discover | `ingest/discover.rs`, with `crawl.rs` and `estimate.rs` | close: crawling and cost join it in step 7 |
-| Extract and segment | `ingest/extract/`, `ingest/segment/`, `ingest/prepare.rs` | done (step 4 below) |
-| Embed | `ingest/embed.rs`, the model in `embedder.rs` | done (step 5 below) |
-| Speech | `ingest/extract/speech.rs`, `ingest/listen.rs`, the helper in `speech.rs` and `transcribe/` | done (step 5 below) |
-| Write and schedule | `ingest/write.rs`, `ingest/schedule.rs`, the service in `daemon.rs` | done (step 5 below) |
-| Index | `index/` | done (step 3 below) |
-| Query | `query/` | done (step 2 below) |
-| Resources | `resources.rs`, the facts from `mac.rs` and `power.rs` | done (step 6 below) |
-| Protocol | `crates/protocol`, `docs/protocol.md` | done (step 1 below) |
-| Clients | `finder.rs`, `term.rs`, `present.rs`, `preview.rs`, `open.rs`, `serve.rs` | beside the core, in one namespace |
+## Where the code stands
+
+Where the tree says: the way there below is done, and every step of it kept `make check` and `make eval` as they
+were.
 
 ## The way there
 
@@ -177,8 +172,8 @@ that touches segmenting also keeps every segment, and so every fingerprint and v
 6. **Resources:** the plans in one module.
 7. **Crates:** `sift-it-llama`, and the modules in the tree above.
 
-Then segmenting text by its form lands where it belongs: prose and Markdown at paragraphs and headings, code at its
-definitions, records at whole rows, records or top-level keys.
+Segmenting text by its form lands where it belongs next: prose and Markdown at paragraphs and headings, code at
+its definitions, records at whole rows, records or top-level keys.
 
 ## Not done on purpose
 

@@ -1,9 +1,9 @@
 //! Pictures and screenshots, through ImageIO: the picture decoded, and on a screenshot the text Vision reads on it. At
 //! `words` depth a photo isn't opened at all.
 
+use crate::adapters::macos;
 use crate::config::Settings;
 use crate::ingest::Content;
-use crate::mac;
 use anyhow::Result;
 use protocol::Kind;
 use std::path::Path;
@@ -15,8 +15,8 @@ pub fn read(path: &Path, kind: Kind, settings: &Settings, content: &mut Content)
     if kind == Kind::Image && !settings.embeds() {
         return Ok(serde_json::json!({}));
     }
-    let picture = mac::open_picture(path, DECODE_SIDE)?;
-    let text = if kind == Kind::Screenshot { Some(mac::recognize_text(&picture.image)?) } else { None };
+    let picture = macos::open_picture(path, DECODE_SIDE)?;
+    let text = if kind == Kind::Screenshot { Some(macos::recognize_text(&picture.image)?) } else { None };
     let long_text = content.picture(&picture.image, text.as_deref())?;
     Ok(serde_json::json!({
         "width": picture.width,

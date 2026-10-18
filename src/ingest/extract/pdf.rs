@@ -1,8 +1,8 @@
 //! PDFs, page by page, through PDFKit: each page's text layer, at its page number. A page without one (a scan) is
 //! drawn, and Vision reads the text on it.
 
+use crate::adapters::macos;
 use crate::ingest::Content;
-use crate::mac;
 use anyhow::{Result, bail};
 use objc2::AllocAnyThread;
 use objc2::rc::autoreleasepool;
@@ -38,8 +38,8 @@ pub fn read(path: &Path, content: &mut Content) -> Result<serde_json::Value> {
         let number = index + 1;
         if text.trim().chars().count() < SCANNED_BELOW {
             scanned += 1;
-            let page = autoreleasepool(|_| mac::render_pdf_page(path, number, SCAN_SIDE))?;
-            let text = autoreleasepool(|_| mac::recognize_text(&page))?;
+            let page = autoreleasepool(|_| macos::render_pdf_page(path, number, SCAN_SIDE))?;
+            let text = autoreleasepool(|_| macos::recognize_text(&page))?;
             content.scan(number, &page, &text)?;
             continue;
         }

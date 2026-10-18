@@ -1,9 +1,9 @@
 # Design: indexing and search
 
-Status: agreed on 2026-10-17. Steps 1 to 11 of the build order are built: the config, with depth in place of size and
+Status: agreed on 2026-10-17. Steps 1 to 12 of the build order are built: the config, with depth in place of size and
 length limits, the engine, the vector store, search in each of its forms with `auto` choosing, indexing's memory budget,
 the protocol, the query path in its stages, the index behind one facade, extracting apart from segmenting, the ingest
-path in its stages, and the plans for memory in one module. It replaces the earlier design with several indexes.
+path in its stages, the plans for memory in one module, and the code laid out as docs/architecture.md says. It replaces the earlier design with several indexes.
 
 After step 5 the plan changed. The first release is that core, its code structured as docs/architecture.md describes,
 and text cut by its form. Projects, text detection on every image, the measured ranking values, metadata and result
@@ -386,10 +386,10 @@ Built:
 10. The ingest path: stages with owners (discover, read, embed, write), a scheduler, and speech as an extractor on a
     lane of its own (`src/ingest/`).
 11. Resources: the plans for search and ingest in one module (`src/resources.rs`).
+12. Crates where they pay: llama.cpp's binding (`crates/llama`), and the modules as docs/architecture.md lays them out.
 
-Next, for the first release. Step 12 changes no behavior (docs/architecture.md, "The way there"):
+Next, for the first release:
 
-12. Crates where they pay: llama.cpp's binding, and the modules as docs/architecture.md lays them out.
 13. Text cut by its form: prose and Markdown at paragraphs and headings, code at its definitions, structured files
     (csv, tsv, json, jsonl, yaml, toml) at whole rows, records or top-level keys. Eval questions for code and
     structured files measure it.

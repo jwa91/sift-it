@@ -3,17 +3,17 @@
 //! pictures, a recording's waveform with the matched stretch lit, the passage or code with the query's words marked),
 //! and Enter opens it where it matched.
 //!
-//! Three threads keep typing smooth: this one draws and reads keys; a searcher asks the engine (engine.rs) for the
-//! latest query (by words at once, by meaning as soon as the engine has the model); a previewer fetches what the
+//! Three threads keep typing smooth: this one draws and reads keys; a searcher asks the engine (services/engine.rs) for
+//! the latest query (by words at once, by meaning as soon as the engine has the model); a previewer fetches what the
 //! selected result's preview needs.
 
-use crate::client::Client;
+use crate::clients::Client;
+use crate::clients::open::{self, Place, timestamp};
+use crate::clients::preview;
+use crate::clients::term;
 use crate::config;
-use crate::crawl;
-use crate::open::{self, Place, timestamp};
-use crate::preview;
+use crate::ingest::discover::crawl;
 use crate::query::understand::words_of;
-use crate::term;
 use anyhow::Result;
 use protocol::Kind;
 use protocol::Mode;

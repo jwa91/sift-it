@@ -1,6 +1,6 @@
 //! Extracting: a file decoded into content, per container format: lines of text, a page's text, pictures with the
 //! text on them, video frames, sound. What it decodes goes to Content by its type; nothing here decides how it's cut
-//! or what the model is shown of it. Speech (speech.rs) is an extractor too, a slow one, run on a lane of its own.
+//! or what the model is shown of it. Speech (extract/speech.rs) is an extractor too, a slow one, run on a lane of its own.
 
 mod audio;
 mod document;
@@ -13,7 +13,7 @@ mod video;
 
 use super::Content;
 use crate::config::Settings;
-use crate::crawl::is_pdf;
+use crate::ingest::discover::crawl::is_pdf;
 use anyhow::Result;
 use protocol::Kind;
 use std::path::Path;

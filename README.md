@@ -152,7 +152,7 @@ The extension uses the same sift-it index and model.
 
 Other programs can use `sift-it serve`. It accepts JSON requests through stdin and returns JSON replies through stdout,
 relayed to the engine over its socket, and it renders previews itself.
-See [src/engine.rs](src/engine.rs) and [src/serve.rs](src/serve.rs) for the request and reply formats.
+See [docs/protocol.md](docs/protocol.md) for the requests, replies and events.
 
 ## Supported files
 

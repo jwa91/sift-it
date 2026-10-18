@@ -6,8 +6,8 @@
 
 use super::extract::speech::{self, Outcome};
 use super::{Event, Indexer, prepare, segment};
+use crate::adapters::speech::{Gone, Spoken, Transcriber};
 use crate::index::{FileRow, NewSegment};
-use crate::speech::{Gone, Spoken, Transcriber};
 use anyhow::Result;
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::thread::JoinHandle;
@@ -128,8 +128,8 @@ impl Indexer {
     fn next_listening(&mut self, on_event: &mut dyn FnMut(Event)) -> Result<Option<Listening>> {
         while let Some((row, from)) = self.index.transcripts_pending(1)?.into_iter().next() {
             // The tags go in with the first stretch (they're read again when it starts over).
-            let tags = (from == 0.0).then(|| crate::av::tags(&row.path));
-            if !crate::av::has_audio(&row.path) {
+            let tags = (from == 0.0).then(|| crate::adapters::macos::av::tags(&row.path));
+            if !crate::adapters::macos::av::has_audio(&row.path) {
                 self.index.add_transcript(&row, from, &[], tags.as_ref(), "done")?;
                 let path = row.path.display().to_string();
                 on_event(Event::Transcribed { path, passages: 0, seconds: 0.0, ms: 0 });
@@ -138,7 +138,7 @@ impl Indexer {
             let title = tags.as_ref().and_then(|tags| tags["title"].as_str().map(str::to_string));
             return Ok(Some(Listening {
                 title: title.unwrap_or_else(|| prepare::title(&row.path, row.kind)),
-                duration: crate::av::duration(&row.path),
+                duration: crate::adapters::macos::av::duration(&row.path),
                 row,
                 from,
                 started: Instant::now(),

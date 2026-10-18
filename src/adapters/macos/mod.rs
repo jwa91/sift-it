@@ -1,6 +1,9 @@
 //! The Mac's own frameworks, for reading what's in files: ImageIO decodes every picture format macOS knows (HEIC, RAW,
 //! WebP, AVIF…) and writes JPEG previews; CoreGraphics turns pictures and PDF pages into pixels; Vision reads the text
-//! in them.
+//! in them. AVFoundation plays recordings and videos (av.rs), and IOKit says whether the Mac is on battery (power.rs).
+
+pub mod av;
+pub mod power;
 
 use anyhow::{Result, anyhow, bail};
 use embedder::imaging::Image;

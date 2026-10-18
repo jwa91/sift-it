@@ -13,10 +13,10 @@
 use super::listen::Speech;
 use super::write::Files;
 use super::{Event, Indexer, Payload, Piece, discover};
+use crate::adapters::speech::Transcriber;
 use crate::config::Config;
 use crate::index::FileRow;
 use crate::resources::IngestPlan;
-use crate::speech::Transcriber;
 use anyhow::{Result, anyhow};
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
@@ -291,8 +291,8 @@ impl Indexer {
 mod tests {
     use super::*;
     use crate::config::Depth;
-    use crate::crawl::Found;
     use crate::index::Writer;
+    use crate::ingest::discover::crawl::Found;
     use protocol::Kind;
     use std::os::unix::ffi::OsStrExt;
     use std::path::Path;

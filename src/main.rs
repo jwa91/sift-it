@@ -1,27 +1,13 @@
-mod av;
-mod client;
+mod adapters;
+mod clients;
 mod config;
-mod crawl;
-mod daemon;
-mod engine;
-mod estimate;
-mod eval;
-mod finder;
 mod index;
 mod ingest;
-mod mac;
 mod models;
-mod open;
-mod power;
-mod present;
-mod preview;
 mod query;
 mod resources;
-mod selftest;
-mod serve;
-mod service;
-mod speech;
-mod term;
+mod services;
+mod tools;
 
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
@@ -207,13 +193,13 @@ fn run(cli: Cli) -> Result<()> {
     use std::io::IsTerminal;
     let Some(command) = cli.command else {
         if std::io::stdout().is_terminal() && std::io::stdin().is_terminal() {
-            return finder::run("");
+            return clients::finder::run("");
         }
         <Cli as clap::CommandFactory>::command().print_help()?;
         return Ok(());
     };
     match command {
-        Command::Find { words } => finder::run(&words.join(" ")),
+        Command::Find { words } => clients::finder::run(&words.join(" ")),
         Command::Folders { action } => folders(action),
         Command::Config { key, value } => configure(key, value),
         Command::Estimate { folders, json } => {
@@ -223,13 +209,19 @@ fn run(cli: Cli) -> Result<()> {
             } else {
                 folders.iter().map(|f| config::expand(f)).collect()
             };
-            let estimates: Vec<_> = folders.into_iter().map(|folder| estimate::estimate(&config, folder)).collect();
+            let estimates: Vec<_> =
+                folders.into_iter().map(|folder| tools::estimate::estimate(&config, folder)).collect();
             if json {
                 println!("{}", serde_json::to_string_pretty(&estimates)?);
             } else {
                 for e in &estimates {
                     let kinds = e.by_kind.iter().map(|(k, n)| format!("{n} {k}")).collect::<Vec<_>>().join(", ");
-                    println!("{}: {} files ({kinds}), {}", e.folder.display(), e.files, estimate::describe(e.seconds));
+                    println!(
+                        "{}: {} files ({kinds}), {}",
+                        e.folder.display(),
+                        e.files,
+                        tools::estimate::describe(e.seconds)
+                    );
                 }
             }
             Ok(())
@@ -238,16 +230,16 @@ fn run(cli: Cli) -> Result<()> {
         Command::Search { words, kind, limit, by, json } => search_once(&words.join(" "), &kind, limit, by, json),
         Command::Open { target, at, reveal } => {
             let place = match target.parse::<usize>() {
-                Ok(number) if !std::path::Path::new(&target).exists() => open::recall(number)?,
-                _ => open::Place::file(&config::expand(&target), at)?,
+                Ok(number) if !std::path::Path::new(&target).exists() => clients::open::recall(number)?,
+                _ => clients::open::Place::file(&config::expand(&target), at)?,
             };
-            println!("{}", open::open(&place, reveal)?);
+            println!("{}", clients::open::open(&place, reveal)?);
             Ok(())
         }
-        Command::Serve => serve::serve(),
-        Command::Engine { action: None } => engine::run(&config::index_path(), &config::models_dir()),
+        Command::Serve => clients::serve::serve(),
+        Command::Engine { action: None } => services::engine::run(&config::index_path(), &config::models_dir()),
         Command::Engine { action: Some(action) } => {
-            let Some(mut engine) = client::Client::running() else {
+            let Some(mut engine) = clients::Client::running() else {
                 println!("the engine isn't running");
                 return Ok(());
             };
@@ -258,13 +250,13 @@ fn run(cli: Cli) -> Result<()> {
             engine.request::<protocol::Done>(op)?;
             Ok(())
         }
-        Command::Daemon => daemon::run(),
+        Command::Daemon => services::indexer::run(),
         Command::Service { action } => match action {
-            ServiceAction::Install => service::install(),
-            ServiceAction::Uninstall => service::uninstall(),
-            ServiceAction::Status => service::status(),
+            ServiceAction::Install => services::launchd::install(),
+            ServiceAction::Uninstall => services::launchd::uninstall(),
+            ServiceAction::Status => services::launchd::status(),
             ServiceAction::Plist => {
-                print!("{}", service::plists()?);
+                print!("{}", services::launchd::plists()?);
                 Ok(())
             }
         },
@@ -285,7 +277,7 @@ fn run(cli: Cli) -> Result<()> {
             })
             .and_then(|()| {
                 // An engine that couldn't load the model tries again on its next search by meaning.
-                if let Some(mut engine) = client::Client::running()
+                if let Some(mut engine) = clients::Client::running()
                     && engine.request::<protocol::Status>(protocol::Op::Status)?.meaning == MeaningState::Unavailable
                 {
                     engine.request::<protocol::Done>(protocol::Op::Unload)?;
@@ -295,8 +287,8 @@ fn run(cli: Cli) -> Result<()> {
         },
         Command::Eval { file, verbose, compare } => {
             // The engine's own answers, in this process: what's measured is what front ends get.
-            let core = engine::Core::new(&config::index_path(), &config::models_dir(), Box::new(|_| {}))?;
-            let outcome = eval::run(&file, &core, verbose, compare);
+            let core = services::engine::Core::new(&config::index_path(), &config::models_dir(), Box::new(|_| {}))?;
+            let outcome = tools::eval::run(&file, &core, verbose, compare);
             // The model goes before the process does (llama.cpp aborts when its Metal device is freed under one).
             core.unload();
             outcome
@@ -304,8 +296,9 @@ fn run(cli: Cli) -> Result<()> {
         Command::Read { path, tokens } => {
             let path = config::expand(&path.to_string_lossy());
             let config = Config::load()?;
-            let kind = crawl::kind_of(&config, &path)
-                .ok_or_else(|| anyhow::anyhow!("Sift It doesn't read .{} files", crawl::extension_of(&path)))?;
+            let kind = ingest::discover::crawl::kind_of(&config, &path).ok_or_else(|| {
+                anyhow::anyhow!("Sift It doesn't read .{} files", ingest::discover::crawl::extension_of(&path))
+            })?;
             let settings = config.reading.resolve(&path, kind);
             let mut model = if tokens {
                 Some(embedder::Embedder::load(&embedder::ModelFiles::in_folder(&config::models_dir())?, true)?)
@@ -346,45 +339,8 @@ fn run(cli: Cli) -> Result<()> {
             );
             Ok(())
         }
-        Command::BenchSearch { vectors } => bench_search(vectors),
-        Command::BenchEmbed => {
-            let files = embedder::ModelFiles::in_folder(&config::models_dir())?;
-            let mut model = embedder::Embedder::load(&files, false)?;
-            let passage = "The tenant pays a security deposit of two months' rent, returned within fourteen days of the \
-                end of the lease minus the cost of any damage beyond normal wear. Gas, water and electricity are paid by \
-                the tenant; internet is included in the rent. ".repeat(4);
-            let texts: Vec<String> = (0..64).map(|i| format!("title: doc {i} | text: {passage}")).collect();
-            let refs: Vec<&str> = texts.iter().map(|t| t.as_str()).collect();
-            model.embed_texts(&refs[..4])?;
-            let started = std::time::Instant::now();
-            model.embed_texts(&refs)?;
-            let seconds = started.elapsed().as_secs_f64();
-            println!("64 passages of {} chars: {:.2} s, {:.1} passages/s", passage.len(), seconds, 64.0 / seconds);
-            let started = std::time::Instant::now();
-            for text in &refs {
-                model.embed_texts(&[text])?;
-            }
-            let seconds = started.elapsed().as_secs_f64();
-            println!("the same one at a time: {:.2} s, {:.1} passages/s", seconds, 64.0 / seconds);
-            let image = embedder::imaging::Image { width: 1024, height: 768, rgb: vec![128; 1024 * 768 * 3] };
-            for budget in [70, 140, 280] {
-                let fitted = embedder::imaging::fit(&image, budget)?;
-                model.embed_image(&fitted)?;
-                let started = std::time::Instant::now();
-                for _ in 0..10 {
-                    model.embed_image(&fitted)?;
-                }
-                println!("picture at {budget} tokens: {:.0} ms", started.elapsed().as_secs_f64() * 100.0);
-            }
-            let sound: Vec<f32> = (0..embedder::AUDIO_WINDOW).map(|i| ((i as f32) * 0.05).sin() * 0.1).collect();
-            model.embed_audio(&sound)?;
-            let started = std::time::Instant::now();
-            for _ in 0..5 {
-                model.embed_audio(&sound)?;
-            }
-            println!("30 s of sound: {:.0} ms", started.elapsed().as_secs_f64() * 200.0);
-            Ok(())
-        }
+        Command::BenchSearch { vectors } => tools::bench::search(vectors),
+        Command::BenchEmbed => tools::bench::embed(),
         Command::EmbedQuery { queries } => {
             let files = embedder::ModelFiles::in_folder(&config::models_dir())?;
             let mut encoder = embedder::Embedder::load(&files, true)?;
@@ -397,8 +353,8 @@ fn run(cli: Cli) -> Result<()> {
         Command::Selftest { folder } => {
             let models = embedder::ModelFiles::in_folder(&config::models_dir())?;
             match folder {
-                Some(folder) => selftest::run(&models, &folder),
-                None => selftest::run_built_in(&models),
+                Some(folder) => tools::selftest::run(&models, &folder),
+                None => tools::selftest::run_built_in(&models),
             }
         }
     }
@@ -438,7 +394,7 @@ fn index(json: bool, reindex: bool) -> Result<()> {
         bail!("no folders to index: add some with `sift-it folders add <folder>`");
     }
     // Two indexers would read the same files: let the running one do it.
-    if let Some(pid) = daemon::running_pid() {
+    if let Some(pid) = services::indexer::running_pid() {
         if reindex {
             bail!("the background indexer is running (pid {pid}); stop it before --reindex");
         }
@@ -483,7 +439,7 @@ fn index(json: bool, reindex: bool) -> Result<()> {
     report(sync);
     // What's said in recordings and videos is written down beside the reading when memory allows, else after it.
     let mut helper = None;
-    let beside = resources::IngestPlan::of(&config.indexing).beside && speech::unavailable().is_none();
+    let beside = resources::IngestPlan::of(&config.indexing).beside && adapters::speech::unavailable().is_none();
     if let Err(error) =
         indexer.index_pending(&config, &mut report, &|| false, &mut Vec::new, beside.then_some(&mut helper))
     {
@@ -495,7 +451,7 @@ fn index(json: bool, reindex: bool) -> Result<()> {
     }
     // Then what's said in recordings and videos that's left, when the speech model is there.
     if !indexer.index.transcripts_pending(1)?.is_empty() {
-        match helper.map_or_else(speech::Transcriber::start, Ok) {
+        match helper.map_or_else(adapters::speech::Transcriber::start, Ok) {
             Ok(mut transcriber) => {
                 if !json {
                     eprintln!("writing down what's said in recordings and videos…");
@@ -519,14 +475,14 @@ fn search_once(q: &str, kinds: &[String], limit: usize, by: Option<Mode>, json: 
         .collect::<Result<Vec<_>>>()?;
     // By meaning, it waits for the engine to load the model if it hasn't yet.
     let request = Search { q: q.to_string(), mode: by, kinds, limit, wait: true, ..Default::default() };
-    let mut client = client::Client::connect()?;
+    let mut client = clients::Client::connect()?;
     let response = client.search(&request)?;
-    open::remember(q, &response.hits);
+    clients::open::remember(q, &response.hits);
     if json {
         println!("{}", serde_json::to_string_pretty(&response)?);
         return Ok(());
     }
-    let terminal = term::Terminal::detect();
+    let terminal = clients::term::Terminal::detect();
     if !terminal.tty {
         // Piped: one path per line, for xargs and friends.
         for hit in &response.hits {
@@ -534,7 +490,7 @@ fn search_once(q: &str, kinds: &[String], limit: usize, by: Option<Mode>, json: 
         }
         return Ok(());
     }
-    present::print(&terminal, &response, q, &mut client)
+    clients::present::print(&terminal, &response, q, &mut client)
 }
 
 fn status(json: bool) -> Result<()> {
@@ -547,7 +503,7 @@ fn status(json: bool) -> Result<()> {
     let plan = resources::IngestPlan::of(&config.indexing);
     // The engine, if it's running (status doesn't start it): what it holds.
     let engine =
-        client::Client::running().and_then(|mut engine| engine.request::<protocol::Status>(protocol::Op::Status).ok());
+        clients::Client::running().and_then(|mut engine| engine.request::<protocol::Status>(protocol::Op::Status).ok());
     if json {
         println!(
             "{}",
@@ -559,7 +515,7 @@ fn status(json: bool) -> Result<()> {
                     "done": transcripts.done,
                     "total": transcripts.total,
                     "seconds": transcripts.seconds,
-                    "unavailable": speech::unavailable(),
+                    "unavailable": adapters::speech::unavailable(),
                 },
                 "indexing": {"memory_mb": plan.memory >> 20, "readers": plan.readers, "speech_beside": plan.beside},
                 "engine": engine,
@@ -577,9 +533,9 @@ fn status(json: bool) -> Result<()> {
     println!("vectors: {} in {} segments", stats.vectors, stats.segments);
     if queued.files > 0 {
         // The work still to do, and where most of it is: what `ignore` or a lower depth could leave out.
-        println!("waiting: {} files, {} of reading", queued.files, estimate::describe(queued.seconds));
+        println!("waiting: {} files, {} of reading", queued.files, tools::estimate::describe(queued.seconds));
         for heavy in queued.heaviest.iter().filter(|heavy| heavy.seconds >= 60.0) {
-            println!("         {} ({})", heavy.path, estimate::describe(heavy.seconds));
+            println!("         {} ({})", heavy.path, tools::estimate::describe(heavy.seconds));
         }
     }
     let mut kinds: Vec<_> = stats.by_kind.iter().collect();
@@ -614,13 +570,13 @@ fn status(json: bool) -> Result<()> {
         },
     };
     println!("engine:  {engine}");
-    let speech = match speech::unavailable() {
+    let speech = match adapters::speech::unavailable() {
         Some(why) => why,
         None if transcripts.done < transcripts.total => format!(
             "{} of {} recordings and videos written down, {} of sound to go",
             transcripts.done,
             transcripts.total,
-            estimate::describe(transcripts.seconds).trim_start_matches("about ")
+            tools::estimate::describe(transcripts.seconds).trim_start_matches("about ")
         ),
         None => format!("{} of {} recordings and videos written down", transcripts.done, transcripts.total),
     };
@@ -633,112 +589,4 @@ fn status(json: bool) -> Result<()> {
         if plan.beside { "beside" } else { "after" }
     );
     Ok(())
-}
-
-/// An index of random vectors around topics (and words), then searches over it in each form of the vectors: how long
-/// mapping them takes, the first search (its rows come into memory) and the ones after, what's in memory then, and how
-/// much of the exact top 20 the others keep. Mapped rows aren't in the footprint: macOS can drop them under pressure
-/// and read them again.
-fn bench_search(count: usize) -> Result<()> {
-    const TOPICS: usize = 1000;
-    let folder = std::env::temp_dir().join(format!("sift-it-bench-{}", std::process::id()));
-    std::fs::create_dir_all(&folder)?;
-    let path = folder.join("index.sqlite");
-    let mut seed = 0x2545F4914F6CDD1Du64;
-    let mut random = move || {
-        seed ^= seed << 13;
-        seed ^= seed >> 7;
-        seed ^= seed << 17;
-        (seed >> 11) as f32 / (1u64 << 53) as f32 - 0.5
-    };
-    // A vector near a topic: as close to it as to everything else.
-    let mut near = |topic: &[f32]| {
-        let mut noise: Vec<f32> = (0..embedder::DIM).map(|_| random()).collect();
-        embedder::normalize(&mut noise);
-        let mut vector: Vec<f32> = topic.iter().zip(&noise).map(|(t, n)| t + n).collect();
-        embedder::normalize(&mut vector);
-        vector
-    };
-    let origin = vec![0.0; embedder::DIM];
-    let topics: Vec<Vec<f32>> = (0..TOPICS).map(|_| near(&origin)).collect();
-    let started = std::time::Instant::now();
-    {
-        let mut index = index::Writer::open(&path)?;
-        let per_file = 10;
-        for file in 0..count.div_ceil(per_file) {
-            let found = crawl::Found {
-                path: folder.join(format!("file{file}.txt")),
-                kind: Kind::Plaintext,
-                size: 1,
-                modified: 0.0,
-                settings: config::Settings::BASE,
-            };
-            let id = index.queue(&found.new_file(), None, 0.0)?;
-            let segments: Vec<index::NewSegment> = (0..per_file)
-                .map(|n| index::NewSegment {
-                    segment: protocol::Segment::Passage,
-                    loc: Some(n as f64),
-                    loc_end: None,
-                    text: Some(format!("passage {n} of file {file} about topic{}", file % 97)),
-                    vector: Some(near(&topics[(file * per_file + n) % TOPICS])),
-                })
-                .collect();
-            let row = index::FileRow {
-                id,
-                path: found.path.clone(),
-                kind: Kind::Plaintext,
-                size: 1,
-                modified: 0.0,
-                reading: found.reading(),
-                speech: false,
-            };
-            index.finish_file(&row, &segments, &serde_json::json!({}), false)?;
-        }
-    }
-    println!("built an index of {count} vectors around {TOPICS} topics in {:.1} s", started.elapsed().as_secs_f64());
-    let queries: Vec<Vec<f32>> = (0..20).map(|i| near(&topics[i * 37 % TOPICS])).collect();
-    let request = |q: &str| Search { q: q.into(), limit: 20, prefix_last: true, ..Default::default() };
-    let ms = |started: std::time::Instant| started.elapsed().as_secs_f64() * 1000.0;
-    let mut exact: Vec<Vec<String>> = Vec::new();
-    for scan in [protocol::Scan::ExactF32, protocol::Scan::ExactF16, protocol::Scan::Sketch] {
-        let started = std::time::Instant::now();
-        let search = config::Search { vectors: scan, ..Default::default() };
-        let mut searcher = query::Searcher::open(&path, config::Ranking::default(), search)?;
-        searcher.load_vectors()?;
-        let loaded = ms(started);
-        let started = std::time::Instant::now();
-        searcher.search(&request("topic42"), Some(&queries[0]))?;
-        let first = ms(started);
-        let started = std::time::Instant::now();
-        let mut tops = Vec::new();
-        for query in &queries {
-            let response = searcher.search(&request("something else entirely"), Some(query))?;
-            tops.push(response.hits.into_iter().map(|hit| hit.path).collect::<Vec<_>>());
-        }
-        let then = ms(started) / queries.len() as f64;
-        if exact.is_empty() {
-            exact = tops.clone();
-        }
-        let kept: usize =
-            tops.iter().zip(&exact).map(|(top, exact)| top.iter().filter(|p| exact.contains(p)).count()).sum();
-        println!(
-            "{}: mapped in {loaded:.0} ms, first search {first:.1} ms, then {then:.1} ms; footprint {} MB; keeps {kept} of \
-             the exact top 20s' {}",
-            serde_json::json!(scan).as_str().unwrap_or("?"),
-            footprint() >> 20,
-            exact.iter().map(Vec::len).sum::<usize>()
-        );
-    }
-    std::fs::remove_dir_all(&folder)?;
-    Ok(())
-}
-
-/// The memory macOS counts against this process (its footprint).
-fn footprint() -> u64 {
-    let mut info: libc::rusage_info_v2 = unsafe { std::mem::zeroed() };
-    let buffer = &mut info as *mut libc::rusage_info_v2 as *mut libc::rusage_info_t;
-    if unsafe { libc::proc_pid_rusage(std::process::id() as i32, libc::RUSAGE_INFO_V2, buffer) } != 0 {
-        return 0;
-    }
-    info.ri_phys_footprint
 }

@@ -184,11 +184,12 @@ pub fn uninstall() -> Result<()> {
 }
 
 pub fn status() -> Result<()> {
-    let engine = crate::client::Client::running().is_some();
+    let engine = crate::clients::Client::running().is_some();
     let status: serde_json::Map<String, serde_json::Value> = AGENTS
         .iter()
         .map(|agent| {
-            let running = if agent.label == INDEXER.label { crate::daemon::running_pid().is_some() } else { engine };
+            let running =
+                if agent.label == INDEXER.label { crate::services::indexer::running_pid().is_some() } else { engine };
             let key = if agent.label == INDEXER.label { "indexer" } else { "engine" };
             let value = serde_json::json!({
                 "installed": agent.plist_path().exists(),

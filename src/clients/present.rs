@@ -2,12 +2,12 @@
 //! it matched, and a body that fits its kind: the passage with the query's words marked, the lines of code, a
 //! recording's waveform with the matched stretch lit, a picture or video frame inline where the terminal shows pictures.
 
-use crate::client::Client;
+use crate::clients::Client;
+use crate::clients::open::timestamp;
+use crate::clients::preview;
+use crate::clients::term::{self, Images, Terminal};
 use crate::config;
-use crate::open::timestamp;
-use crate::preview;
 use crate::query::understand::words_of;
-use crate::term::{self, Images, Terminal};
 use anyhow::Result;
 use protocol::Kind;
 use protocol::Segment;

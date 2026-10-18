@@ -4,8 +4,8 @@
 //! goes as it is.
 
 use super::Payload;
+use crate::adapters::macos;
 use crate::config::Settings;
-use crate::mac;
 use anyhow::Result;
 use embedder::imaging;
 use objc2_core_graphics::CGImage;
@@ -52,7 +52,7 @@ pub fn spoken(title: &str, text: &str) -> String {
 
 /// A picture, fitted to `budget` tokens.
 pub fn picture(image: &CGImage, budget: u32) -> Result<Payload> {
-    Ok(Payload::Image(imaging::fit(&mac::pixels(image)?, budget)?))
+    Ok(Payload::Image(imaging::fit(&macos::pixels(image)?, budget)?))
 }
 
 /// A window of sound.

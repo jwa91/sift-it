@@ -1,12 +1,17 @@
 //! Discovering: which files are new or changed, or are to be read another way (their fingerprint, ingest::fingerprint),
-//! each queued with an estimate of what reading it costs (estimate::cost); files that are gone leave the index. `sync`
+//! each queued with an estimate of what reading it costs (cost.rs); files that are gone leave the index. `sync`
 //! crawls the chosen folders; `sync_paths` looks at just the paths a file-system event named.
+
+mod cost;
+pub mod crawl;
+
+pub use cost::cost;
 
 use super::Event;
 use crate::config::Config;
-use crate::crawl::{self, Found, Rescan};
 use crate::index::{FileRow, Writer};
 use anyhow::Result;
+use crawl::{Found, Rescan};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::Instant;
@@ -85,11 +90,11 @@ fn queue_found(index: &Writer, found: &[Found], existing: &HashMap<PathBuf, File
     for file in found {
         match existing.get(&file.path) {
             None => {
-                index.queue(&file.new_file(), None, crate::estimate::cost(file))?;
+                index.queue(&file.new_file(), None, cost(file))?;
                 added += 1;
             }
             Some(row) if is_changed(row, file) => {
-                index.queue(&file.new_file(), Some(row.id), crate::estimate::cost(file))?;
+                index.queue(&file.new_file(), Some(row.id), cost(file))?;
                 changed += 1;
             }
             Some(row) if row.speech != file.speech() => index.set_speech(row.id, file.speech())?,

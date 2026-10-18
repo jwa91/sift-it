@@ -1,9 +1,9 @@
-//! The model files: ggml-org's Q8_0 GGUF conversion of EmbeddingGemma 2, at one pinned revision (the files
-//! `sift-it selftest` checks against), and the speech model that writes down what's said in recordings (speech.rs).
+//! The model files: ggml-org's Q8_0 GGUF conversion of EmbeddingGemma 2, at one pinned revision (the files `sift-it
+//! selftest` checks against), and the speech model that writes down what's said in recordings (adapters/speech.rs).
 //! Downloaded once, with resume, and checked against their SHA-256 before they get their final name, so a file that's
 //! there is a whole one. The speech model isn't downloaded when Handy has the same file already: both use that one.
 
-use crate::speech;
+use crate::adapters::speech;
 use anyhow::{Context, Result, bail};
 use embedder::{MEDIA_FILE, TEXT_FILE};
 use serde::Serialize;

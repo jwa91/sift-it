@@ -13,7 +13,7 @@
 //!
 //! The Indexer holds the index's writer and the model, for the daemon and `sift-it index`.
 
-mod discover;
+pub mod discover;
 mod embed;
 pub mod extract;
 mod listen;
@@ -108,7 +108,7 @@ impl Indexer {
         if index.adopt_vector_source(&embedder::vector_source())? {
             eprintln!("the index was made by another model or pipeline: everything is indexed again");
         }
-        if index.adopt_speech_source(crate::speech::source())? {
+        if index.adopt_speech_source(crate::adapters::speech::source())? {
             eprintln!("what's said in recordings was written down by another speech model: it's written down again");
         }
         index.tidy_vectors()?;
