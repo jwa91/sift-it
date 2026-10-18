@@ -19,8 +19,8 @@
 //! writes the partition's next generation from the live rows, moves their segments to their new rows in one transaction,
 //! and removes the old files. A reader that still maps them keeps them until it lets go.
 
-use crate::embedder::DIM;
 use anyhow::{Context, Result, bail};
+use embedder::DIM;
 use protocol::Kind;
 use rusqlite::{Connection, TransactionBehavior, params};
 use std::collections::HashSet;
@@ -670,7 +670,7 @@ pub fn unit(seed: u64) -> Vec<f32> {
             (state >> 11) as f32 / (1u64 << 53) as f32 - 0.5
         })
         .collect();
-    crate::embedder::normalize(&mut vector);
+    embedder::normalize(&mut vector);
     vector
 }
 
@@ -714,7 +714,7 @@ mod tests {
                     .enumerate()
                     .map(|(d, (x, b))| x * (1 + d % 3) as f32 + 2.0 * b)
                     .collect();
-                crate::embedder::normalize(&mut row);
+                embedder::normalize(&mut row);
                 row
             })
             .collect();

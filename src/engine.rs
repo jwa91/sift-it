@@ -14,10 +14,10 @@
 //! `unload` or the engine stopping. There are no idle timers.
 
 use crate::config::{self, Config};
-use crate::embedder::{Embedder, ModelFiles};
 use crate::index::{Reader, Vectors};
 use crate::query::{Query, Searcher};
 use anyhow::{Context, Result, bail};
+use embedder::{Embedder, ModelFiles};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use protocol::{
     Done, Event, Failure, IndexerStatus, MeaningState, Mode, Op, Request, Results, Search, Settings, Status, Text,

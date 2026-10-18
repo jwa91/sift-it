@@ -2,9 +2,9 @@
 //! pipeline (tests/reference). Any change to llama.cpp, the model files, the image sizing or the prompts must still
 //! pass this, or an existing index would no longer agree with new queries.
 
-use crate::embedder::{Decoded, Embedder, ModelFiles, dot, prompts};
-use crate::imaging;
 use anyhow::{Context, Result, bail};
+use embedder::imaging;
+use embedder::{Decoded, Embedder, ModelFiles, dot, prompts};
 use std::collections::BTreeMap;
 use std::path::Path;
 

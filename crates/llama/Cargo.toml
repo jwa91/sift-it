@@ -1,0 +1,15 @@
+[package]
+name = "sift-it-llama"
+version = "0.2.0"
+edition = "2024"
+description = "The embedding model, EmbeddingGemma 2, on llama.cpp with Metal: its native build, bindings and inputs"
+license = "MIT"
+publish = false
+links = "llama"
+
+[dependencies]
+anyhow = "1.0.104"
+fast_image_resize = "6.1.0"
+
+[build-dependencies]
+bindgen = "0.73.2"

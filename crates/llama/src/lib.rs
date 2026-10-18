@@ -7,13 +7,23 @@
 //! input goes through the text model in one `llama_process` call; several short texts share one call as separate
 //! sequences.
 
-use crate::imaging::Image;
-use crate::llama as ll;
+pub mod imaging;
+
 use anyhow::{Context, Result, anyhow, bail};
+use imaging::Image;
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::path::{Path, PathBuf};
 use std::sync::Once;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+
+/// Generated bindings to llama.cpp's C API (see build.rs).
+#[allow(non_upper_case_globals, non_camel_case_types, non_snake_case, dead_code, clippy::all)]
+mod ll {
+    include!(concat!(env!("OUT_DIR"), "/llama.rs"));
+
+    /// The llama.cpp release the engine was built with.
+    pub const BUILD_TAG: &str = env!("SIFT_LLAMA_TAG");
+}
 
 /// The width of every vector.
 pub const DIM: usize = 768;

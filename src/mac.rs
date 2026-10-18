@@ -2,8 +2,8 @@
 //! WebP, AVIF…) and writes JPEG previews; CoreGraphics turns pictures and PDF pages into pixels; Vision reads the text
 //! in them.
 
-use crate::imaging::Image;
 use anyhow::{Result, anyhow, bail};
+use embedder::imaging::Image;
 use objc2::AllocAnyThread;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;

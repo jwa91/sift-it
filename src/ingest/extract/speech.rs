@@ -3,9 +3,9 @@
 //! their times, are handed over as soon as they're back: a file stopped partway goes on from there later. A slow
 //! extractor, so it runs on a lane of its own (ingest/listen.rs).
 
-use crate::embedder::AUDIO_RATE;
 use crate::speech::{Spoken, Transcriber};
 use anyhow::Result;
+use embedder::AUDIO_RATE;
 use std::path::Path;
 
 /// Sound goes to the model in chunks of about this many samples…

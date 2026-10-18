@@ -105,7 +105,7 @@ impl Indexer {
     /// llama.cpp) are dropped, and their files queued again: they'd never compare right with new queries. Vector files
     /// no partition uses (what a crash left, or what was dropped) go.
     pub fn new(mut index: Writer, models: PathBuf) -> Result<Self> {
-        if index.adopt_vector_source(&crate::embedder::vector_source())? {
+        if index.adopt_vector_source(&embedder::vector_source())? {
             eprintln!("the index was made by another model or pipeline: everything is indexed again");
         }
         if index.adopt_speech_source(crate::speech::source())? {

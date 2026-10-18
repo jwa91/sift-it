@@ -2332,10 +2332,8 @@ version = "0.2.0"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
- "bindgen",
  "clap",
  "crossterm",
- "fast_image_resize",
  "image",
  "libc",
  "notify",
@@ -2354,8 +2352,18 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.1",
+ "sift-it-llama",
  "sift-it-protocol",
  "ureq",
+]
+
+[[package]]
+name = "sift-it-llama"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "bindgen",
+ "fast_image_resize",
 ]
 
 [[package]]

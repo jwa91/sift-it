@@ -1,8 +1,8 @@
 //! Sound: 16 kHz mono cut into 30-second windows that overlap by 10 seconds. The model listens to 30 seconds at a
 //! time; the overlap keeps a sentence at a window's edge whole in one of them. Silent windows are skipped.
 
-use crate::embedder::{AUDIO_RATE, AUDIO_WINDOW};
 use anyhow::Result;
+use embedder::{AUDIO_RATE, AUDIO_WINDOW};
 
 /// Windows start this far apart: 30 s windows overlapping by 10 s.
 pub const HOP: usize = 20 * AUDIO_RATE;

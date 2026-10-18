@@ -3,7 +3,8 @@ use std::{env, fs, path::PathBuf};
 
 fn main() {
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
-    let build = manifest.join("vendor/llama-build");
+    // llama.cpp is built for the whole workspace, at its root.
+    let build = manifest.join("../../vendor/llama-build");
     let lib = build.join("lib");
     let include = build.join("include");
     let tag = fs::read_to_string(build.join("TAG"))
@@ -12,21 +13,21 @@ fn main() {
         .to_string();
 
     println!("cargo:rerun-if-changed={}", build.join("TAG").display());
-    println!("cargo:rerun-if-changed=src/llama/wrapper.h");
+    println!("cargo:rerun-if-changed=wrapper.h");
     println!("cargo:rustc-env=SIFT_LLAMA_TAG={tag}");
 
     println!("cargo:rustc-link-search=native={}", lib.display());
     for name in ["llama", "mtmd", "ggml", "ggml-base", "ggml-cpu", "ggml-metal", "ggml-blas", "vendor-hash"] {
         println!("cargo:rustc-link-lib=static={name}");
     }
-    // Metal for llama.cpp; Accelerate for ggml's BLAS backend and for the search's matrix-vector product.
+    // Metal for llama.cpp, and Accelerate for ggml's BLAS backend.
     for framework in ["Accelerate", "Metal", "MetalKit", "Foundation"] {
         println!("cargo:rustc-link-lib=framework={framework}");
     }
     println!("cargo:rustc-link-lib=c++");
 
     let bindings = bindgen::Builder::default()
-        .header("src/llama/wrapper.h")
+        .header("wrapper.h")
         .clang_arg(format!("-I{}", include.display()))
         .allowlist_function("(llama|mtmd|ggml_log)_.*")
         .allowlist_type("(llama|mtmd|ggml_log)_.*")

@@ -1,7 +1,7 @@
 //! Understanding: a search request becomes what the other stages work with: its words and the parts in quotes, whether
 //! it searches code, which kinds it shows, and the prompt it's embedded with. Pure.
 
-use crate::embedder::prompts;
+use embedder::prompts;
 use protocol::{Kind, Search};
 
 /// "code: retry with backoff": a search of code, and only of code. Without the prefix (or the code filter), a search

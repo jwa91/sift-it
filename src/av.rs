@@ -7,8 +7,8 @@
 //! a reader wants.
 #![allow(deprecated)]
 
-use crate::embedder::AUDIO_RATE;
 use anyhow::{Result, anyhow, bail};
+use embedder::AUDIO_RATE;
 use objc2::rc::{Retained, autoreleasepool};
 use objc2::runtime::AnyObject;
 use objc2_av_foundation::{

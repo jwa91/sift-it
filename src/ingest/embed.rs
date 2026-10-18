@@ -3,9 +3,9 @@
 //! Texts are embedded in batches, one model call for up to BATCH of them.
 
 use super::{Payload, Piece};
-use crate::embedder::{Embedder, ModelFiles};
 use crate::index::NewSegment;
 use anyhow::Result;
+use embedder::{Embedder, ModelFiles};
 use std::path::PathBuf;
 
 /// Texts embedded in one model call, at most.

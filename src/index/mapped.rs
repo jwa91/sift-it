@@ -5,8 +5,8 @@
 
 use super::Reader;
 use super::vectors::{self, Form, Map, SketchQuery};
-use crate::embedder::DIM;
 use anyhow::Result;
+use embedder::DIM;
 use protocol::Kind;
 use std::collections::HashMap;
 use std::path::PathBuf;

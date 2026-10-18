@@ -3,8 +3,8 @@
 
 use super::vectors;
 use super::{FileRow, Heavy, NewFile, NewSegment, Queued, Reader, SegmentRow, Transcripts, Writer};
-use crate::embedder::DIM;
 use anyhow::{Context, Result, bail};
+use embedder::DIM;
 use protocol::{Kind, Segment, Stats};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, TransactionBehavior, params};
 use std::collections::HashMap;

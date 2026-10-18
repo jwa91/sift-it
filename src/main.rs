@@ -3,15 +3,12 @@ mod client;
 mod config;
 mod crawl;
 mod daemon;
-mod embedder;
 mod engine;
 mod estimate;
 mod eval;
 mod finder;
-mod imaging;
 mod index;
 mod ingest;
-mod llama;
 mod mac;
 mod models;
 mod open;
@@ -369,9 +366,9 @@ fn run(cli: Cli) -> Result<()> {
             }
             let seconds = started.elapsed().as_secs_f64();
             println!("the same one at a time: {:.2} s, {:.1} passages/s", seconds, 64.0 / seconds);
-            let image = imaging::Image { width: 1024, height: 768, rgb: vec![128; 1024 * 768 * 3] };
+            let image = embedder::imaging::Image { width: 1024, height: 768, rgb: vec![128; 1024 * 768 * 3] };
             for budget in [70, 140, 280] {
-                let fitted = imaging::fit(&image, budget)?;
+                let fitted = embedder::imaging::fit(&image, budget)?;
                 model.embed_image(&fitted)?;
                 let started = std::time::Instant::now();
                 for _ in 0..10 {

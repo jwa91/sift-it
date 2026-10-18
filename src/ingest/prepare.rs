@@ -5,8 +5,9 @@
 
 use super::Payload;
 use crate::config::Settings;
-use crate::{imaging, mac};
+use crate::mac;
 use anyhow::Result;
+use embedder::imaging;
 use objc2_core_graphics::CGImage;
 use protocol::Kind;
 use std::path::Path;
@@ -38,7 +39,7 @@ fn project_path(path: &Path) -> String {
 /// A text, in its document prompt, at a depth that embeds; else it goes into the keyword index only.
 pub fn text(title: &str, text: &str, settings: &Settings) -> Payload {
     if settings.embeds() && !mostly_numbers(text) {
-        Payload::Text(crate::embedder::prompts::document(Some(title), text))
+        Payload::Text(embedder::prompts::document(Some(title), text))
     } else {
         Payload::None
     }
@@ -46,7 +47,7 @@ pub fn text(title: &str, text: &str, settings: &Settings) -> Payload {
 
 /// A passage of what's said, in its document prompt (it's only written down at a depth that embeds).
 pub fn spoken(title: &str, text: &str) -> String {
-    crate::embedder::prompts::document(Some(title), text)
+    embedder::prompts::document(Some(title), text)
 }
 
 /// A picture, fitted to `budget` tokens.
