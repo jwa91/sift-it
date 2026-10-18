@@ -17,19 +17,12 @@ pub use understand::Query;
 
 use crate::config::{self, Ranking};
 use crate::index::{Form, Reader, Vectors};
+use crate::resources::SearchPlan;
 use anyhow::Result;
-use protocol::{Kind, Results, Scan, Search};
+use protocol::{Kind, Results, Search};
 use rank::Scored;
 use std::collections::HashMap;
 use std::path::Path;
-
-/// How many segments a search with sketches scores exactly, at least: those whose sketches come closest to the query.
-/// Measured on Rust's books (7,400 vectors, all on one subject, so many come close): the closest 1,024 keep all of the
-/// exact top 20 for 45 queries, the closest 256 keep 99.3%.
-const CANDIDATES: usize = 4096;
-
-/// The share of the Mac's memory searches may read with `search.memory_mb` at auto.
-const MEMORY_SHARE: f64 = 0.1;
 
 pub struct Searcher {
     index: Reader,
@@ -99,28 +92,9 @@ impl Searcher {
         self.search = search;
     }
 
-    /// The form searches scan: the one `search.vectors` says, or with `auto` the most precise whose rows fit in
-    /// `search.memory_mb`.
-    pub fn form(&self) -> Form {
-        match self.search.vectors {
-            Scan::ExactF32 => Form::F32,
-            Scan::ExactF16 => Form::F16,
-            Scan::Sketch => Form::Sketch,
-            Scan::Auto => {
-                let (budget, rows) = (self.search.memory_mb.bytes(MEMORY_SHARE), self.vectors.rows() as u64);
-                let fits = |form: &Form| rows * form.row_bytes() as u64 <= budget;
-                [Form::F32, Form::F16].into_iter().find(fits).unwrap_or(Form::Sketch)
-            }
-        }
-    }
-
-    /// The form searches scan, as `search.vectors` names it.
-    pub fn scan(&self) -> Scan {
-        match self.form() {
-            Form::F32 => Scan::ExactF32,
-            Form::F16 => Scan::ExactF16,
-            Form::Sketch => Scan::Sketch,
-        }
+    /// What searches scan now: the form of the vectors, and how many a search with sketches scores exactly.
+    pub fn plan(&self) -> SearchPlan {
+        SearchPlan::of(&self.search, self.vectors.rows())
     }
 
     pub fn vector_count(&self) -> usize {
@@ -153,17 +127,10 @@ impl Searcher {
         Ok(true)
     }
 
-    /// A search, scanning the vectors in the form `search.vectors` says.
+    /// A search, scanning the vectors as the plan says.
     pub fn search(&mut self, request: &Search, vector: Option<&[f32]>) -> Result<Results> {
-        let (form, candidates) = (self.form(), self.candidates());
-        self.search_in(request, vector, form, candidates)
-    }
-
-    /// How many vectors a search with sketches scores exactly: CANDIDATES, or a 32nd of the rows in a larger index, as
-    /// many rows as the sketches are bytes. The share it takes to keep the exact top 20 falls as an index grows (its
-    /// best matches stand further above the rest), so a fixed share keeps up.
-    pub fn candidates(&self) -> usize {
-        CANDIDATES.max(self.vectors.rows() / 32)
+        let plan = self.plan();
+        self.search_in(request, vector, plan.form, plan.candidates)
     }
 
     /// A search, scanning the vectors in `form` (with sketches, scoring the `candidates` closest exactly).
@@ -259,6 +226,7 @@ mod tests {
     use super::*;
     use crate::index::Writer;
     use crate::index::testing::{TempIndex, add, unit};
+    use protocol::Scan;
 
     #[test]
     fn the_vectors_are_followed_through_new_rows_and_a_next_generation() {
@@ -309,7 +277,7 @@ mod tests {
         let index = TempIndex::new("sketches");
         let mut store = Writer::open(&index.path).unwrap();
         // More segments than are scored exactly, and a code file the search mustn't show.
-        let files = CANDIDATES / 50 + 20;
+        let files = crate::resources::CANDIDATES / 50 + 20;
         for file in 0..files as u64 {
             let passages = (0..50).map(|n| (format!("passage {n}"), Some(unit(file * 100 + n)))).collect();
             add(&mut store, &format!("/a/{file}.txt"), Kind::Plaintext, passages);
@@ -323,21 +291,6 @@ mod tests {
         assert!((hits[0].cosine.unwrap() - 1.0).abs() < 1e-5);
         let ranks = searcher.sketch_ranks(&request, &unit(7 * 100 + 3), &[hits[0].segment_id]).unwrap();
         assert_eq!(ranks, (vec![Some(0)], files * 50));
-    }
-
-    #[test]
-    fn auto_scans_the_most_precise_form_that_fits() {
-        let index = TempIndex::new("auto");
-        let mut store = Writer::open(&index.path).unwrap();
-        let passages = (0..400).map(|n| (format!("passage {n}"), Some(unit(n)))).collect();
-        add(&mut store, "/a/one.txt", Kind::Plaintext, passages);
-        let mut searcher = Searcher::open(&index.path, Ranking::default(), config::Search::default()).unwrap();
-        searcher.load_vectors().unwrap();
-        // 400 rows: 1.2 MB at f32, 0.6 MB at f16.
-        for (mb, scan) in [(2, Scan::ExactF32), (1, Scan::ExactF16), (0, Scan::Sketch)] {
-            searcher.set_search(config::Search { memory_mb: config::Budget::Mb(mb), ..Default::default() });
-            assert_eq!(searcher.scan(), scan);
-        }
     }
 
     #[test]

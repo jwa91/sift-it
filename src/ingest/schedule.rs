@@ -1,4 +1,4 @@
-//! Scheduling the reading: the queued files are read cheapest first (discover.rs), on a few worker threads (Plan), which
+//! Scheduling the reading: the queued files are read cheapest first (discover.rs), on a few worker threads (resources::IngestPlan), which
 //! stream their pieces to the thread that runs the stages: embedding (embed.rs, the model's owner) and writing
 //! (write.rs). Each worker has a small channel of its own, and they're taken from in turn, so a file with hundreds of
 //! pieces (a long recording) can't keep a short one waiting behind it.
@@ -13,8 +13,9 @@
 use super::listen::Speech;
 use super::write::Files;
 use super::{Event, Indexer, Payload, Piece, discover};
-use crate::config::{self, Config};
+use crate::config::Config;
 use crate::index::FileRow;
+use crate::resources::IngestPlan;
 use crate::speech::Transcriber;
 use anyhow::{Result, anyhow};
 use std::collections::{HashMap, VecDeque};
@@ -23,43 +24,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{RecvTimeoutError, TryRecvError, sync_channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-
-/// What `indexing.memory_mb` affords: how many files are read at once, and whether what's said in recordings and videos
-/// is written down beside the reading or after it. Neither changes what's written.
-#[derive(Debug, PartialEq)]
-pub struct Plan {
-    /// The budget, in bytes.
-    pub memory: u64,
-    pub readers: usize,
-    pub beside: bool,
-}
-
-/// What the parts of indexing hold at their peak, measured on an 8 GB Mac: the embedding model with its image and
-/// audio encoders (0.92 GB), the speech helper with a three-minute stretch of sound (1.0 GB), and a reader with what
-/// it has decoded.
-const MODEL: u64 = 1 << 30;
-const SPEECH: u64 = 1 << 30;
-const READER: u64 = 128 << 20;
-
-/// The share of the Mac's memory indexing takes with `indexing.memory_mb` at auto: 2 GB of 8, where the models take
-/// turns, and 6 GB of 24, where they run side by side.
-const MEMORY_SHARE: f64 = 0.25;
-
-impl Plan {
-    pub fn of(indexing: &config::Indexing) -> Self {
-        let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
-        Self::within(indexing.memory_mb.bytes(MEMORY_SHARE), cores)
-    }
-
-    /// The plan for `budget` bytes on a Mac with `cores` cores. Reading takes at most a third of them (two to four),
-    /// so the Mac stays quick; the budget can make that fewer, down to one. Speech is written down beside the reading
-    /// when both models fit with two readers.
-    fn within(budget: u64, cores: usize) -> Self {
-        let beside = budget >= MODEL + SPEECH + 2 * READER;
-        let left = budget.saturating_sub(MODEL + if beside { SPEECH } else { 0 });
-        Self { memory: budget, readers: ((left / READER) as usize).clamp(1, (cores / 3).clamp(2, 4)), beside }
-    }
-}
 
 enum Message {
     /// The first message about a file: when its reading started.
@@ -122,7 +86,7 @@ impl Indexer {
         let (doorbell, door) = sync_channel::<()>(1);
         let mut receivers = Vec::new();
         let mut busy: Vec<Busy> = Vec::new();
-        for _ in 0..Plan::of(&config.indexing).readers {
+        for _ in 0..IngestPlan::of(&config.indexing).readers {
             let (sender, receiver) = sync_channel::<Message>(4);
             receivers.push(receiver);
             let worker_busy = Arc::new(Mutex::new(None));
@@ -332,22 +296,6 @@ mod tests {
     use protocol::Kind;
     use std::os::unix::ffi::OsStrExt;
     use std::path::Path;
-
-    #[test]
-    fn memory_decides_the_readers_and_whether_speech_goes_beside_the_reading() {
-        let gb = 1u64 << 30;
-        let plan = |budget, cores| {
-            let plan = Plan::within(budget, cores);
-            (plan.readers, plan.beside)
-        };
-        // A quarter of 8 GB: the models take turns, and the cores decide the readers.
-        assert_eq!(plan(2 * gb, 8), (2, false));
-        // A quarter of 24 GB, on ten cores: both models, three readers.
-        assert_eq!(plan(6 * gb, 10), (3, true));
-        // Little memory: one reader at a time.
-        assert_eq!(plan(gb + READER, 8), (1, false));
-        assert_eq!(plan(0, 8), (1, false));
-    }
 
     /// A reader that never hands over anything (a pipe no one writes to: opening it waits for a writer) gets its file
     /// set aside and ends the run, and the other files are read meanwhile.

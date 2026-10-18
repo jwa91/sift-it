@@ -159,7 +159,7 @@ transcribe/              sift-it-transcribe
 | Write and schedule | `ingest/write.rs`, `ingest/schedule.rs`, the service in `daemon.rs` | done (step 5 below) |
 | Index | `index/` | done (step 3 below) |
 | Query | `query/` | done (step 2 below) |
-| Resources | `config.rs`, `ingest::Plan`, `query/mod.rs`, `mac.rs` | four places |
+| Resources | `resources.rs`, the facts from `mac.rs` and `power.rs` | done (step 6 below) |
 | Protocol | `crates/protocol`, `docs/protocol.md` | done (step 1 below) |
 | Clients | `finder.rs`, `term.rs`, `present.rs`, `preview.rs`, `open.rs`, `serve.rs` | beside the core, in one namespace |
 

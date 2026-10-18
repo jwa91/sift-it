@@ -1,7 +1,7 @@
 //! Listening: what's said in recordings and videos the reading is done with, written down on a lane of its own. The
 //! speech extractor (extract/speech.rs) hands over a stretch of a file at a time; its sentences are cut into passages
 //! (segment/speech.rs), embedded and stored as soon as they're back, so a file stopped partway goes on from there. When
-//! memory allows (Plan), the lane runs beside the reading, on a thread of its own that talks to the speech helper;
+//! memory allows (resources::IngestPlan), the lane runs beside the reading, on a thread of its own that talks to the speech helper;
 //! else `transcribe_next` writes down one file at a time once everything is read.
 
 use super::extract::speech::{self, Outcome};

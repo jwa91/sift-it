@@ -628,7 +628,7 @@ impl Default for Ranking {
 #[serde(default, deny_unknown_fields)]
 pub struct Indexing {
     /// How much memory indexing may take, in MB: how many files are read at once, and whether what's said in
-    /// recordings is written down beside the reading or after it (ingest::Plan). What's written is the same either
+    /// recordings is written down beside the reading or after it (resources::IngestPlan). What's written is the same either
     /// way. At `auto`, a quarter of the Mac's memory.
     pub memory_mb: Budget,
     /// Index while on battery power. In Low Power Mode it always waits.
@@ -676,22 +676,12 @@ fn settings_kind(kind: Kind) -> Kind {
     if kind == Kind::Screenshot { Kind::Image } else { kind }
 }
 
-/// An amount of memory in MB, or `auto`: what it is then depends on the Mac.
+/// An amount of memory in MB, or `auto`: what it is then depends on the Mac (resources.rs).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Budget {
     #[default]
     Auto,
     Mb(u64),
-}
-
-impl Budget {
-    /// In bytes: as set, or else `share` of the Mac's memory.
-    pub fn bytes(self, share: f64) -> u64 {
-        match self {
-            Budget::Mb(mb) => mb << 20,
-            Budget::Auto => (crate::mac::memory() as f64 * share) as u64,
-        }
-    }
 }
 
 impl Serialize for Budget {

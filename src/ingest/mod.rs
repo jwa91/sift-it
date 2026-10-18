@@ -6,7 +6,7 @@
 //! - embed (embed.rs): the model's only owner. It batches texts and hands back vectors.
 //! - write (write.rs): files put together from their segments and written, whole or in parts. The index's writer
 //!   (index::Writer) is the Indexer's, and only it writes.
-//! - schedule (schedule.rs): what's read first, how many files at once (Plan), and the run that joins the stages.
+//! - schedule (schedule.rs): what's read first, how many files at once (resources::IngestPlan), and the run that joins the stages.
 //! - listen (listen.rs): what's said in recordings and videos, written down on a lane of its own, beside the reading
 //!   when memory allows, else after it. Speech is an extractor too (extract/speech.rs): sound in, sentences with their
 //!   times out, cut into passages and embedded like any text.
@@ -24,7 +24,7 @@ pub mod segment;
 mod write;
 
 pub use read::{Content, Payload, Piece, fingerprint, read, transcribes};
-pub use schedule::{Plan, Stuck};
+pub use schedule::Stuck;
 
 use crate::config::Config;
 use crate::index::Writer;

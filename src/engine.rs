@@ -211,7 +211,7 @@ impl Core {
         let (vectors, scan, resident, stats) = self.with_searcher(|searcher| {
             searcher.refresh()?;
             let stats = searcher.index().stats()?;
-            Ok((searcher.vector_count(), searcher.scan(), searcher.vectors_resident(), stats))
+            Ok((searcher.vector_count(), searcher.plan().scan(), searcher.vectors_resident(), stats))
         })?;
         let meaning = self.meaning.lock().unwrap();
         let error = match &meaning.meaning {

@@ -19,6 +19,7 @@ mod power;
 mod present;
 mod preview;
 mod query;
+mod resources;
 mod selftest;
 mod serve;
 mod service;
@@ -485,7 +486,7 @@ fn index(json: bool, reindex: bool) -> Result<()> {
     report(sync);
     // What's said in recordings and videos is written down beside the reading when memory allows, else after it.
     let mut helper = None;
-    let beside = ingest::Plan::of(&config.indexing).beside && speech::unavailable().is_none();
+    let beside = resources::IngestPlan::of(&config.indexing).beside && speech::unavailable().is_none();
     if let Err(error) =
         indexer.index_pending(&config, &mut report, &|| false, &mut Vec::new, beside.then_some(&mut helper))
     {
@@ -546,7 +547,7 @@ fn status(json: bool) -> Result<()> {
     let models = models::status(&config::models_dir());
     let transcripts = index.transcripts()?;
     let queued = index.queued(5)?;
-    let plan = ingest::Plan::of(&config.indexing);
+    let plan = resources::IngestPlan::of(&config.indexing);
     // The engine, if it's running (status doesn't start it): what it holds.
     let engine =
         client::Client::running().and_then(|mut engine| engine.request::<protocol::Status>(protocol::Op::Status).ok());

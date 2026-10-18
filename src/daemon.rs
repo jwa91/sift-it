@@ -4,7 +4,7 @@
 //! after `indexing.release_model_s` with nothing to do. A change to config.json counts at once, with a full sync.
 //!
 //! It writes down what's said in recordings and videos (ingest/listen.rs), a chunk at a time: beside the reading when
-//! `indexing.memory_mb` allows both models (ingest::Plan), else once everything is read. Anything that changes in the
+//! `indexing.memory_mb` allows both models (resources::IngestPlan), else once everything is read. Anything that changes in the
 //! folders comes first, and the writing down goes on where it stopped.
 //!
 //! With nothing left to do, it writes the next generation of a vector partition that's due one (index/vectors.rs).
@@ -19,8 +19,8 @@
 
 use crate::config::{self, Config};
 use crate::index::{self, Writer};
-use crate::ingest::{Event, Indexer, Plan, Stuck};
-use crate::power;
+use crate::ingest::{Event, Indexer, Stuck};
+use crate::resources::{self, IngestPlan};
 use crate::speech::Transcriber;
 use anyhow::{Context, Result, bail};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
@@ -297,17 +297,6 @@ impl Changes {
     }
 }
 
-/// Why indexing should wait now, if it should.
-fn reason_to_wait(config: &Config) -> Option<String> {
-    if power::low_power_mode() {
-        return Some("Waiting: Low Power Mode is on".into());
-    }
-    if !config.indexing.on_battery && power::on_battery() {
-        return Some("Waiting for a charger".into());
-    }
-    None
-}
-
 pub fn run() -> Result<()> {
     let _lock = lock()?;
     install_signal_handlers();
@@ -404,7 +393,7 @@ pub fn run() -> Result<()> {
             let reason = match &waiting_reason {
                 Some((reason, checked)) if checked.elapsed() < WAIT_CHECK => Some(reason.clone()),
                 _ => {
-                    let reason = reason_to_wait(&config);
+                    let reason = resources::wait(&config.indexing);
                     waiting_reason = reason.clone().map(|reason| (reason, Instant::now()));
                     reason
                 }
@@ -426,7 +415,7 @@ pub fn run() -> Result<()> {
                     let mut events = |event: Event| reporter.event(&event);
                     let mut take = || changes.take();
                     // Speech beside the reading, when memory allows both models.
-                    let beside = Plan::of(&config.indexing).beside
+                    let beside = IngestPlan::of(&config.indexing).beside
                         && crate::speech::unavailable().is_none()
                         && speech_failed_at.is_none_or(|at| at.elapsed() > SPEECH_RETRY);
                     let helper = beside.then_some(&mut transcriber);
@@ -451,7 +440,7 @@ pub fn run() -> Result<()> {
             // Everything is read: what's said in recordings and videos is written down meanwhile.
             let to_write = !paused
                 && indexer.index.transcripts_pending(1).map(|rows| !rows.is_empty()).unwrap_or(false)
-                && reason_to_wait(&config).is_none();
+                && resources::wait(&config.indexing).is_none();
             let may_start = speech_failed_at.is_none_or(|at| at.elapsed() > SPEECH_RETRY);
             if to_write && transcriber.is_none() && may_start {
                 match Transcriber::start() {
