@@ -1,235 +1,136 @@
-//! The ingest path: files become what the index holds. Reading a file is three stages:
+//! The ingest path: keeping the index in step with the chosen folders. Its stages, each owning what it works on:
 //!
-//! - extract (extract/): the file decoded into content, per container format: lines of text, a page's text,
-//!   pictures with the text on them, video frames, sound. It decides nothing about cutting.
-//! - segment (segment/): content cut into segments, each with its place in the file, by a strategy per content type.
-//!   Pure.
-//! - prepare (prepare.rs): a segment as the model's input: text in its document prompt, a picture fitted to its token
-//!   budget, a window of sound.
+//! - discover (discover.rs): which files are new or changed, queued with what reading each costs, and which are gone.
+//! - read (read.rs): a file extracted (extract/), cut into segments (segment/) and prepared for the model
+//!   (prepare.rs), as a stream of pieces.
+//! - embed (embed.rs): the model's only owner. It batches texts and hands back vectors.
+//! - write (write.rs): files put together from their segments and written, whole or in parts. The index's writer
+//!   (index::Writer) is the Indexer's, and only it writes.
+//! - schedule (schedule.rs): what's read first, how many files at once (Plan), and the run that joins the stages.
+//! - listen (listen.rs): what's said in recordings and videos, written down on a lane of its own, beside the reading
+//!   when memory allows, else after it. Speech is an extractor too (extract/speech.rs): sound in, sentences with their
+//!   times out, cut into passages and embedded like any text.
 //!
-//! Content joins them: an extractor hands it what it decodes, and it streams the pieces to a sink, so a long video
-//! never sits in memory whole.
+//! The Indexer holds the index's writer and the model, for the daemon and `sift-it index`.
 
+mod discover;
+mod embed;
 pub mod extract;
+mod listen;
 pub mod prepare;
+mod read;
+mod schedule;
 pub mod segment;
+mod write;
 
-use crate::config::{Depth, Settings};
-use crate::crawl::is_pdf;
-use crate::embedder::AUDIO_RATE;
-use crate::imaging::Image;
+pub use read::{Content, Payload, Piece, fingerprint, read, transcribes};
+pub use schedule::{Plan, Stuck};
+
+use crate::config::Config;
+use crate::index::Writer;
 use anyhow::Result;
-use objc2_core_graphics::CGImage;
-use protocol::{Kind, Segment};
-use segment::frames::Shots;
-use segment::pictures;
-use segment::prose::{self, Cutter};
-use segment::sound::Windows;
-use serde_json::json;
-use sha2::{Digest, Sha256};
-use std::path::Path;
+use embed::Embed;
+use protocol::Kind;
+use serde::Serialize;
+use std::path::PathBuf;
 
-/// What the model is shown of a piece.
-pub enum Payload {
-    /// Keyword index only.
-    None,
-    /// Text, already framed with its document prompt.
-    Text(String),
-    Image(Image),
-    /// 16 kHz mono samples, at most 30 s.
-    Audio(Vec<f32>),
+/// What indexing does, as it does it: for the daemon's status and log, and `sift-it index`.
+#[derive(Debug, Serialize, Clone)]
+#[serde(tag = "event", rename_all = "snake_case")]
+pub enum Event {
+    Sync {
+        files: usize,
+        added: usize,
+        changed: usize,
+        removed: usize,
+        unavailable: Vec<String>,
+        pending: usize,
+        ms: u64,
+    },
+    Started {
+        pending: usize,
+    },
+    /// Files that appeared while indexing joined the queue.
+    Queued {
+        count: usize,
+    },
+    File {
+        path: String,
+        kind: Kind,
+        segments: usize,
+        vectors: usize,
+        ms: u64,
+    },
+    Failed {
+        path: String,
+        error: String,
+    },
+    Finished {
+        indexed: usize,
+        failed: usize,
+        seconds: f64,
+        stopped: bool,
+    },
+    /// A stretch of a recording or video was written down: what's said up to `at` seconds of `duration`.
+    Transcribing {
+        path: String,
+        at: f64,
+        duration: f64,
+    },
+    /// A recording or video was written down to its end.
+    Transcribed {
+        path: String,
+        passages: usize,
+        seconds: f64,
+        ms: u64,
+    },
+    TranscribeFailed {
+        path: String,
+        error: String,
+    },
+    /// Writing down speech beside the reading stopped: the speech helper couldn't start, or it stopped. It goes on
+    /// once everything is read.
+    SpeechStopped {
+        error: String,
+    },
 }
 
-/// A segment, prepared: what the index keeps of it, and what the model is shown.
-pub struct Piece {
-    pub segment: Segment,
-    pub loc: Option<f64>,
-    pub loc_end: Option<f64>,
-    pub text: Option<String>,
-    pub payload: Payload,
+pub struct Indexer {
+    pub index: Writer,
+    embed: Embed,
 }
 
-pub type Sink<'a> = &'a mut dyn FnMut(Piece) -> Result<()>;
-
-/// Goes up when the way a kind is read changes in a way that matters for what's indexed, or it learns to read files
-/// it couldn't: the files it read (or failed to) are read again, and the index keeps what it has meanwhile.
-pub fn version(kind: Kind) -> u32 {
-    match kind {
-        Kind::Plaintext | Kind::Document | Kind::Image | Kind::Screenshot | Kind::Audio | Kind::Video | Kind::Code => 1,
-    }
-}
-
-/// What decides how a file is read: its kind's version and the reading values it uses at its depth. When it changes,
-/// the file is read again. Whether what's said in it is written down isn't in it: that comes after reading.
-pub fn fingerprint(path: &Path, kind: Kind, settings: &Settings) -> String {
-    let words = match kind {
-        Kind::Plaintext | Kind::Code | Kind::Document | Kind::Screenshot => {
-            json!([settings.passage_chars, settings.max_passage_chars])
+impl Indexer {
+    /// An indexer writing to `index`, with the model in `models`. Vectors from another pipeline (another model or
+    /// llama.cpp) are dropped, and their files queued again: they'd never compare right with new queries. Vector files
+    /// no partition uses (what a crash left, or what was dropped) go.
+    pub fn new(mut index: Writer, models: PathBuf) -> Result<Self> {
+        if index.adopt_vector_source(&crate::embedder::vector_source())? {
+            eprintln!("the index was made by another model or pipeline: everything is indexed again");
         }
-        Kind::Image | Kind::Audio | Kind::Video => json!(null),
-    };
-    let meaning = settings.embeds().then(|| match kind {
-        Kind::Plaintext | Kind::Code | Kind::Audio => json!(null),
-        Kind::Document if is_pdf(path) => json!(settings.text_tokens),
-        Kind::Document => json!(null),
-        Kind::Image => json!(settings.tokens),
-        Kind::Screenshot => json!(settings.text_tokens),
-        Kind::Video => json!([settings.tokens, settings.shot_change, settings.keep_every_s, settings.sound]),
-    });
-    let digest = Sha256::digest(format!("{}/{}/{}", kind.as_str(), version(kind), json!([words, meaning])));
-    digest[..8].iter().map(|byte| format!("{byte:02x}")).collect()
-}
-
-/// What's said in a file of this kind is written down.
-pub fn transcribes(kind: Kind, settings: &Settings) -> bool {
-    settings.depth == Depth::Speech && (kind == Kind::Audio || (kind == Kind::Video && settings.sound))
-}
-
-/// Reads a file into pieces, streamed to `sink`; returns what was learned about it (pages, duration, size) for the
-/// index.
-pub fn read(path: &Path, kind: Kind, settings: &Settings, sink: Sink) -> Result<serde_json::Value> {
-    extract::read(path, kind, settings, &mut Content::new(path, kind, settings, sink))
-}
-
-/// Where an extractor hands what it decodes, by its type. Each is cut by its segmenter, prepared for the model, and
-/// sent on as pieces. What was sent is counted, for what the index learns about the file.
-pub struct Content<'a> {
-    settings: &'a Settings,
-    /// What the file's text is embedded with (prepare::title).
-    title: String,
-    sink: Sink<'a>,
-    prose: Cutter,
-    sound: Windows,
-    shots: Shots,
-    /// Passages of text, windows of sound and frames sent.
-    pub passages: usize,
-    pub windows: usize,
-    pub frames: usize,
-}
-
-impl<'a> Content<'a> {
-    fn new(path: &Path, kind: Kind, settings: &'a Settings, sink: Sink<'a>) -> Self {
-        Self {
-            settings,
-            title: prepare::title(path, kind),
-            sink,
-            prose: Cutter::new(settings),
-            sound: Windows::default(),
-            shots: Shots::new(settings.shot_change, settings.keep_every_s),
-            passages: 0,
-            windows: 0,
-            frames: 0,
+        if index.adopt_speech_source(crate::speech::source())? {
+            eprintln!("what's said in recordings was written down by another speech model: it's written down again");
         }
+        index.tidy_vectors()?;
+        Ok(Self { index, embed: Embed::new(models) })
     }
 
-    /// A line of text, or a part of a long one (`ended`: the line ends with it). A passage's place is its lines.
-    pub fn line(&mut self, text: &str, ended: bool) -> Result<()> {
-        self.prose.push(text, ended);
-        self.send_cut()
+    /// Frees the model (about 1 GB) until it's needed again.
+    pub fn release_model(&mut self) {
+        self.embed.release();
     }
 
-    /// The end of the lines. Returns how many there were.
-    pub fn end_lines(&mut self) -> Result<usize> {
-        self.prose.finish();
-        self.send_cut()?;
-        Ok(self.prose.lines())
+    pub fn model_loaded(&self) -> bool {
+        self.embed.loaded()
     }
 
-    fn send_cut(&mut self) -> Result<()> {
-        let cut: Vec<prose::Passage> = self.prose.ready().collect();
-        for passage in cut {
-            let (first, last) = (passage.first_line as f64, passage.last_line as f64);
-            self.passage(Segment::Passage, Some(first), Some(last), passage.text)?;
-        }
-        Ok(())
+    /// Crawls the chosen folders and brings the queue in step with them (discover.rs).
+    pub fn sync(&mut self, config: &Config) -> Result<Event> {
+        discover::sync(&self.index, config)
     }
 
-    /// A whole text at one place in the file (a page's text layer, a notebook cell's source): its passages keep that
-    /// place.
-    pub fn text(&mut self, segment: Segment, loc: f64, text: &str) -> Result<()> {
-        for passage in prose::passages(text, self.settings) {
-            self.passage(segment, Some(loc), None, passage.text)?;
-        }
-        Ok(())
+    /// A sync of just these paths (files, or folders with everything in them).
+    pub fn sync_paths(&mut self, config: &Config, paths: &[PathBuf]) -> Result<Event> {
+        discover::sync_paths(&self.index, config, paths)
     }
-
-    /// A picture: a photo (with no `text`: none is read), or a screenshot with the text read off it. Returns whether
-    /// that text is long enough for passages of its own.
-    pub fn picture(&mut self, image: &CGImage, text: Option<&str>) -> Result<bool> {
-        // A screenshot is dense with small things.
-        let budget = if text.is_some() { self.settings.text_tokens } else { self.settings.tokens };
-        let text = text.unwrap_or_default();
-        let cut = pictures::cut(text, self.settings.embeds(), false);
-        if cut.picture {
-            let words = cut.words.then(|| text.to_string());
-            self.send(Segment::Picture, None, words, prepare::picture(image, budget)?)?;
-        }
-        if cut.passages {
-            self.read_off(text, None)?;
-        }
-        Ok(pictures::long(text))
-    }
-
-    /// A scanned page, drawn, with the text read off it.
-    pub fn scan(&mut self, page: usize, image: &CGImage, text: &str) -> Result<()> {
-        let loc = Some(page as f64);
-        let cut = pictures::cut(text, self.settings.embeds(), true);
-        if cut.passages {
-            return self.read_off(text, loc);
-        }
-        // Nothing to read: what the page shows, then.
-        let words = cut.words.then(|| text.to_string());
-        self.send(Segment::Picture, loc, words, prepare::picture(image, self.settings.text_tokens)?)
-    }
-
-    /// A video's frame at `at` seconds, with its thumbnail (mac::signature) to tell shots apart.
-    pub fn frame(&mut self, at: f64, image: &CGImage, thumbnail: &[u8]) -> Result<()> {
-        if !self.shots.keep(at, thumbnail) {
-            return Ok(());
-        }
-        self.frames += 1;
-        self.send(Segment::Frame, Some(at), None, prepare::picture(image, self.settings.tokens)?)
-    }
-
-    /// Sound as it's decoded, 16 kHz mono.
-    pub fn sound(&mut self, samples: &[f32]) -> Result<()> {
-        let Self { sound, sink, windows, .. } = self;
-        sound.push(samples, &mut |start, window| send_window(sink, windows, start, window))
-    }
-
-    /// The end of the sound.
-    pub fn end_sound(&mut self) -> Result<()> {
-        let Self { sound, sink, windows, .. } = self;
-        sound.finish(&mut |start, window| send_window(sink, windows, start, window))
-    }
-
-    /// Text read off a picture, as passages.
-    fn read_off(&mut self, text: &str, loc: Option<f64>) -> Result<()> {
-        for passage in prose::passages(text, self.settings) {
-            self.passage(Segment::Ocr, loc, None, passage.text)?;
-        }
-        Ok(())
-    }
-
-    fn passage(&mut self, segment: Segment, loc: Option<f64>, loc_end: Option<f64>, text: String) -> Result<()> {
-        self.passages += 1;
-        let payload = prepare::text(&self.title, &text, self.settings);
-        (self.sink)(Piece { segment, loc, loc_end, text: Some(text), payload })
-    }
-
-    fn send(&mut self, segment: Segment, loc: Option<f64>, text: Option<String>, payload: Payload) -> Result<()> {
-        (self.sink)(Piece { segment, loc, loc_end: None, text, payload })
-    }
-}
-
-fn send_window(sink: &mut Sink, windows: &mut usize, start: f64, samples: &[f32]) -> Result<()> {
-    *windows += 1;
-    let end = start + samples.len() as f64 / AUDIO_RATE as f64;
-    sink(Piece {
-        segment: Segment::Sound,
-        loc: Some(start),
-        loc_end: Some(end),
-        text: None,
-        payload: prepare::sound(samples),
-    })
 }

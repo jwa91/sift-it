@@ -503,7 +503,7 @@ impl Writer {
         self.write_file(row, &[], &serde_json::json!({}), false, Some(error))
     }
 
-    /// A file whose reading got stuck (indexer::STUCK): failed like one that couldn't be read, but tried again later
+    /// A file whose reading got stuck (ingest::schedule::STUCK): failed like one that couldn't be read, but tried again later
     /// (requeue_passing), since what got stuck is more likely the framework reading it than the file.
     pub fn set_aside(&mut self, row: &FileRow, error: &str) -> Result<bool> {
         self.write_file(row, &[], &serde_json::json!({ "stuck": true }), false, Some(error))

@@ -44,6 +44,11 @@ pub fn text(title: &str, text: &str, settings: &Settings) -> Payload {
     }
 }
 
+/// A passage of what's said, in its document prompt (it's only written down at a depth that embeds).
+pub fn spoken(title: &str, text: &str) -> String {
+    crate::embedder::prompts::document(Some(title), text)
+}
+
 /// A picture, fitted to `budget` tokens.
 pub fn picture(image: &CGImage, budget: u32) -> Result<Payload> {
     Ok(Payload::Image(imaging::fit(&mac::pixels(image)?, budget)?))

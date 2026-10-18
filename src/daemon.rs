@@ -3,8 +3,8 @@
 //! (FSEvents), a moment after they go quiet. It reads what's new, newest and cheapest first, and lets the model go
 //! after `indexing.release_model_s` with nothing to do. A change to config.json counts at once, with a full sync.
 //!
-//! It writes down what's said in recordings and videos (speech.rs), a chunk at a time: beside the reading when
-//! `indexing.memory_mb` allows both models (indexer::Plan), else once everything is read. Anything that changes in the
+//! It writes down what's said in recordings and videos (ingest/listen.rs), a chunk at a time: beside the reading when
+//! `indexing.memory_mb` allows both models (ingest::Plan), else once everything is read. Anything that changes in the
 //! folders comes first, and the writing down goes on where it stopped.
 //!
 //! With nothing left to do, it writes the next generation of a vector partition that's due one (index/vectors.rs).
@@ -15,11 +15,11 @@
 //!   SIGTERM  stop (what isn't finished stays queued)
 //!
 //! One runs at a time (daemon.lock). With `indexing.on_battery` off it waits for a charger; in Low Power Mode it always
-//! waits. When a reader gets stuck (indexer::Stuck), it exits, and launchd starts a new one.
+//! waits. When a reader gets stuck (ingest::Stuck), it exits, and launchd starts a new one.
 
 use crate::config::{self, Config};
 use crate::index::{self, Writer};
-use crate::indexer::{Event, Indexer, Plan, Stuck};
+use crate::ingest::{Event, Indexer, Plan, Stuck};
 use crate::power;
 use crate::speech::Transcriber;
 use anyhow::{Context, Result, bail};

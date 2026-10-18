@@ -1,19 +1,15 @@
-//! What's said in recordings and videos, written down: the second stage of indexing them. The first pass makes them
-//! searchable by what they sound like (EmbeddingGemma's 30-second windows); this one, which runs only while the daemon
-//! has nothing else to do, adds what's said, so a name or a word heard in a podcast is found at its moment.
+//! The speech model, in a helper process: what writes down what's said in recordings and videos (the speech extractor,
+//! ingest/extract/speech.rs, sends it sound).
 //!
-//! The speech model (Parakeet Ultra, 25 languages, Dutch and English among them) runs in a helper process,
-//! `sift-it-transcribe`, beside this binary: transcribe.cpp brings its own ggml, and the helper gives back all of its
-//! memory when there's nothing left to write down. Sound goes to it in chunks of about three minutes, cut where it's
-//! quietest so no word is cut in two, and each chunk's sentences are stored as soon as they're back: a file stopped
-//! partway goes on from there later.
+//! The model (Parakeet Ultra, 25 languages, Dutch and English among them) runs in `sift-it-transcribe`, beside this
+//! binary: transcribe.cpp brings its own ggml, and the helper gives back all of its memory when there's nothing left to
+//! write down.
 
 use crate::config;
-use crate::embedder::AUDIO_RATE;
 use anyhow::{Context, Result, bail};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::process::CommandExt;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
 /// The speech model: Moondream's Parakeet Ultra (a post-trained Parakeet TDT 0.6B v3), Handy's GGUF conversion at Q8_0.
@@ -27,13 +23,6 @@ pub const MODEL_SHA256: &str = "007a59761e9258779f189df396b50d12b83bb5b79e66df4b
 pub fn source() -> &'static str {
     "parakeet-ultra-q8_0/transcribe.cpp-0.4.0/v1"
 }
-
-/// Sound goes to the model in chunks of about this many samples…
-const CHUNK: usize = 180 * AUDIO_RATE;
-/// …cut at the quietest tenth of a second within this many samples of the mark.
-const CUT_WINDOW: usize = 10 * AUDIO_RATE;
-/// A chunk quieter than this throughout (RMS, about −50 dBFS) isn't sent at all.
-const SILENCE: f32 = 0.003;
 
 /// The speech model's file: in the models folder (`sift-it model download`), or else Handy's copy of the same file,
 /// so both apps share one download.
@@ -170,107 +159,5 @@ impl Drop for Transcriber {
     fn drop(&mut self) {
         drop(self.stdin.take());
         let _ = self.child.wait();
-    }
-}
-
-/// How writing down a file went.
-#[derive(Debug, PartialEq)]
-pub enum Outcome {
-    /// All of it, up to this second.
-    Finished(f64),
-    /// Stopped after a chunk (`on_chunk` said so); it goes on from where that chunk ended.
-    Stopped,
-}
-
-/// Stops reading a file once a chunk is stored and `on_chunk` asks to stop.
-#[derive(Debug)]
-struct Stop;
-impl std::fmt::Display for Stop {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        f.write_str("stopped")
-    }
-}
-impl std::error::Error for Stop {}
-
-/// Writes down what's said in a file from `from` seconds on, a chunk at a time: after each, `on_chunk(start, end,
-/// sentences)` (seconds from the file's start) stores it and says whether to go on. After the last chunk the file is
-/// finished, whatever `on_chunk` says: there's nothing to go on with.
-pub fn transcribe(
-    transcriber: &mut Transcriber,
-    path: &Path,
-    from: f64,
-    on_chunk: &mut dyn FnMut(f64, f64, Vec<Spoken>) -> Result<bool>,
-) -> Result<Outcome> {
-    let mut buffer: Vec<f32> = Vec::with_capacity(CHUNK + CUT_WINDOW * 2);
-    let mut start = from; // the second of buffer[0]
-    let mut send = |chunk: &[f32], start: f64| -> Result<bool> {
-        let end = start + chunk.len() as f64 / AUDIO_RATE as f64;
-        let spoken = if rms(chunk) < SILENCE { Vec::new() } else { transcriber.run(chunk)? };
-        let spoken = spoken
-            .into_iter()
-            .map(|s| Spoken { start: start + s.start, end: (start + s.end).min(end), text: s.text })
-            .collect();
-        on_chunk(start, end, spoken)
-    };
-    let read = crate::av::read_samples(path, from, &mut |samples| {
-        buffer.extend_from_slice(samples);
-        while buffer.len() >= CHUNK + CUT_WINDOW {
-            let cut = quiet_point(&buffer, CHUNK);
-            let chunk: Vec<f32> = buffer.drain(..cut).collect();
-            let chunk_start = start;
-            start += chunk.len() as f64 / AUDIO_RATE as f64;
-            if !send(&chunk, chunk_start)? {
-                return Err(Stop.into());
-            }
-        }
-        Ok(())
-    });
-    match read {
-        Ok(_) => {}
-        Err(error) if error.downcast_ref::<Stop>().is_some() => return Ok(Outcome::Stopped),
-        Err(error) => return Err(error),
-    }
-    let end = start + buffer.len() as f64 / AUDIO_RATE as f64;
-    if buffer.len() >= AUDIO_RATE / 2 {
-        send(&buffer, start)?;
-    }
-    Ok(Outcome::Finished(end))
-}
-
-/// Where to cut near `mark`: the middle of the quietest tenth of a second within CUT_WINDOW of it.
-fn quiet_point(samples: &[f32], mark: usize) -> usize {
-    let frame = AUDIO_RATE / 10;
-    let from = mark.saturating_sub(CUT_WINDOW);
-    let to = (mark + CUT_WINDOW).min(samples.len());
-    let mut best = (f32::MAX, mark);
-    let mut at = from;
-    while at + frame <= to {
-        let level = rms(&samples[at..at + frame]);
-        if level < best.0 {
-            best = (level, at + frame / 2);
-        }
-        at += frame;
-    }
-    best.1.clamp(1, samples.len())
-}
-
-fn rms(samples: &[f32]) -> f32 {
-    if samples.is_empty() {
-        return 0.0;
-    }
-    (samples.iter().map(|s| s * s).sum::<f32>() / samples.len() as f32).sqrt()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_cut_falls_in_the_quiet() {
-        let mut samples = vec![0.5f32; CHUNK + CUT_WINDOW];
-        let quiet = CHUNK + AUDIO_RATE * 3;
-        samples[quiet..quiet + AUDIO_RATE / 5].iter_mut().for_each(|s| *s = 0.0);
-        let cut = quiet_point(&samples, CHUNK);
-        assert!(cut >= quiet && cut <= quiet + AUDIO_RATE / 5, "{cut} vs {quiet}");
     }
 }

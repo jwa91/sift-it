@@ -122,11 +122,12 @@ src/
   ingest/
     discover.rs          crawling, watching, fingerprints, cost
     extract/             per container: text, document, pdf, image, audio, video, speech
-    segment/             per content type: prose, markdown, code, records, pages, frames, sound, speech
+    segment/             per content type: prose, markdown, code, records, pictures, frames, sound, speech
     prepare.rs           prompts, fitting pictures, sound windows
     embed.rs             the embedding stage
     write.rs             the writer
-    schedule.rs          order, readers, speech's lane
+    schedule.rs          order, readers, the run
+    listen.rs            speech's lane, beside the reading or after it
   query/
     understand.rs        words, phrases, code, kinds
     retrieve.rs          full-text and vector candidates
@@ -151,14 +152,14 @@ transcribe/              sift-it-transcribe
 
 | Part | Today | What's off |
 |---|---|---|
-| Discover | `crawl.rs`, `estimate.rs` | close |
+| Discover | `ingest/discover.rs`, with `crawl.rs` and `estimate.rs` | close: crawling and cost join it in step 7 |
 | Extract and segment | `ingest/extract/`, `ingest/segment/`, `ingest/prepare.rs` | done (step 4 below) |
-| Embed | `embedder.rs` | close; the model's owner is the indexer's loop |
-| Speech | `speech.rs`, `transcribe/` | a stage of its own beside the pipeline, not an extractor |
-| Write and schedule | `indexer.rs`, `daemon.rs` | ordering, the pipeline, speech and storage in one loop |
+| Embed | `ingest/embed.rs`, the model in `embedder.rs` | done (step 5 below) |
+| Speech | `ingest/extract/speech.rs`, `ingest/listen.rs`, the helper in `speech.rs` and `transcribe/` | done (step 5 below) |
+| Write and schedule | `ingest/write.rs`, `ingest/schedule.rs`, the service in `daemon.rs` | done (step 5 below) |
 | Index | `index/` | done (step 3 below) |
 | Query | `query/` | done (step 2 below) |
-| Resources | `config.rs`, `indexer::Plan`, `query/mod.rs`, `mac.rs` | four places |
+| Resources | `config.rs`, `ingest::Plan`, `query/mod.rs`, `mac.rs` | four places |
 | Protocol | `crates/protocol`, `docs/protocol.md` | done (step 1 below) |
 | Clients | `finder.rs`, `term.rs`, `present.rs`, `preview.rs`, `open.rs`, `serve.rs` | beside the core, in one namespace |
 

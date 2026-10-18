@@ -628,7 +628,7 @@ impl Default for Ranking {
 #[serde(default, deny_unknown_fields)]
 pub struct Indexing {
     /// How much memory indexing may take, in MB: how many files are read at once, and whether what's said in
-    /// recordings is written down beside the reading or after it (indexer::Plan). What's written is the same either
+    /// recordings is written down beside the reading or after it (ingest::Plan). What's written is the same either
     /// way. At `auto`, a quarter of the Mac's memory.
     pub memory_mb: Budget,
     /// Index while on battery power. In Low Power Mode it always waits.

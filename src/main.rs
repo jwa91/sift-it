@@ -10,7 +10,6 @@ mod eval;
 mod finder;
 mod imaging;
 mod index;
-mod indexer;
 mod ingest;
 mod llama;
 mod mac;
@@ -453,31 +452,31 @@ fn index(json: bool, reindex: bool) -> Result<()> {
     if reindex {
         index.requeue_all()?;
     }
-    let mut indexer = indexer::Indexer::new(index, config::models_dir())?;
-    let mut report = |event: indexer::Event| {
+    let mut indexer = ingest::Indexer::new(index, config::models_dir())?;
+    let mut report = |event: ingest::Event| {
         if json {
             println!("{}", serde_json::to_string(&event).unwrap());
             return;
         }
         match event {
-            indexer::Event::Sync { files, added, changed, removed, pending, ms, .. } => eprintln!(
+            ingest::Event::Sync { files, added, changed, removed, pending, ms, .. } => eprintln!(
                 "{files} files in the folders ({added} new, {changed} changed, {removed} gone), {pending} to index ({ms} ms)"
             ),
-            indexer::Event::Started { pending } => eprintln!("indexing {pending} files…"),
-            indexer::Event::Queued { count } => eprintln!("{count} more files joined the queue"),
-            indexer::Event::File { path, segments, vectors, ms, .. } => {
+            ingest::Event::Started { pending } => eprintln!("indexing {pending} files…"),
+            ingest::Event::Queued { count } => eprintln!("{count} more files joined the queue"),
+            ingest::Event::File { path, segments, vectors, ms, .. } => {
                 eprintln!("  {path}: {segments} segments, {vectors} vectors, {ms} ms")
             }
-            indexer::Event::Failed { path, error } => eprintln!("  {path}: {error}"),
-            indexer::Event::Finished { indexed, failed, seconds, .. } => {
+            ingest::Event::Failed { path, error } => eprintln!("  {path}: {error}"),
+            ingest::Event::Finished { indexed, failed, seconds, .. } => {
                 eprintln!("{indexed} files indexed, {failed} failed, in {seconds:.1} s")
             }
-            indexer::Event::Transcribing { .. } => {}
-            indexer::Event::Transcribed { path, passages, seconds, ms } => {
+            ingest::Event::Transcribing { .. } => {}
+            ingest::Event::Transcribed { path, passages, seconds, ms } => {
                 eprintln!("  {path}: {passages} passages of speech in {seconds:.0} s of sound, {ms} ms")
             }
-            indexer::Event::TranscribeFailed { path, error } => eprintln!("  {path}: {error}"),
-            indexer::Event::SpeechStopped { error } => {
+            ingest::Event::TranscribeFailed { path, error } => eprintln!("  {path}: {error}"),
+            ingest::Event::SpeechStopped { error } => {
                 eprintln!("what's said in recordings is written down after the reading: {error}")
             }
         }
@@ -486,12 +485,12 @@ fn index(json: bool, reindex: bool) -> Result<()> {
     report(sync);
     // What's said in recordings and videos is written down beside the reading when memory allows, else after it.
     let mut helper = None;
-    let beside = indexer::Plan::of(&config.indexing).beside && speech::unavailable().is_none();
+    let beside = ingest::Plan::of(&config.indexing).beside && speech::unavailable().is_none();
     if let Err(error) =
         indexer.index_pending(&config, &mut report, &|| false, &mut Vec::new, beside.then_some(&mut helper))
     {
-        // This process can't go on (indexer::Stuck); a new one can, with the file set aside.
-        if error.is::<indexer::Stuck>() {
+        // This process can't go on (ingest::Stuck); a new one can, with the file set aside.
+        if error.is::<ingest::Stuck>() {
             bail!("{error}. Run `sift-it index` again for the rest");
         }
         return Err(error);
@@ -547,7 +546,7 @@ fn status(json: bool) -> Result<()> {
     let models = models::status(&config::models_dir());
     let transcripts = index.transcripts()?;
     let queued = index.queued(5)?;
-    let plan = indexer::Plan::of(&config.indexing);
+    let plan = ingest::Plan::of(&config.indexing);
     // The engine, if it's running (status doesn't start it): what it holds.
     let engine =
         client::Client::running().and_then(|mut engine| engine.request::<protocol::Status>(protocol::Op::Status).ok());
