@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com); versions follow
 [SemVer](https://semver.org).
 
-## [Unreleased]
+## [0.3.0] — 2026-10-19
 
 ### Added
 
@@ -75,7 +75,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com); versions follow
 
 - The options `include-code`, `index-on-battery`, `transcribe` and `exclude-ext`: `sources.code`,
   `indexing.on_battery`, `reading.depth` and `sources.ignore` replace them.
-- The limits on file size, PDF pages and recording length.
+- The limits on file size, PDF pages and recording length, and on how many frames a video gives: a long video is
+  looked at every two seconds too.
 - `sift-it search --words-only`: `--by words` replaces it.
 
 ### Fixed

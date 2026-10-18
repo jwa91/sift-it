@@ -23,9 +23,8 @@ use std::path::Path;
 
 mod resample;
 
-/// Video is sampled at least this often, and at most this many times per file.
+/// Video is sampled this often, in seconds, however long it is.
 const FRAME_STEP: f64 = 2.0;
-const MAX_SAMPLES: f64 = 900.0;
 
 fn asset(path: &Path) -> Retained<AVURLAsset> {
     let url = NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy()));
@@ -251,7 +250,7 @@ pub fn frame_at(path: &Path, seconds: f64, max_side: u32) -> Result<Retained<CGI
         .map_err(|error| anyhow!("AVFoundation: {}", error.localizedDescription()))
 }
 
-/// Walks the video and hands over a frame every few seconds: (time in seconds, frame).
+/// Walks the video and hands over a frame every FRAME_STEP seconds: (time in seconds, frame).
 pub fn read_video(
     path: &Path,
     max_side: u32,
@@ -266,8 +265,7 @@ pub fn read_video(
     if !duration.is_finite() || duration <= 0.0 {
         bail!("it has no length");
     }
-    let step = FRAME_STEP.max(duration / MAX_SAMPLES);
-    let generator = generator(&asset, max_side, step / 2.0);
+    let generator = generator(&asset, max_side, FRAME_STEP / 2.0);
     let mut time = 0.0f64;
     while time < duration {
         autoreleasepool(|_| -> Result<()> {
@@ -280,7 +278,7 @@ pub fn read_video(
             let at = if at.is_finite() { at } else { time };
             on_frame(at, &frame)
         })?;
-        time += step;
+        time += FRAME_STEP;
     }
     Ok(VideoInfo { duration, width: size.width.abs() as u32, height: size.height.abs() as u32 })
 }

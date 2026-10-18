@@ -139,7 +139,7 @@ Ends `sift-it serve` once the requests before it are answered: `{"id": 10, "ok":
 ## Events
 
 ```json
-{"event": "ready", "version": "0.2.0", "build": "0.2.0+3f2a…", "index": "/…/index.sqlite", "meaning": "unloaded"}
+{"event": "ready", "version": "0.3.0", "build": "0.3.0+3f2a…", "index": "/…/index.sqlite", "meaning": "unloaded"}
 {"event": "meaning", "state": "loading"}
 {"event": "meaning", "state": "unavailable", "error": "the model isn't downloaded"}
 {"event": "config", "error": "can't read config.json: …"}
