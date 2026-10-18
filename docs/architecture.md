@@ -152,7 +152,7 @@ transcribe/              sift-it-transcribe
 | Part | Today | What's off |
 |---|---|---|
 | Discover | `crawl.rs`, `estimate.rs` | close |
-| Extract and segment | `readers/`, `av.rs`, `imaging.rs` | one step: the paragraph cutter lives inside the text reader |
+| Extract and segment | `ingest/extract/`, `ingest/segment/`, `ingest/prepare.rs` | done (step 4 below) |
 | Embed | `embedder.rs` | close; the model's owner is the indexer's loop |
 | Speech | `speech.rs`, `transcribe/` | a stage of its own beside the pipeline, not an extractor |
 | Write and schedule | `indexer.rs`, `daemon.rs` | ordering, the pipeline, speech and storage in one loop |

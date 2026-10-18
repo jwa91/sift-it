@@ -50,7 +50,7 @@ pub struct NewFile {
     pub size: u64,
     /// Seconds since 1970.
     pub modified: f64,
-    /// How it's read (readers::fingerprint): when this changes, it's read again.
+    /// How it's read (ingest::fingerprint): when this changes, it's read again.
     pub reading: String,
     /// What's said in it is to be written down.
     pub speech: bool,
@@ -64,7 +64,7 @@ pub struct FileRow {
     pub kind: Kind,
     pub size: u64,
     pub modified: f64,
-    /// How it's read (readers::fingerprint).
+    /// How it's read (ingest::fingerprint).
     pub reading: String,
     /// What's said in it is to be written down.
     pub speech: bool,

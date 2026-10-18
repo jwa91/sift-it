@@ -22,7 +22,7 @@ use crate::config::{self, Config};
 use crate::crawl::{self, Found, Rescan};
 use crate::embedder::{Embedder, ModelFiles};
 use crate::index::{FileRow, NewSegment, Writer};
-use crate::readers::{self, Payload, Piece};
+use crate::ingest::{self, Payload, Piece};
 use crate::speech::{Gone, Outcome, Spoken, Transcriber};
 use anyhow::{Result, anyhow};
 use protocol::Kind;
@@ -449,7 +449,7 @@ impl Indexer {
                     // A reader that panics (a file no one expected) is a file that couldn't be read, not a lost run.
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         objc2::rc::autoreleasepool(|_| {
-                            readers::read(&row.path, row.kind, &settings, &mut |piece| {
+                            ingest::read(&row.path, row.kind, &settings, &mut |piece| {
                                 // While a piece waits for this thread to take it, the reader isn't the one stuck.
                                 mark(None);
                                 let sent = send(Message::Piece(id, piece));
@@ -688,7 +688,7 @@ impl Indexer {
             }
             let title = tags.as_ref().and_then(|tags| tags["title"].as_str().map(str::to_string));
             return Ok(Some(Listening {
-                title: title.unwrap_or_else(|| crate::readers::title_of(&row.path)),
+                title: title.unwrap_or_else(|| ingest::prepare::title(&row.path, row.kind)),
                 duration: crate::av::duration(&row.path),
                 row,
                 from,
@@ -710,7 +710,7 @@ impl Indexer {
         spoken: Vec<Spoken>,
         on_event: &mut dyn FnMut(Event),
     ) -> Result<bool> {
-        let passages = crate::speech::passages(spoken);
+        let passages = ingest::segment::speech::passages(spoken);
         let texts: Vec<String> =
             passages.iter().map(|p| crate::embedder::prompts::document(Some(&listening.title), &p.text)).collect();
         let vectors = if texts.is_empty() {

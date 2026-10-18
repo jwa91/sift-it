@@ -4,7 +4,7 @@
 
 use crate::config::{Config, Settings};
 use crate::index::NewFile;
-use crate::readers;
+use crate::ingest;
 use protocol::Kind;
 use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt;
@@ -109,14 +109,14 @@ pub struct Found {
 }
 
 impl Found {
-    /// How it's read (readers::fingerprint): when this changes, it's read again.
+    /// How it's read (ingest::fingerprint): when this changes, it's read again.
     pub fn reading(&self) -> String {
-        readers::fingerprint(&self.path, self.kind, &self.settings)
+        ingest::fingerprint(&self.path, self.kind, &self.settings)
     }
 
     /// What's said in it is to be written down.
     pub fn speech(&self) -> bool {
-        readers::transcribes(self.kind, &self.settings)
+        ingest::transcribes(self.kind, &self.settings)
     }
 
     /// The file, as the index queues it.

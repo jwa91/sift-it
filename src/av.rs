@@ -1,15 +1,13 @@
 //! Recordings and videos through AVFoundation, which plays every format macOS can.
 //!
-//! Sound is decoded to 16 kHz mono and handed over in 30-second windows that overlap by 10 seconds (the model listens
-//! to 30 seconds at a time; the overlap keeps a sentence at a window's edge whole in one of them). Silent windows are
-//! skipped. Video is sampled every few seconds, and a frame is kept when the picture changes (a new shot) or every
-//! so often within the same one.
+//! Sound is decoded to 16 kHz mono, and video sampled every few seconds. Which windows of sound and which frames
+//! become segments is the segmenters' to say (ingest/segment).
 //!
 //! It uses AVFoundation's synchronous calls (deprecated for the async ones): they block a worker thread, which is what
 //! a reader wants.
 #![allow(deprecated)]
 
-use crate::embedder::{AUDIO_RATE, AUDIO_WINDOW};
+use crate::embedder::AUDIO_RATE;
 use anyhow::{Result, anyhow, bail};
 use objc2::rc::{Retained, autoreleasepool};
 use objc2::runtime::AnyObject;
@@ -24,10 +22,6 @@ use objc2_foundation::{NSArray, NSDictionary, NSNumber, NSString, NSURL};
 use std::path::Path;
 use std::ptr::NonNull;
 
-/// Windows start this far apart: 30 s windows overlapping by 10 s.
-pub const AUDIO_HOP: usize = 20 * AUDIO_RATE;
-/// A window quieter than this (RMS, full scale 1.0, about −50 dBFS) is silence.
-const SILENCE: f32 = 0.003;
 /// Video is sampled at least this often, and at most this many times per file.
 const FRAME_STEP: f64 = 2.0;
 const MAX_SAMPLES: f64 = 900.0;
@@ -185,35 +179,6 @@ pub fn read_samples(path: &Path, from: f64, on_samples: &mut dyn FnMut(&[f32]) -
     Ok(total as f64 / AUDIO_RATE as f64)
 }
 
-/// Decodes the sound and hands over its windows: (start in seconds, samples). Returns the seconds of sound read.
-pub fn read_audio(path: &Path, on_window: &mut dyn FnMut(f64, &[f32]) -> Result<()>) -> Result<f64> {
-    let mut buffer: Vec<f32> = Vec::with_capacity(AUDIO_WINDOW * 2);
-    let mut buffer_start = 0usize; // the sample number of buffer[0]
-    let mut emitted = false;
-    let mut emit = |start: usize, samples: &[f32], emitted: &mut bool| -> Result<()> {
-        *emitted = true;
-        if rms(samples) < SILENCE {
-            return Ok(());
-        }
-        on_window(start as f64 / AUDIO_RATE as f64, samples)
-    };
-    let seconds = read_samples(path, 0.0, &mut |samples| {
-        buffer.extend_from_slice(samples);
-        while buffer.len() >= AUDIO_WINDOW {
-            emit(buffer_start, &buffer[..AUDIO_WINDOW], &mut emitted)?;
-            buffer.drain(..AUDIO_HOP);
-            buffer_start += AUDIO_HOP;
-        }
-        Ok(())
-    })?;
-    // The rest: on its own if nothing came before; else only when it holds a few seconds the last window didn't.
-    let uncovered = buffer.len().saturating_sub(AUDIO_WINDOW - AUDIO_HOP);
-    if (!emitted && buffer.len() >= AUDIO_RATE) || (emitted && uncovered >= 3 * AUDIO_RATE) {
-        emit(buffer_start, &buffer, &mut emitted)?;
-    }
-    Ok(seconds)
-}
-
 /// The tags a recording or video carries (ID3, iTunes, QuickTime): its title, artist, album and the like, as
 /// {"title": …, "artist": …}. Empty when it has none.
 pub fn tags(path: &Path) -> serde_json::Value {
@@ -291,18 +256,10 @@ fn describe(error: &objc2_foundation::NSError) -> String {
     text
 }
 
-fn rms(samples: &[f32]) -> f32 {
-    if samples.is_empty() {
-        return 0.0;
-    }
-    (samples.iter().map(|s| s * s).sum::<f32>() / samples.len() as f32).sqrt()
-}
-
 pub struct VideoInfo {
     pub duration: f64,
     pub width: u32,
     pub height: u32,
-    pub frames: usize,
 }
 
 fn generator(path: &Path, max_side: u32, tolerance: f64) -> Retained<AVAssetImageGenerator> {
@@ -325,14 +282,10 @@ pub fn frame_at(path: &Path, seconds: f64, max_side: u32) -> Result<Retained<CGI
         .map_err(|error| anyhow!("AVFoundation: {}", error.localizedDescription()))
 }
 
-/// Walks the video and hands over the frames worth keeping: (time in seconds, frame). A sampled frame at least
-/// `shot_change` different from the last one kept (the mean difference of a 16 × 9 grey thumbnail, 0 to 255) starts
-/// a new shot, and within one shot a frame is kept every `keep_every` seconds.
+/// Walks the video and hands over a frame every few seconds: (time in seconds, frame).
 pub fn read_video(
     path: &Path,
     max_side: u32,
-    shot_change: f64,
-    keep_every: f64,
     on_frame: &mut dyn FnMut(f64, &CGImage) -> Result<()>,
 ) -> Result<VideoInfo> {
     let asset = asset(path);
@@ -346,8 +299,6 @@ pub fn read_video(
     }
     let step = FRAME_STEP.max(duration / MAX_SAMPLES);
     let generator = generator(path, max_side, step / 2.0);
-    let mut last_kept: Option<(f64, Vec<u8>)> = None;
-    let mut frames = 0usize;
     let mut time = 0.0f64;
     while time < duration {
         autoreleasepool(|_| -> Result<()> {
@@ -358,24 +309,9 @@ pub fn read_video(
             };
             let at = unsafe { actual.seconds() };
             let at = if at.is_finite() { at } else { time };
-            let signature = crate::mac::signature(&frame)?;
-            let keep = match &last_kept {
-                None => true,
-                Some((kept_at, kept)) => at - kept_at >= keep_every || difference(kept, &signature) >= shot_change,
-            };
-            if keep {
-                on_frame(at, &frame)?;
-                frames += 1;
-                last_kept = Some((at, signature));
-            }
-            Ok(())
+            on_frame(at, &frame)
         })?;
         time += step;
     }
-    Ok(VideoInfo { duration, width: size.width.abs() as u32, height: size.height.abs() as u32, frames })
-}
-
-fn difference(a: &[u8], b: &[u8]) -> f64 {
-    let sum: u64 = a.iter().zip(b).map(|(x, y)| (*x as i32 - *y as i32).unsigned_abs() as u64).sum();
-    sum as f64 / a.len().max(1) as f64
+    Ok(VideoInfo { duration, width: size.width.abs() as u32, height: size.height.abs() as u32 })
 }

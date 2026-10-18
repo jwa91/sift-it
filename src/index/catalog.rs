@@ -380,7 +380,7 @@ impl Writer {
                  kind TEXT NOT NULL,
                  size INTEGER NOT NULL,
                  modified REAL NOT NULL,
-                 reading TEXT NOT NULL,                   -- how it's read (readers::fingerprint)
+                 reading TEXT NOT NULL,                   -- how it's read (ingest::fingerprint)
                  speech INTEGER NOT NULL,                 -- what's said in it is to be written down
                  cost REAL NOT NULL,                      -- about how long reading it takes, in seconds (estimate::cost)
                  state TEXT NOT NULL DEFAULT 'pending',   -- pending | done | failed

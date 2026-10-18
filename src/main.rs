@@ -11,6 +11,7 @@ mod finder;
 mod imaging;
 mod index;
 mod indexer;
+mod ingest;
 mod llama;
 mod mac;
 mod models;
@@ -19,7 +20,6 @@ mod power;
 mod present;
 mod preview;
 mod query;
-mod readers;
 mod selftest;
 mod serve;
 mod service;
@@ -318,11 +318,11 @@ fn run(cli: Cli) -> Result<()> {
             let started = std::time::Instant::now();
             let mut count = 0;
             let mut total_tokens = 0;
-            let info = readers::read(&path, kind, &settings, &mut |piece| {
+            let info = ingest::read(&path, kind, &settings, &mut |piece| {
                 count += 1;
                 let what = match &piece.payload {
-                    readers::Payload::None => "words only".to_string(),
-                    readers::Payload::Text(text) => match model.as_mut() {
+                    ingest::Payload::None => "words only".to_string(),
+                    ingest::Payload::Text(text) => match model.as_mut() {
                         Some(model) => {
                             let n = model.count_tokens(text);
                             total_tokens += n;
@@ -330,8 +330,8 @@ fn run(cli: Cli) -> Result<()> {
                         }
                         None => format!("text, {} chars", text.len()),
                     },
-                    readers::Payload::Image(image) => format!("picture {}×{}", image.width, image.height),
-                    readers::Payload::Audio(samples) => format!("sound {:.1} s", samples.len() as f64 / 16000.0),
+                    ingest::Payload::Image(image) => format!("picture {}×{}", image.width, image.height),
+                    ingest::Payload::Audio(samples) => format!("sound {:.1} s", samples.len() as f64 / 16000.0),
                 };
                 let at = piece.loc.map(|l| format!(" at {l}")).unwrap_or_default();
                 let text = piece.text.as_deref().unwrap_or("").replace('\n', " ");

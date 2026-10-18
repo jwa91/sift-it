@@ -829,7 +829,7 @@ mod tests {
         let mut config = Config::default();
         let before = |config: &Config, kind| {
             let path = Path::new("/a/f");
-            crate::readers::fingerprint(path, kind, &config.reading.resolve(path, kind))
+            crate::ingest::fingerprint(path, kind, &config.reading.resolve(path, kind))
         };
         let (video, text) = (before(&config, Kind::Video), before(&config, Kind::Plaintext));
         config.set("reading.keep_every_s", "12").unwrap();
