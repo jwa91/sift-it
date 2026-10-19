@@ -181,7 +181,8 @@ Once everything is indexed, the indexer writes down what's said in recordings an
 English among them. It runs on [transcribe.cpp](https://github.com/handy-computer/transcribe.cpp) in a helper process,
 `sift-it-transcribe`, at a lower priority than everything else, and gives its memory back when it's done. It writes a
 recording down a few minutes at a time: any change in your folders comes first, and it goes on where it stopped.
-On an Apple silicon Mac it writes down a 30-minute podcast in under half a minute.
+On an Apple silicon Mac it writes down a 30-minute podcast in under half a minute. Beside the reading it goes slower,
+since both use the GPU: together they take about as long as one after the other.
 
 Each passage is a sentence or a few, with its time: a search for a word said in a podcast opens it at that moment.
 `sift-it status` shows how far it is; `sift-it config reading.depth meaning` turns it off.

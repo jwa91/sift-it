@@ -211,8 +211,13 @@ fn run(cli: Cli) -> Result<()> {
             } else {
                 for e in &estimates {
                     let kinds = e.by_kind.iter().map(|(k, n)| format!("{n} {k}")).collect::<Vec<_>>().join(", ");
+                    let speech = if e.speech_seconds > 0.0 {
+                        format!(", {} of it writing down what's said", tools::estimate::describe(e.speech_seconds))
+                    } else {
+                        String::new()
+                    };
                     println!(
-                        "{}: {} files ({kinds}), {}",
+                        "{}: {} files ({kinds}), {}{speech}",
                         e.folder.display(),
                         e.files,
                         tools::estimate::describe(e.seconds)
@@ -365,7 +370,12 @@ fn configure(key: Option<String>, value: Option<String>) -> Result<()> {
     // All of it in config.json's order; a part through JSON values, which sort their keys.
     let shown = match key.as_deref() {
         None => serde_json::to_string_pretty(&config)?,
-        Some(key) => serde_json::to_string_pretty(&config.get(Some(key))?)?,
+        Some(key) => match config.get(Some(key)) {
+            Ok(shown) => serde_json::to_string_pretty(&shown)?,
+            // Put back to its default, a kind's or a file type's value is gone: the one above it counts again.
+            Err(_) if value.as_deref() == Some("null") => "null".to_string(),
+            Err(error) => return Err(error),
+        },
     };
     println!("{shown}");
     Ok(())
@@ -505,8 +515,13 @@ fn status(json: bool) -> Result<()> {
         return Ok(());
     }
     println!("index:   {}", config::index_path().display());
+    // Rounded down: 100% only once nothing waits.
+    let share = match stats.pending {
+        0 => String::new(),
+        pending => format!(", {}% done", (stats.files - pending) * 100 / stats.files),
+    };
     println!(
-        "files:   {} ({} indexed, {} waiting, {} unreadable)",
+        "files:   {}{share} ({} indexed, {} waiting, {} unreadable)",
         stats.files, stats.done, stats.pending, stats.failed
     );
     println!("vectors: {} in {} segments", stats.vectors, stats.segments);
@@ -552,10 +567,11 @@ fn status(json: bool) -> Result<()> {
     let speech = match adapters::speech::unavailable() {
         Some(why) => why,
         None if transcripts.done < transcripts.total => format!(
-            "{} of {} recordings and videos written down, {} of sound to go",
+            "{} of {} recordings and videos written down, {} of sound to go ({})",
             transcripts.done,
             transcripts.total,
-            tools::estimate::describe(transcripts.seconds).trim_start_matches("about ")
+            tools::estimate::describe(transcripts.seconds).trim_start_matches("about "),
+            tools::estimate::describe(ingest::discover::speech(transcripts.seconds))
         ),
         None => format!("{} of {} recordings and videos written down", transcripts.done, transcripts.total),
     };

@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com); versions follow
 [SemVer](https://semver.org).
 
+## [Unreleased]
+
+### Changed
+
+- The finder (`sift-it` without arguments) lists nothing until something is typed, instead of the recently changed
+  files.
+- `sift-it status` says how much of the folders is indexed, in percent, while files wait.
+- A change to `search`, `ranking` or `log` in config.json no longer stops the indexer partway: only `sources`,
+  `reading` and `indexing` change its work.
+- `sift-it estimate` counts writing down what's said (`speech_seconds` in its JSON, and in `seconds`), and a video's
+  frames as often as 0.3.0 keeps them: on the demo folder it said 26 minutes for an hour's work. `sift-it status`
+  says how long the speech still to write down takes.
+
+### Fixed
+
+- `sift-it config reading.video.keep_every_s null` (a kind's or a file type's value put back) said "there's no
+  reading.video.keep_every_s" and failed, though it had done it.
+
 ## [0.3.0] — 2026-10-19
 
 ### Added

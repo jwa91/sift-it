@@ -1,8 +1,9 @@
 //! `sift-it estimate <folder>...`: what indexing a folder means, before it starts: how many files of each kind, and
-//! about how long the first pass takes (ingest/discover/cost.rs).
+//! about how long the first pass takes (ingest/discover/cost.rs), writing down what's said in it included.
 
+use crate::adapters::macos::av;
 use crate::config::Config;
-use crate::ingest::discover::{cost, crawl};
+use crate::ingest::discover::{cost, crawl, speech};
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -13,8 +14,10 @@ pub struct Estimate {
     pub files: usize,
     pub bytes: u64,
     pub by_kind: BTreeMap<&'static str, usize>,
-    /// About how long the first pass takes.
+    /// About how long the first pass takes, writing down what's said included.
     pub seconds: f64,
+    /// Of which writing down what's said in recordings and videos.
+    pub speech_seconds: f64,
     /// The folder can't be read (missing, or macOS privacy settings).
     pub unreadable: bool,
 }
@@ -29,13 +32,18 @@ pub fn estimate(config: &Config, folder: PathBuf) -> Estimate {
         bytes: 0,
         by_kind: BTreeMap::new(),
         seconds: 0.0,
+        speech_seconds: 0.0,
         unreadable: !crawled.unavailable.is_empty(),
     };
     for file in &crawled.found {
         estimate.bytes += file.size;
         *estimate.by_kind.entry(file.kind.as_str()).or_default() += 1;
         estimate.seconds += cost(file);
+        if file.speech() {
+            estimate.speech_seconds += speech(av::duration(&file.path));
+        }
     }
+    estimate.seconds += estimate.speech_seconds;
     estimate
 }
 

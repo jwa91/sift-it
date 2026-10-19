@@ -19,7 +19,8 @@ for id in 11 21 46 84 132 11024; do
 done
 export SIFT_IT_HOME=/tmp/demo-home              # an index of its own
 sift-it folders add /tmp/demo /tmp/demo-books
-sift-it index                                   # about 10 minutes
+sift-it config sources.ignore '["CREDITS.csv"]' # it describes every file, so it would answer the queries itself
+sift-it index                                   # about an hour, most of it writing down what the podcasts say
 sift-it eval docs/demo-queries.json
 ```
 
