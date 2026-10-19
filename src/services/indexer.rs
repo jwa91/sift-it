@@ -24,6 +24,7 @@ use crate::resources::{self, IngestPlan};
 use anyhow::{Context, Result, bail};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use protocol::{IndexerState, IndexerStatus};
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::fs::File;
 use std::os::fd::AsRawFd;
@@ -181,12 +182,19 @@ pub fn running_pid() -> Option<i32> {
     std::fs::read_to_string(lock_path()).ok()?.trim().parse().ok()
 }
 
-/// Whether the work in hand should make way: the indexer stops, pauses or syncs again, or config.json changed.
-fn interrupted(config_path: &Path, config_time: Option<SystemTime>) -> bool {
-    SHUTDOWN.load(Ordering::SeqCst)
-        || TOGGLE_PAUSE.load(Ordering::SeqCst)
-        || RESYNC.load(Ordering::SeqCst)
-        || modified(config_path) != config_time
+/// Whether the work in hand should make way: the indexer stops, pauses or syncs again, or config.json changed what it
+/// works by. `seen` is when config.json was last looked at, so a change that doesn't matter here is read only once.
+fn interrupted(config_path: &Path, seen: &Cell<Option<SystemTime>>, config: &Config) -> bool {
+    SHUTDOWN.load(Ordering::SeqCst) || TOGGLE_PAUSE.load(Ordering::SeqCst) || RESYNC.load(Ordering::SeqCst) || {
+        let time = modified(config_path);
+        time != seen.replace(time) && Config::load().is_ok_and(|new| !same_work(&new, config))
+    }
+}
+
+/// Whether two configs give the indexer the same work: `search` and `ranking` are the engine's, and `log` is read when
+/// the daemon starts.
+fn same_work(a: &Config, b: &Config) -> bool {
+    a.sources == b.sources && a.reading == b.reading && a.indexing == b.indexing
 }
 
 fn modified(path: &Path) -> Option<SystemTime> {
@@ -316,10 +324,12 @@ pub fn run() -> Result<()> {
     let mut compact_failed_at: Option<Instant> = None;
 
     while !SHUTDOWN.load(Ordering::SeqCst) {
-        // The config changed: watch the folders it names now, and sync it all (what's read, and how, may differ).
+        // The config changed: watch the folders it names now, and sync it all (what's read, and how, may differ). A
+        // change to search, ranking or the log is only taken in.
         if modified(&config_path) != config_time {
             config_time = modified(&config_path);
             match Config::load() {
+                Ok(new) if same_work(&new, &config) => config = new,
                 Ok(new) => {
                     config = new;
                     waiting_reason = None;
@@ -387,7 +397,8 @@ pub fn run() -> Result<()> {
                 if !crate::models::status(&config::models_dir()).media {
                     reporter.set(IndexerState::Waiting, Some("Waiting for the model to download".into()));
                 } else {
-                    let stop = || interrupted(&config_path, config_time);
+                    let seen = Cell::new(config_time);
+                    let stop = || interrupted(&config_path, &seen, &config);
                     let mut events = |event: Event| reporter.event(&event);
                     let mut take = || changes.take();
                     // Speech beside the reading, when memory allows both models.
@@ -447,8 +458,9 @@ pub fn run() -> Result<()> {
                 reporter.set(IndexerState::Transcribing, reporter.status.detail.clone());
                 // Between chunks it makes way for anything that changes in the folders (synced, and read first).
                 let arrived = std::cell::RefCell::new(Vec::new());
+                let seen = Cell::new(config_time);
                 let stop = || {
-                    if interrupted(&config_path, config_time) {
+                    if interrupted(&config_path, &seen, &config) {
                         return true;
                     }
                     while let Ok(event) = changes.receiver.try_recv() {

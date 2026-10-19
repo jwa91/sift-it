@@ -84,11 +84,18 @@ struct App {
     searching: bool,
     /// The query and filter whose results are in the list.
     answered: Option<(String, usize)>,
+    /// Whether the index has any files: what the list says before anything is typed.
+    indexed: bool,
 }
 
 impl App {
     fn selected(&self) -> Option<&Hit> {
         self.list.selected().and_then(|i| self.hits.get(i))
+    }
+
+    /// Whether there's a query: until there is, the list stays empty.
+    fn typed(&self) -> bool {
+        !self.query.trim().is_empty()
     }
 
     fn request(&self) -> Search {
@@ -121,7 +128,9 @@ fn run_app(terminal: &mut ratatui::DefaultTerminal, picker: Picker, initial: &st
     let model = Arc::new(Mutex::new(Model::Loading));
     let (search_tx, search_rx) = channel::<Search>();
     let (results_tx, results_rx) = channel::<(Search, Results)>();
-    let searching = spawn_searcher(Client::connect()?, search_rx, results_tx, model.clone());
+    let mut client = Client::connect()?;
+    let indexed = client.request::<protocol::Status>(protocol::Op::Status).is_ok_and(|status| status.stats.files > 0);
+    let searching = spawn_searcher(client, search_rx, results_tx, model.clone());
     let (preview_tx, preview_rx) = channel::<Hit>();
     let (previews_tx, previews_rx) = channel::<(i64, Preview)>();
     spawn_previewer(preview_rx, previews_tx)?;
@@ -136,10 +145,11 @@ fn run_app(terminal: &mut ratatui::DefaultTerminal, picker: Picker, initial: &st
         previews: HashMap::new(),
         requested: Default::default(),
         flash: None,
-        searching: true,
+        searching: false,
         answered: None,
+        indexed,
     };
-    search_tx.send(app.request())?;
+    search(&mut app, &search_tx)?;
 
     let outcome = (|| -> Result<Option<Place>> {
         loop {
@@ -179,10 +189,7 @@ fn run_app(terminal: &mut ratatui::DefaultTerminal, picker: Picker, initial: &st
             }
             match handle(&mut app, key) {
                 Action::None => {}
-                Action::Search => {
-                    app.searching = true;
-                    search_tx.send(app.request())?;
-                }
+                Action::Search => search(&mut app, &search_tx)?,
                 Action::Quit => return Ok(None),
                 Action::Open => return Ok(app.selected().map(Place::of)),
                 Action::Reveal => {
@@ -204,6 +211,20 @@ fn run_app(terminal: &mut ratatui::DefaultTerminal, picker: Picker, initial: &st
     drop(search_tx);
     let _ = searching.join();
     outcome
+}
+
+/// Asks for the query's results, or, with nothing typed, empties the list.
+fn search(app: &mut App, searcher: &Sender<Search>) -> Result<()> {
+    if app.typed() {
+        app.searching = true;
+        searcher.send(app.request())?;
+    } else {
+        app.searching = false;
+        app.answered = None;
+        app.hits.clear();
+        app.list.select(None);
+    }
+    Ok(())
 }
 
 enum Action {
@@ -342,7 +363,7 @@ fn spawn_searcher(
                 Err(_) => return,
             };
             let Ok(response) = client.search(&request) else { return };
-            answered_with_meaning = response.meaning || request.q.trim().is_empty();
+            answered_with_meaning = response.meaning;
             if results.send((request.clone(), response)).is_err() {
                 return;
             }
@@ -433,7 +454,6 @@ fn draw_query(frame: &mut Frame, app: &App, area: Rect) {
             " · exact words only (no model: sift-it model download)".to_string()
         }
         Model::Missing(error) => format!(" · exact words only ({})", error.chars().take(60).collect::<String>()),
-        Model::Ready | Model::Words if app.query.trim().is_empty() => " · recently changed".to_string(),
         Model::Ready => String::new(),
         Model::Words => " · by words".to_string(),
     };
@@ -453,8 +473,8 @@ fn draw_query(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_results(frame: &mut Frame, app: &mut App, area: Rect) {
-    let title = if app.query.trim().is_empty() {
-        " recent ".to_string()
+    let title = if !app.typed() {
+        String::new()
     } else if app.searching && app.hits.is_empty() {
         " searching… ".to_string()
     } else {
@@ -462,8 +482,10 @@ fn draw_results(frame: &mut Frame, app: &mut App, area: Rect) {
     };
     let block = Block::default().borders(Borders::ALL).border_style(Style::new().fg(Color::DarkGray)).title(title);
     if app.hits.is_empty() && !app.searching {
-        let message = if app.query.trim().is_empty() {
+        let message = if !app.indexed {
             "Nothing indexed yet: sift-it folders add <folder>"
+        } else if !app.typed() {
+            "Type what you're looking for: what's in it, or its exact words in quotes."
         } else {
             "Nothing stands out. Describe it differently, or check the words in quotes."
         };

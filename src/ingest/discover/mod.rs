@@ -5,7 +5,7 @@
 mod cost;
 pub mod crawl;
 
-pub use cost::cost;
+pub use cost::{cost, speech};
 
 use super::Event;
 use crate::config::Config;
