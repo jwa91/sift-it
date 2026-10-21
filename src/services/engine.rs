@@ -385,7 +385,116 @@ fn config_modified() -> Option<SystemTime> {
     std::fs::metadata(config::config_path()).and_then(|metadata| metadata.modified()).ok()
 }
 
-type Writer = Mutex<UnixStream>;
+/// The clients connected, for events to go to each.
+#[derive(Default)]
+struct Clients(Mutex<Vec<Weak<Connection>>>);
+
+impl Clients {
+    /// A new client's connection, with `ready` its first line. The state it tells and joining the list are one step,
+    /// under the list's lock, so no event falls between them.
+    fn join(&self, stream: UnixStream, ready: impl FnOnce() -> Event) -> Arc<Connection> {
+        let mut clients = self.0.lock().unwrap();
+        let connection = Arc::new(Connection::new(stream, ready()));
+        clients.push(Arc::downgrade(&connection));
+        let events = connection.clone();
+        std::thread::spawn(move || events.deliver());
+        connection
+    }
+
+    /// Passes an event on to every client. It waits on none of them: each client's events are written by a thread of
+    /// its own.
+    fn broadcast(&self, event: &Event) {
+        let mut clients = self.0.lock().unwrap();
+        clients.retain(|client| client.upgrade().is_some_and(|connection| connection.post(event)));
+    }
+}
+
+/// A client's connection. Replies are written by the thread that serves the client, and events by a thread of their
+/// own (`deliver`), so a client that doesn't read for a while (the finder's previewer reads only when it asks
+/// something) holds up no one but itself. Its events wait meanwhile, a newer one in the place of a waiting one of its
+/// kind: each says what a state is now, so what waits stays small however long the client doesn't read.
+struct Connection {
+    stream: Mutex<UnixStream>,
+    waiting: Mutex<Waiting>,
+    arrived: Condvar,
+}
+
+struct Waiting {
+    events: Vec<Event>,
+    /// The client went, or couldn't be written to: nothing more goes to it.
+    gone: bool,
+}
+
+impl Connection {
+    fn new(stream: UnixStream, ready: Event) -> Self {
+        let waiting = Waiting { events: vec![ready], gone: false };
+        Self { stream: Mutex::new(stream), waiting: Mutex::new(waiting), arrived: Condvar::new() }
+    }
+
+    /// Queues an event for the client. False once it's gone.
+    fn post(&self, event: &Event) -> bool {
+        let mut waiting = self.waiting.lock().unwrap();
+        if waiting.gone {
+            return false;
+        }
+        let kind = std::mem::discriminant(event);
+        match waiting.events.iter_mut().find(|older| std::mem::discriminant(*older) == kind) {
+            Some(older) => *older = event.clone(),
+            None => waiting.events.push(event.clone()),
+        }
+        self.arrived.notify_one();
+        true
+    }
+
+    /// Writes the events as they come, until the client is gone.
+    fn deliver(&self) {
+        loop {
+            {
+                let mut waiting = self.waiting.lock().unwrap();
+                while waiting.events.is_empty() && !waiting.gone {
+                    waiting = self.arrived.wait(waiting).unwrap();
+                }
+                if waiting.gone {
+                    return;
+                }
+            }
+            // The stream before the events: a reply written meanwhile took them along.
+            let mut stream = self.stream.lock().unwrap();
+            if !self.write_events(&mut stream) {
+                return;
+            }
+        }
+    }
+
+    /// Writes a reply, after the events that came before it.
+    fn reply(&self, message: &impl Serialize) -> bool {
+        let mut stream = self.stream.lock().unwrap();
+        self.write_events(&mut stream) && self.write(&mut stream, message)
+    }
+
+    fn write_events(&self, stream: &mut UnixStream) -> bool {
+        let events = std::mem::take(&mut self.waiting.lock().unwrap().events);
+        events.iter().all(|event| self.write(stream, event))
+    }
+
+    /// Writes a line in one go, so a reader never waits on half of one. A client that can't be written to is gone,
+    /// and its connection is shut, so the thread serving it stops reading too.
+    fn write(&self, stream: &mut UnixStream, message: &impl Serialize) -> bool {
+        let Ok(line) = serde_json::to_string(message) else { return false };
+        let written = stream.write_all(format!("{line}\n").as_bytes()).is_ok();
+        if !written {
+            let _ = stream.shutdown(std::net::Shutdown::Both);
+            self.close();
+        }
+        written
+    }
+
+    /// The client is gone: its events stop.
+    fn close(&self) {
+        self.waiting.lock().unwrap().gone = true;
+        self.arrived.notify_all();
+    }
+}
 
 /// A reply, as the JSON it goes out as.
 fn reply(reply: impl Serialize) -> Result<Value> {
@@ -395,12 +504,6 @@ fn reply(reply: impl Serialize) -> Result<Value> {
 /// The indexer's progress as it last wrote it, if it ever ran for this data folder.
 fn indexer_status() -> Option<IndexerStatus> {
     serde_json::from_slice(&std::fs::read(config::status_path()).ok()?).ok()
-}
-
-/// Writes a line in one go, so a reader never waits on half of one.
-fn send(writer: &Writer, message: &impl Serialize) -> bool {
-    let Ok(line) = serde_json::to_string(message) else { return false };
-    writer.lock().unwrap().write_all(format!("{line}\n").as_bytes()).is_ok()
 }
 
 /// `sift-it engine`: answers clients on the socket until a `stop` request. Exits at once when another engine already
@@ -421,13 +524,10 @@ pub fn run(index: &Path, models: &Path) -> Result<()> {
     std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))?;
     eprintln!("engine {} answering at {}", build(), socket.display());
 
-    let clients: Arc<Mutex<Vec<Weak<Writer>>>> = Arc::new(Mutex::new(Vec::new()));
+    let clients = Arc::new(Clients::default());
     let broadcast: Arc<dyn Fn(&Event) + Send + Sync> = {
         let clients = clients.clone();
-        Arc::new(move |event: &Event| {
-            let mut clients = clients.lock().unwrap();
-            clients.retain(|client| client.upgrade().is_some_and(|writer| send(&writer, event)));
-        })
+        Arc::new(move |event: &Event| clients.broadcast(event))
     };
     let _indexer = watch_indexer(broadcast.clone())?;
     let core = Core::new(index, models, Box::new(move |event| broadcast(event)))?;
@@ -457,23 +557,15 @@ fn watch_indexer(broadcast: Arc<dyn Fn(&Event) + Send + Sync>) -> Result<Recomme
     Ok(watcher)
 }
 
-fn serve_client(core: &Arc<Core>, stream: UnixStream, clients: &Mutex<Vec<Weak<Writer>>>) -> Result<()> {
-    let writer = Arc::new(Mutex::new(stream.try_clone()?));
-    {
-        // Ready goes first, and events only after it (they wait for the list): the client checks the build on it, and
-        // takes the state of meaning from it, then follows the events.
-        let mut clients = clients.lock().unwrap();
-        let ready = Event::Ready {
-            version: env!("CARGO_PKG_VERSION").into(),
-            build: build().into(),
-            index: core.index.display().to_string(),
-            meaning: core.meaning_state(),
-        };
-        if !send(&writer, &ready) {
-            return Ok(());
-        }
-        clients.push(Arc::downgrade(&writer));
-    }
+fn serve_client(core: &Arc<Core>, stream: UnixStream, clients: &Clients) -> Result<()> {
+    // Ready goes first, and events only after it: the client checks the build on it, and takes the state of meaning
+    // from it, then follows the events.
+    let connection = clients.join(stream.try_clone()?, || Event::Ready {
+        version: env!("CARGO_PKG_VERSION").into(),
+        build: build().into(),
+        index: core.index.display().to_string(),
+        meaning: core.meaning_state(),
+    });
     for line in BufReader::new(stream).lines() {
         let Ok(line) = line else { break };
         // The id first, so a request that doesn't read is answered as failed rather than not at all.
@@ -481,27 +573,28 @@ fn serve_client(core: &Arc<Core>, stream: UnixStream, clients: &Mutex<Vec<Weak<W
         let id = message.get("id").cloned().unwrap_or(Value::Null);
         let request = serde_json::from_value::<Request>(message).map_err(anyhow::Error::from);
         if let Ok(Request { op: Op::Stop, .. }) = request {
-            stop(core, &writer, id);
+            stop(core, &connection, id);
         }
         let mut reply = request
             .and_then(|request| core.handle(&request.op))
             .unwrap_or_else(|error| serde_json::to_value(Failure::new(format!("{error:#}"))).unwrap_or_default());
         reply["id"] = id;
-        if !send(&writer, &reply) {
+        if !connection.reply(&reply) {
             break;
         }
     }
+    connection.close();
     Ok(())
 }
 
 /// Stops the engine: the model goes before the process does (llama.cpp aborts when its Metal device is freed under a
 /// model), and the socket with it.
-fn stop(core: &Arc<Core>, writer: &Writer, id: Value) -> ! {
+fn stop(core: &Arc<Core>, connection: &Connection, id: Value) -> ! {
     core.unload();
     let _ = std::fs::remove_file(socket_path());
     let mut done = serde_json::to_value(Done::OK).unwrap_or_default();
     done["id"] = id;
-    send(writer, &done);
+    connection.reply(&done);
     eprintln!("engine stopped");
     std::process::exit(0)
 }
@@ -512,6 +605,84 @@ mod tests {
     use crate::index::Writer;
     use crate::index::testing::add;
     use protocol::Kind;
+    use std::time::{Duration, Instant};
+
+    fn ready() -> Event {
+        Event::Ready {
+            version: "0".into(),
+            build: "0+test".into(),
+            index: "index".into(),
+            meaning: MeaningState::Unloaded,
+        }
+    }
+
+    fn progress(done: usize) -> Event {
+        Event::Indexer(IndexerStatus { done, total: 10_000, ..Default::default() })
+    }
+
+    /// The client's end of a connection, giving up on a line after a while rather than waiting forever.
+    fn client_end(stream: UnixStream) -> BufReader<UnixStream> {
+        stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        BufReader::new(stream)
+    }
+
+    fn line(reader: &mut BufReader<UnixStream>) -> Value {
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        serde_json::from_str(&line).unwrap()
+    }
+
+    #[test]
+    fn a_client_that_doesnt_read_holds_up_no_one() {
+        let clients = Arc::new(Clients::default());
+        let (engine_end, idle) = UnixStream::pair().unwrap();
+        let idle_connection = clients.join(engine_end, ready);
+        let (engine_end, reading) = UnixStream::pair().unwrap();
+        let _reading_connection = clients.join(engine_end, ready);
+
+        // Far more progress than a socket holds, and neither client reads meanwhile: the broadcasts don't wait.
+        let (finished, broadcasts) = std::sync::mpsc::channel();
+        let broadcaster = clients.clone();
+        std::thread::spawn(move || {
+            for done in 0..10_000 {
+                broadcaster.broadcast(&progress(done));
+            }
+            finished.send(()).unwrap();
+        });
+        broadcasts.recv_timeout(Duration::from_secs(10)).expect("a broadcast waited on a client that doesn't read");
+        // What waits for a client is the newest of each kind, not all of it.
+        assert!(idle_connection.waiting.lock().unwrap().events.len() <= 2);
+
+        // Each client, reading at last, gets ready first and ends at the latest progress.
+        for client in [reading, idle] {
+            let mut client = client_end(client);
+            assert_eq!(line(&mut client)["event"], "ready");
+            while line(&mut client)["done"] != 9_999 {}
+        }
+    }
+
+    #[test]
+    fn events_go_before_the_reply_after_them_and_a_client_that_went_leaves() {
+        let clients = Clients::default();
+        let (engine_end, client) = UnixStream::pair().unwrap();
+        let connection = clients.join(engine_end, ready);
+        clients.broadcast(&Event::Meaning { state: MeaningState::Loading, error: None });
+        assert!(connection.reply(&serde_json::json!({"id": 1, "ok": true})));
+        let mut client = client_end(client);
+        assert_eq!(line(&mut client)["event"], "ready");
+        assert_eq!(line(&mut client)["state"], "loading");
+        assert_eq!(line(&mut client)["id"], 1);
+
+        // Its events stop once writing to it fails, and the next broadcast drops it.
+        drop(client);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !clients.0.lock().unwrap().is_empty() {
+            assert!(Instant::now() < deadline, "a client that went stayed on the list");
+            clients.broadcast(&progress(0));
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!connection.reply(&serde_json::json!({"id": 2, "ok": true})));
+    }
 
     #[test]
     fn a_deep_data_folder_is_reached_through_a_short_link() {

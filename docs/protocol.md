@@ -151,6 +151,9 @@ Ends `sift-it serve` once the requests before it are answered: `{"id": 10, "ok":
 - `config`: config.json can't be read; the settings stay as they were.
 - `indexer`: the background indexer's progress changed (IndexerStatus, below).
 
+Each event says what a state is now. A client that doesn't read for a while holds up no other: its events wait for
+it, only the newest of each kind, and go before any reply that comes after them.
+
 ## Types
 
 **Hit:** a file found, and where in it.
