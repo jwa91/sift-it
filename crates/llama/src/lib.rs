@@ -103,17 +103,26 @@ unsafe extern "C" fn log_callback(level: ll::ggml_log_level, text: *const c_char
     }
 }
 
-/// Tells ggml's Metal backend, before it starts, to keep no buffers resident between calls. Its residency sets keep
-/// the model's memory wired for three minutes after the last call, renewed by a thread that wakes every 5 ms for as
-/// long as the process lives, idle or not. Without them, Metal makes memory resident for the calls that use it, and
-/// embedding is as fast (docs/design.md). The backend reads this from the environment, which processes this one starts
-/// inherit: the speech helper's ggml has the same residency sets.
+/// Sets the environment llama.cpp wants, first thing, while nothing else runs. A variable added while another thread
+/// starts a process can hand that process an environment that was just freed (macOS's libc reallocates the list), and
+/// it doesn't start: "Bad address" (EFAULT). textutil failed that way now and then.
+/// - GGML_METAL_NO_RESIDENCY: ggml's Metal backend keeps no buffers resident between calls. Its residency sets keep the
+///   model's memory wired for three minutes after the last call, renewed by a thread that wakes every 5 ms for as long
+///   as the process lives, idle or not. Without them, Metal makes memory resident for the calls that use it, and
+///   embedding is as fast (docs/design.md). Processes this one starts inherit it: the speech helper's ggml has the same
+///   residency sets.
+/// - AGX_RELAX_CDM_CTXSTORE_TIMEOUT=1: the Metal backend sets it itself when it registers, at the first model load,
+///   while the indexer's readers start textutil. Set here, that later setenv rewrites the same value in place, and
+///   nothing is freed. `make selftest` fails if loading the models changes the environment any further.
 ///
 /// # Safety
 ///
-/// It sets an environment variable: no other thread may be running.
-pub unsafe fn without_residency() {
-    unsafe { std::env::set_var("GGML_METAL_NO_RESIDENCY", "1") };
+/// No other thread may be running.
+pub unsafe fn set_environment() {
+    unsafe {
+        std::env::set_var("GGML_METAL_NO_RESIDENCY", "1");
+        std::env::set_var("AGX_RELAX_CDM_CTXSTORE_TIMEOUT", "1");
+    }
 }
 
 fn init_backend() {

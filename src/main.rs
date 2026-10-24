@@ -179,7 +179,7 @@ enum ModelAction {
 
 fn main() {
     // Safety: nothing else runs yet.
-    unsafe { embedder::without_residency() };
+    unsafe { embedder::set_environment() };
     if let Err(error) = run(Cli::parse()) {
         eprintln!("sift-it: {error:#}");
         std::process::exit(1);
