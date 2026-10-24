@@ -43,7 +43,7 @@ if [[ "$built" != "$version" ]]; then
 fi
 
 # Sign and notarize: a release always is; a snapshot (CI's, or a dry run) isn't. sift-it-transcribe, the speech helper,
-# goes beside sift-it: transcribe.cpp brings its own ggml, so it can't share sift-it's binary.
+# goes beside sift-it: it's Swift (FluidAudio, on the Neural Engine), built by `make build` too.
 cp target/release/sift-it target/release/sift-it-transcribe "$stage/"
 if $snapshot; then
   echo "snapshot: not signed"

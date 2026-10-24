@@ -9,8 +9,9 @@
 #   scripts/codesign.sh <binary>...   sign them, and notarize them in one submission
 #   scripts/codesign.sh --check       check that this Mac can (make release runs it before building)
 #
-# Hardened runtime needs no entitlements: llama.cpp and transcribe.cpp compile their Metal shaders at run time from
-# source embedded in the binary, which hardened runtime allows.
+# Hardened runtime needs no entitlements: llama.cpp compiles its Metal shaders at run time from source embedded in the
+# binary, and Core ML compiles the speech model for the Neural Engine into a cache of its own, which hardened runtime
+# both allows.
 set -euo pipefail
 
 profile="${SIFT_IT_NOTARY_PROFILE:-notarytool}"

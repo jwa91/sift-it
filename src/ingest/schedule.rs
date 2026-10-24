@@ -273,6 +273,11 @@ impl Indexer {
             Message::Done(id, result) => {
                 self.flush(files)?;
                 files.end(id, result, &mut self.index, on_event)?;
+                let row = &known[&id];
+                if row.speech {
+                    // What's written down of it stayed while it was read again: it's embedded again if need be.
+                    self.embed_transcript(row)?;
+                }
             }
         }
         Ok(())

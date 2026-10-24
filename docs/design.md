@@ -25,18 +25,23 @@ list would no longer be comparable.
 
 ## The models
 
-Three model files, 1.6 GB together: EmbeddingGemma 2's text model (310 MB) and its vision and audio encoders
-(555 MB, one file), and Parakeet Ultra for speech (740 MB).
+Three models, 1.5 GB together: EmbeddingGemma 2's text model (310 MB) and its vision and audio encoders (555 MB, one
+file), both GGUF files, and Parakeet Ultra for speech (632 MB): FluidInference's conversion for Core ML, with an int8
+encoder, which is four compiled Core ML models and a vocabulary.
 
 - **Stored once.** They're kept in the Hugging Face cache that other apps share (`$HF_HUB_CACHE`, else
-  `$HF_HOME/hub`, else `~/.cache/huggingface/hub`), in its layout. The hub names a file's blob after its SHA-256, so a
-  file is there when any repository's folder in the cache holds a whole blob of that name, whichever app or revision
-  put it there: Handy's copy of the speech model serves sift-it too. What's missing is downloaded at a pinned
-  revision and checked against its hash before it gets that name. sift-it only adds what's missing to the cache and
-  never removes anything, and uninstalling it leaves the files there for the other apps.
-- **Loaded once.** llama.cpp and transcribe.cpp map the weights from their files and Metal uses them in place, so the
-  engine and the indexer share the text model's pages, and macOS can drop them when memory runs short and read them
-  again. Only the vision and audio encoders are read into memory of their own: llama.cpp's mtmd copies them.
+  `$HF_HOME/hub`, else `~/.cache/huggingface/hub`), in its layout. The hub names a file's blob after its content: the
+  SHA-256 of a file it keeps in LFS, else its git blob id. So a model of one file is there when any repository's folder
+  in the cache holds a whole blob of that name, whichever app or revision put it there. The speech model is a folder:
+  it's there when its revision's folder in its repository holds each of its files whole, since that folder is what
+  Core ML loads (compiled models load through the cache's links as they are). Handy's GGUF of Parakeet Ultra served
+  sift-it while it ran transcribe.cpp, and doesn't any more. What's missing is downloaded at a pinned revision and
+  checked against its hash before it gets that name. sift-it only adds what's missing to the cache and never removes
+  anything, and uninstalling it leaves the files there for the other apps.
+- **Loaded once.** llama.cpp maps the weights from their files and Metal uses them in place, so the engine and the
+  indexer share the text model's pages, and macOS can drop them when memory runs short and read them again. Only the
+  vision and audio encoders are read into memory of their own: llama.cpp's mtmd copies them. Core ML gives the Neural
+  Engine a copy of the speech model (607 MB), which macOS counts to the speech helper but not in its footprint.
 - **Only what a step needs.** A search by meaning loads the text model, with a context made for one query. The
   indexer loads the text model for text, the vision encoder while it reads pictures and video frames, the audio
   encoder while it reads sound, and the speech helper while it writes down what's said. Both encoders are in one file,
@@ -52,16 +57,17 @@ mapped model files come on top, as file pages in memory, counted once however ma
 - The indexer holds 338 MB while it reads text, 544 MB while it reads photos, 601 MB while it reads music, and 877 MB
   while it reads videos, which take both encoders. The vision encoder holds 289 MB and loads in 51 ms; the audio
   encoder holds 321 MB and loads in 69 ms (`sift-it bench-embed`, the file in memory).
-- While speech is written down with the models taking turns, the indexer holds 360 MB and the speech helper 330 MB.
+- While speech is written down with the models taking turns, the indexer holds 360 MB and the speech helper 110 MB,
+  and the Neural Engine 607 MB for it.
 - The engine and the indexer reading text at once hold 500 MB together.
 - ggml's Metal backend keeps its buffers resident for three minutes after each call (residency sets, macOS 15 and
-  later), renewed by a thread that wakes every 5 ms for as long as the process lives, idle or not: 174 times a second
-  in an idle engine. In the engine, one search by meaning kept about 330 MB of the GPU's memory wired for three
-  minutes. sift-it turns them off (`GGML_METAL_NO_RESIDENCY`, which the speech helper inherits): Metal makes memory
-  resident for the calls that use it, nothing stays wired between calls, and the idle engine doesn't wake. Embedding
-  is as fast, within the noise of three rounds of `sift-it bench-embed` (medians, without and with): a query 10.7 and
-  11.9 ms, 44 and 45 passages a second, 30 s of sound 309 and 318 ms. A shorter keep-alive
-  (`GGML_METAL_RESIDENCY_KEEP_ALIVE_S`) would let the memory go sooner, but the thread would keep waking.
+  later), renewed by a thread that wakes every 5 ms for as long as the process lives, idle or not: 174 times a second in
+  an idle engine. In the engine, one search by meaning kept about 330 MB of the GPU's memory wired for three minutes.
+  sift-it turns them off (`GGML_METAL_NO_RESIDENCY`): Metal makes memory resident for the calls that use it, nothing
+  stays wired between calls, and the idle engine doesn't wake. Embedding is as fast, within the noise of three rounds of
+  `sift-it bench-embed` (medians, without and with): a query 10.7 and 11.9 ms, 44 and 45 passages a second, 30 s of
+  sound 309 and 318 ms. A shorter keep-alive (`GGML_METAL_RESIDENCY_KEEP_ALIVE_S`) would let the memory go sooner, but
+  the thread would keep waking.
 - The environment llama.cpp wants is set first thing, while one thread runs (`embedder::set_environment`).
   - **What's set:** the residency switch above, and AGX_RELAX_CDM_CTXSTORE_TIMEOUT=1, which ggml's Metal backend adds
     itself when it registers.
@@ -81,12 +87,12 @@ Every vector it writes is f32, and what it produces never depends on the Mac it 
 - how many workers read files at once, each holding decoded media
 - whether the embedding model and the speech helper run side by side or one after the other
 
-At `auto` it's a quarter of the Mac's memory. Side by side takes both models, about 1.2 and 1 GB with their mapped
-model files, and two readers. When the budget holds that, embedding and transcription run together: a thread hands the
-speech helper the recordings already read, and the embedding thread embeds and stores what comes back between files.
-With less, the models take turns, and what's said is written down once everything else is read, beside the text model
-alone. Reading takes at most a third of the cores, two to four files at once, and a small budget makes that fewer, down
-to one. The vectors are the same either way.
+At `auto` it's a quarter of the Mac's memory. Side by side takes both models, about 1.2 and 0.75 GB (the text model's
+mapped file, and the Neural Engine's copy of the speech model), and two readers. When the budget holds that, embedding
+and transcription run together: a thread hands the speech helper the recordings already read, and the embedding thread
+embeds and stores what comes back between files. With less, the models take turns, and what's said is written down once
+everything else is read, beside the text model alone. Reading takes at most a third of the cores, two to four files at
+once, and a small budget makes that fewer, down to one. The vectors are the same either way.
 
 Measured:
 
@@ -94,12 +100,49 @@ Measured:
   batches of 2,048, 4,096 and 8,192 tokens, with the same footprint. So it isn't part of the budget, and stays at
   2,048 tokens (an image takes 1,120). Whether a bigger GPU gains from bigger batches,
   `SIFT_IT_BATCH_TOKENS=4096 sift-it bench-embed` shows.
-- The speech helper peaks at 330 MB with a three-minute stretch, which takes it 12 s, and maps its model's 706 MB.
+- The speech helper holds 100 to 120 MB of its own while it writes down a three-minute stretch, which takes it under a
+  second ([Speech](#speech)).
+- Side by side is the faster: three podcasts and four videos (124 minutes of sound) are indexed in 138 s, against 154 s
+  with the models taking turns. The reading beside speech takes 128 s, against 120 s alone, since speech has the
+  Neural Engine and only its passages wait for the GPU. Beside transcribe.cpp, which shared the GPU, the reading took
+  158 s, and the whole 224 s, against 240 s taking turns.
 - Two readers index the testbed in 20 s, one in 29 s, at the same peak: what a reader decodes is small next to the
   model. The budget reckons with 128 MB a reader.
 
 The indexer follows the folders with FSEvents and makes a full sync now and then. It waits for a charger (when
 `indexing.on_battery` is off) and out of Low Power Mode, and lets the model go when there's nothing to do.
+
+### Speech
+
+What's said is written down by Parakeet Ultra on the Neural Engine, through FluidAudio (Core ML), in the speech
+helper. FluidAudio decodes a chunk of about three minutes in 15-second windows, each starting with the end of the one
+before (an 80 ms mel prefix, its `melChunkContext`), rather than at a silence nearby. The helper hands over each word
+with its time, and a passage ends with the first sentence that brings it to 160 characters, or where a pause of more
+than 4 s comes: 92% of the passages end with a sentence, where half of transcribe.cpp's 28-second windows did.
+
+Measured on an M5 with 24 GB, against transcribe.cpp 0.4.1 on the GPU with the same model:
+
+- **Speed:** in the indexer, its passages embedded, about 220 times as fast as the sound plays: three podcasts and
+  four videos (124 minutes) in 34 s, against 118 s (63 times). On its own, 235 to 286 times, against 83 to 93.
+- **Energy:** 116 J an hour of sound, on battery, against 553 J.
+- **Memory:** 100 to 120 MB of its own, plus the Neural Engine's copy of the model, 607 MB, and the 32 MB it maps of
+  what Core ML compiled for the Neural Engine. That copy doesn't show in its footprint: `footprint` lists it apart, as
+  "owned physical footprint (neural)", and proc_pid_rusage as `ri_neural_footprint`. The first time a Mac loads the
+  model, the Neural Engine compiles it (about 8 s), and Core ML keeps that in `~/Library/Caches/sift-it-transcribe`.
+- **Accuracy:** on FLEURS Dutch (read sentences, with human transcripts) 5.65 to 5.67% WER, against 5.49% (5.46%
+  published). On Dutch conversation (two NOS "De Dag" episodes), about 0.2 points of WER behind: 12 clear errors in 60
+  judged spans, against 10, and 19 without the mel prefix. On the demo's English podcasts and videos, the two differ
+  in 5.8% of the words: fillers, small words, and how a number is written.
+- **Numbers** come out as the model learned to write them, in either engine: most as digits (years, prices, times,
+  "1,500", "3,5 procent", "12 maart 2024"), small counts and ordinals often as words ("two tickets", "tien jaar",
+  "derde"). Where one engine writes "15" and the other "fifteen", the model's choice tipped the other way, in Dutch
+  as in English. FluidAudio's inverse text normalization (NeMo's) isn't used: it has no Dutch, and in English it also
+  writes "one of the" as "1 of the", and "at six and eight thirty" as "at 44".
+- **The Neural Engine is shared** with Vision's OCR, which the reading uses for screenshots and scans (171 MB of the
+  Neural Engine's memory, in the indexer). The two run at once without failing: 1,086 screenshots read beside speech
+  (362 in the indexer, at `auto`, and 724 beside a helper writing down the demo's 30 podcasts without a pause), none
+  failed, and the helper wrote down 469 chunks without an error. They do slow each other, OCR more than speech:
+  0.53 s a screenshot alone, 1.17 s beside speech, while speech keeps about 200 times its sound's speed.
 
 ## The vector store
 
@@ -228,7 +271,10 @@ The index stores, per file, a fingerprint of how it was read: its reader's versi
 uses, as the cascade resolves them for that file. A sync compares it like the size and the modified time, so a change
 queues exactly the files it affects, wherever in the cascade it was made. Whether speech is written down stays out of
 it: that comes after reading, so moving between `meaning` and `speech` adds or drops transcripts without reading a
-file again. `embedder::VECTOR_SOURCE` and `speech::source` cover the models: another model reads everything again.
+file again. Two more records cover the models, and each brings back only what it covers. `embedder::VECTOR_SOURCE`
+covers every vector: another embedding model reads every file again, and embeds what's written down of recordings as
+it was written down, without writing it down again. `speech::SOURCE` covers what's written down: another speech
+model writes down every recording again, and nothing else.
 
 ### The cascade
 
@@ -445,5 +491,3 @@ segments keeps the built-in values, and `sift-it status` shows what was measured
 - How a word found only in metadata counts when the query has a number, which makes the words decide. "beach 2017"
   belongs in the eval set.
 - Whether 10% of memory is the right default search budget.
-- Whether running side by side is faster overall where both models share the GPU: the time to index a folder of
-  recordings with `indexing.memory_mb` at 2048 and at 6144 tells.

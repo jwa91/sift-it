@@ -463,8 +463,8 @@ impl Writer {
     }
 
     /// Writes a part of a big file's segments while the rest is still being read, so memory doesn't grow with the
-    /// file, and a search finds that part meanwhile. The `first` part clears what an earlier read left. Nothing is
-    /// written (false) when the file left the index or changed since it was handed out.
+    /// file, and a search finds that part meanwhile. The `first` part clears what an earlier read left (delete_read).
+    /// Nothing is written (false) when the file left the index or changed since it was handed out.
     pub fn write_part(&mut self, row: &FileRow, segments: &[NewSegment], first: bool) -> Result<bool> {
         let folder = self.vectors_folder();
         let tx = self.reader.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -472,7 +472,7 @@ impl Writer {
             return Ok(false);
         }
         if first {
-            delete_segments(&tx, row.id)?;
+            delete_read(&tx, row.id)?;
         }
         insert_segments(&tx, &folder, row, &name_words(&row.path), segments)?;
         tx.commit()?;
@@ -519,7 +519,7 @@ impl Writer {
         }
         let name = file_words(&row.path, info);
         if !parts {
-            delete_segments(&tx, row.id)?;
+            delete_read(&tx, row.id)?;
         } else if name != name_words(&row.path) {
             // The parts went in by the file's name alone: now its tags are known, they're found by those too.
             rename_words(&tx, row.id, &name)?;
@@ -529,6 +529,11 @@ impl Writer {
         if segments.is_empty() && !parts {
             let empty = NewSegment { segment: Segment::Passage, loc: None, loc_end: None, text: None, vector: None };
             insert_segments(&tx, &folder, row, &name, &[empty])?;
+        }
+        let mut info = info.clone();
+        let spoken = speech_count(&tx, row.id)?;
+        if spoken > 0 {
+            info["speech"] = spoken.into();
         }
         tx.execute(
             "UPDATE files SET state = ?2, error = ?3, info = ?4, indexed_at = ?5 WHERE id = ?1",
@@ -571,11 +576,7 @@ impl Writer {
             }
         }
         insert_segments(&tx, &folder, row, &file_words(&row.path, &info), passages)?;
-        let spoken: i64 =
-            tx.query_row("SELECT COUNT(*) FROM segments WHERE file_id = ?1 AND segment = 'speech'", [row.id], |r| {
-                r.get(0)
-            })?;
-        info["speech"] = serde_json::json!(spoken);
+        info["speech"] = speech_count(&tx, row.id)?.into();
         tx.execute(
             "UPDATE files SET transcript = ?2, info = ?3 WHERE id = ?1",
             params![row.id, progress, info.to_string()],
@@ -597,9 +598,9 @@ impl Writer {
     }
 
     /// Makes sure the index's vectors come from the pipeline that makes new ones (`source`, see
-    /// embedder::VECTOR_SOURCE). When they don't, every file is queued again; true then.
+    /// embedder::VECTOR_SOURCE). When they don't, every file is queued again (requeue_vectors); true then.
     pub fn adopt_vector_source(&self, source: &str) -> Result<bool> {
-        self.adopt("vector_source", source, || self.requeue_all())
+        self.adopt("vector_source", source, || self.requeue_vectors())
     }
 
     /// Records the `source` under `key`, after `reset` when another one was recorded. True then.
@@ -626,17 +627,50 @@ impl Writer {
         )?)
     }
 
-    /// Drops every vector and queues every file again (after a change of model or pipeline). The vector files go with
-    /// the next tidy_vectors.
-    pub fn requeue_all(&self) -> Result<()> {
+    /// Drops every vector and queues every file to be read again (after a change of model or pipeline). What's
+    /// written down of recordings stays, as it was cut into passages: they lose their vectors, and get new ones when
+    /// their file has been read (transcript_to_embed). The vector files go with the next tidy_vectors.
+    pub fn requeue_vectors(&self) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
         tx.execute_batch(
-            "INSERT INTO words (words) VALUES ('delete-all'); DELETE FROM segments;
-             UPDATE files SET state = 'pending', error = NULL, info = NULL, indexed_at = NULL, transcript = NULL;",
+            "DELETE FROM words WHERE rowid IN (SELECT id FROM segments WHERE segment != 'speech');
+             DELETE FROM segments WHERE segment != 'speech';
+             UPDATE segments SET partition = NULL, row = NULL;
+             UPDATE files SET state = 'pending', error = NULL, indexed_at = NULL;",
         )?;
         vectors::clear(&tx)?;
         tx.commit()?;
         Ok(())
+    }
+
+    /// The passages written down of a file, when some have no vector (they lost it in requeue_vectors, or embedding
+    /// them failed), with how far writing it down got (`transcript`): to embed them and store them again
+    /// (add_transcript, from 0).
+    pub fn transcript_to_embed(&self, file_id: i64) -> Result<Option<(String, Vec<NewSegment>)>> {
+        let progress: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT transcript FROM files WHERE id = ?1 AND transcript IS NOT NULL AND EXISTS
+                     (SELECT 1 FROM segments WHERE file_id = ?1 AND segment = 'speech' AND row IS NULL)",
+                [file_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(progress) = progress else { return Ok(None) };
+        let passages = self
+            .conn
+            .prepare("SELECT loc, loc_end, text FROM segments WHERE file_id = ?1 AND segment = 'speech' ORDER BY loc")?
+            .query_map([file_id], |r| {
+                Ok(NewSegment {
+                    segment: Segment::Speech,
+                    loc: r.get(0)?,
+                    loc_end: r.get(1)?,
+                    text: r.get(2)?,
+                    vector: None,
+                })
+            })?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(Some((progress, passages)))
     }
 
     /// Writes the next generation of the partitions that are due one (vectors::compact), for when the indexer is idle.
@@ -683,6 +717,24 @@ fn delete_segments(conn: &Connection, file_id: i64) -> Result<()> {
     conn.execute("DELETE FROM words WHERE rowid IN (SELECT id FROM segments WHERE file_id = ?1)", [file_id])?;
     conn.execute("DELETE FROM segments WHERE file_id = ?1", [file_id])?;
     Ok(())
+}
+
+/// Drops what reading a file wrote: all but what's written down of what's said in it, which doesn't depend on how it's
+/// read (a file that changed is queued again, and loses that too).
+fn delete_read(conn: &Connection, file_id: i64) -> Result<()> {
+    conn.execute(
+        "DELETE FROM words WHERE rowid IN (SELECT id FROM segments WHERE file_id = ?1 AND segment != 'speech')",
+        [file_id],
+    )?;
+    conn.execute("DELETE FROM segments WHERE file_id = ?1 AND segment != 'speech'", [file_id])?;
+    Ok(())
+}
+
+/// How many passages are written down of what's said in a file.
+fn speech_count(conn: &Connection, file_id: i64) -> Result<i64> {
+    Ok(conn.query_row("SELECT COUNT(*) FROM segments WHERE file_id = ?1 AND segment = 'speech'", [file_id], |r| {
+        r.get(0)
+    })?)
 }
 
 /// Drops what's written down of what's said in a file.
@@ -853,6 +905,48 @@ mod tests {
     }
 
     #[test]
+    fn another_model_embeds_what_is_written_down_again_without_writing_it_down_again() {
+        use crate::index::testing::unit;
+        let index = TempIndex::new("speech");
+        let mut store = Writer::open(&index.path).unwrap();
+        let recording = NewFile { speech: true, ..file("/a/memo.m4a", Kind::Audio) };
+        let id = store.queue(&recording, None, 0.0).unwrap();
+        let job = store.pending().unwrap().remove(0);
+        let sound =
+            NewSegment { segment: Segment::Sound, loc: Some(0.0), loc_end: None, text: None, vector: Some(unit(1)) };
+        assert!(store.finish_file(&job, &[sound.clone()], &serde_json::json!({}), false).unwrap());
+        let said = |text: &str, vector| NewSegment {
+            segment: Segment::Speech,
+            loc: Some(1.0),
+            loc_end: Some(4.0),
+            text: Some(text.into()),
+            vector,
+        };
+        assert!(store.add_transcript(&job, 0.0, &[said("buy milk", Some(unit(2)))], None, "done").unwrap());
+        assert_eq!(store.transcript_to_embed(id).unwrap().map(|(progress, _)| progress), None);
+
+        // Another model: every file is read again, and what's said keeps its words, without a vector.
+        store.requeue_vectors().unwrap();
+        assert_eq!(texts(&store, id), ["buy milk"]);
+        assert!(stored(&store, id).is_empty());
+        let job = store.pending().unwrap().remove(0);
+        assert!(store.finish_file(&job, &[sound], &serde_json::json!({}), false).unwrap());
+        assert_eq!(texts(&store, id), ["buy milk", ""]);
+        let (progress, passages) = store.transcript_to_embed(id).unwrap().unwrap();
+        assert_eq!((progress.as_str(), passages[0].text.as_deref()), ("done", Some("buy milk")));
+        assert!(store.next_transcript().unwrap().is_none());
+
+        // Embedded again, it's whole: no file waits to be written down.
+        let passages: Vec<NewSegment> =
+            passages.into_iter().map(|p| NewSegment { vector: Some(unit(3)), ..p }).collect();
+        assert!(store.add_transcript(&job, 0.0, &passages, None, &progress).unwrap());
+        assert_eq!(stored(&store, id), [unit(1), unit(3)]);
+        assert_eq!(store.transcript_to_embed(id).unwrap().map(|(progress, _)| progress), None);
+        let info: String = store.conn.query_row("SELECT info FROM files WHERE id = ?1", [id], |r| r.get(0)).unwrap();
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&info).unwrap()["speech"], 1);
+    }
+
+    #[test]
     fn an_index_of_another_version_is_made_again() {
         let index = TempIndex::new("version");
         let store = Writer::open(&index.path).unwrap();
@@ -933,7 +1027,7 @@ mod tests {
         assert_eq!(files(&store), names);
 
         // Everything again: the partitions start over, and their files go.
-        store.requeue_all().unwrap();
+        store.requeue_vectors().unwrap();
         store.tidy_vectors().unwrap();
         assert_eq!((partition(&store, "main").generation, partition(&store, "main").rows), (3, 0));
         assert!(files(&store).is_empty());

@@ -396,7 +396,7 @@ fn index(json: bool, reindex: bool) -> Result<()> {
     }
     let index = index::Writer::open(&config::index_path())?;
     if reindex {
-        index.requeue_all()?;
+        index.requeue_vectors()?;
     }
     let mut indexer = ingest::Indexer::new(index)?;
     let mut report = |event: ingest::Event| {

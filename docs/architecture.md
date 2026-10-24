@@ -75,8 +75,9 @@ adapters    index (SQLite and vector files) · embedder (llama.cpp) · transcrib
 
 - **Engine:** the query path and the control plane, behind the protocol, in a LaunchAgent of its own.
 - **Indexer:** the ingest path, in a LaunchAgent of its own, so a crash in a reader can't take search down.
-- **Speech helper:** a process of its own because transcribe.cpp brings its own ggml. To the domain it's just a
-  transcriber.
+- **Speech helper:** a process of its own, because it's Swift (FluidAudio runs the speech model on the Neural Engine
+  through Core ML), and because it gives all of its memory back when there's nothing to write down. To the domain it's
+  just a transcriber: sound in, words with their times out.
 
 ## Kind is a filter, not the structure
 
@@ -85,9 +86,9 @@ container: frames (the picture logic), a sound track (the sound logic), and what
 text and page images, a screenshot a picture and its text. So extracting is per container format, and segmenting and
 preparing are per content type; an extractor combines them. The picture logic exists once, also when a video uses it.
 
-Speech is an extractor too: sound in, text with times out. A slow one, so the scheduler runs it on its own lane. What
-it yields is segmented and embedded like everything else, and "beside the reading or after it" is the scheduler's
-choice rather than code of its own.
+Speech is an extractor too: sound in, words with times out, which the speech segmenter cuts into passages. A slow one,
+so the scheduler runs it on its own lane. What it yields is segmented and embedded like everything else, and "beside the
+reading or after it" is the scheduler's choice rather than code of its own.
 
 ## Concrete parts
 
@@ -103,7 +104,7 @@ Module boundaries first, with the rule that dependencies point inward. A crate o
 - **`sift-it-protocol`:** shared with every client, small, no heavy dependencies.
 - **`sift-it-llama`:** the embedder's adapter, with llama.cpp's native build and bindings, built apart so it doesn't
   slow down every other build.
-- **`sift-it-transcribe`:** the speech helper, a binary of its own (`transcribe/`).
+- **`transcribe/`:** the speech helper, `sift-it-transcribe`: a Swift package beside the crates, a binary of its own.
 
 There is one `sift-it` binary: the CLI, with the services as its subcommands. Front ends talk to the engine through
 the protocol, not by linking code.
@@ -145,7 +146,7 @@ src/
 crates/
   protocol/              sift-it-protocol
   llama/                 sift-it-llama: the embedding model and its picture sizing, used as `embedder`
-transcribe/              sift-it-transcribe
+transcribe/              sift-it-transcribe, in Swift
 ```
 
 Watching the folders is the indexer service's: FSEvents, settled for a moment, is platform wiring, bound to its loop

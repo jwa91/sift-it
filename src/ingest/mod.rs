@@ -9,7 +9,7 @@
 //! - schedule (schedule.rs): what's read first, how many files at once (resources::IngestPlan), and the run that joins
 //!   the stages.
 //! - listen (listen.rs): what's said in recordings and videos, written down on a lane of its own, beside the reading
-//!   when memory allows, else after it. Speech is an extractor too (extract/speech.rs): sound in, sentences with their
+//!   when memory allows, else after it. Speech is an extractor too (extract/speech.rs): sound in, words with their
 //!   times out, cut into passages and embedded like any text.
 //!
 //! The Indexer holds the index's writer and the model, for the daemon and `sift-it index`.

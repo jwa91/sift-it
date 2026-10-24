@@ -109,8 +109,8 @@ unsafe extern "C" fn log_callback(level: ll::ggml_log_level, text: *const c_char
 /// - GGML_METAL_NO_RESIDENCY: ggml's Metal backend keeps no buffers resident between calls. Its residency sets keep the
 ///   model's memory wired for three minutes after the last call, renewed by a thread that wakes every 5 ms for as long
 ///   as the process lives, idle or not. Without them, Metal makes memory resident for the calls that use it, and
-///   embedding is as fast (docs/design.md). Processes this one starts inherit it: the speech helper's ggml has the same
-///   residency sets.
+///   embedding is as fast (docs/design.md). Processes this one starts inherit both; the speech helper (Core ML) has no
+///   use for either, and needs no variables of its own.
 /// - AGX_RELAX_CDM_CTXSTORE_TIMEOUT=1: the Metal backend sets it itself when it registers, at the first model load,
 ///   while the indexer's readers start textutil. Set here, that later setenv rewrites the same value in place, and
 ///   nothing is freed. `make selftest` fails if loading the models changes the environment any further.

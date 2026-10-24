@@ -39,24 +39,26 @@ follows its conventions except where noted under "Exceptions".
 These family rules are Go-specific and don't apply here:
 
 - **Rust, not Go.** There is no `go.mod`, `CGO_ENABLED`, golangci-lint or govulncheck. `make check` is
-  `cargo fmt --check`, `cargo clippy -D warnings` and `cargo test`.
+  `cargo fmt --check`, `cargo clippy -D warnings` and `cargo test`, after building the speech helper.
 - **No GoReleaser.** Its Rust builder always runs `rustup target add`, which a toolchain not managed by rustup doesn't
   allow, and its prebuilt builder is GoReleaser Pro. `scripts/release.sh` does the same steps: build, codesign +
   notarize, `sift-it_{version}_darwin_arm64.tar.gz` + `checksums.txt`, and a GitHub release with the gh login.
 - **The cask comes from the app.** `Casks/sift-it.rb` is written by sift-it-mac's release: one cask with the app and the
   command is one thing for Homebrew to trust, where a cask depending on another in an untrusted tap fails to install.
 - **darwin/arm64 only**, not `darwin+linux × amd64+arm64`. sift-it needs Metal (llama.cpp) and Apple's frameworks
-  (PDFKit, ImageIO, Vision, AVFoundation). The cask says `depends_on macos: :sonoma` (and later) and
-  `depends_on arch: :arm64`.
+  (PDFKit, ImageIO, Vision, AVFoundation, and Core ML for speech). The cask says `depends_on macos: :sonoma` (and later)
+  and `depends_on arch: :arm64`.
 - **A native build step.** `scripts/build-llama.sh` builds llama.cpp at a pinned release before cargo (a `make`
-  prerequisite). CI runs on `macos-15`, not `ubuntu-latest`.
+  prerequisite), and `make helper` builds the speech helper with SwiftPM (Swift 6.2, so Xcode 26). CI runs on
+  `macos-15` with Xcode 26 selected, not `ubuntu-latest`.
 - **No `.env.template`, no 1Password references.** The release needs no secrets of its own: the Developer ID
   certificate and a notarytool profile live in the releasing Mac's keychain (set up once per Mac; see
   `scripts/codesign.sh`), and the GitHub release uses the gh login. The repo holds no credentials
   and no references to any.
-- **Two binaries.** `sift-it-transcribe` (transcribe/, the speech helper) ships beside `sift-it`: transcribe.cpp
-  brings its own ggml, which can't share a binary with llama.cpp's. The release signs and notarizes both, and Sift It.app
-  carries both.
+- **Two binaries.** `sift-it-transcribe` (transcribe/, the speech helper) ships beside `sift-it`: it's Swift, because
+  FluidAudio, which runs the speech model on the Neural Engine through Core ML, is a Swift package. A process of its
+  own also gives all of its memory back, the Neural Engine's included, when there's nothing to write down. The release
+  signs and notarizes both, and Sift It.app carries both.
 - **No separate notarize script.** `scripts/codesign.sh` signs both binaries and notarizes them in one submission,
   after the build.
 

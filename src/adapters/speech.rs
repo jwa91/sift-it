@@ -1,9 +1,9 @@
 //! The speech model, in a helper process: what writes down what's said in recordings and videos (the speech extractor,
 //! ingest/extract/speech.rs, sends it sound).
 //!
-//! The model (Parakeet Ultra, 25 languages, Dutch and English among them) runs in `sift-it-transcribe`, beside this
-//! binary: transcribe.cpp brings its own ggml, and the helper gives back all of its memory when there's nothing left to
-//! write down.
+//! The model (Parakeet Ultra, 25 languages, Dutch and English among them) runs on the Neural Engine, through FluidAudio
+//! (Core ML), in `sift-it-transcribe` beside this binary: FluidAudio is Swift, and the helper gives back all of its
+//! memory, the Neural Engine's copy of the model too, when there's nothing left to write down.
 
 use crate::models;
 use anyhow::{Context, Result, anyhow, bail};
@@ -12,10 +12,9 @@ use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
-/// What wrote the transcripts: stored with the index, so a change of model or engine writes them again.
-/// transcribe.cpp 0.4.1 writes the same as 0.4.0 (two podcasts, 71 minutes, compared word for word and to the
-/// hundredth of a second), so its transcripts stand.
-pub const SOURCE: &str = "parakeet-ultra-q8_0/transcribe.cpp-0.4.0/v1";
+/// What wrote the transcripts: the model, what runs it, and how its words are cut into passages
+/// (ingest/segment/speech.rs). Stored with the index, so a change writes them down again.
+pub const SOURCE: &str = "parakeet-ultra-coreml/fluidaudio-c79c4106/v1";
 
 /// The helper, beside this binary (the release and `make install` put it there; cargo builds it beside it too).
 fn helper_path() -> Option<PathBuf> {
@@ -24,7 +23,7 @@ fn helper_path() -> Option<PathBuf> {
     helper.exists().then_some(helper)
 }
 
-/// The helper and the model (models::SPEECH), or why speech can't be written down now.
+/// The helper and the model's folder (models::SPEECH), or why speech can't be written down now.
 fn paths() -> Result<(PathBuf, PathBuf), String> {
     let helper = helper_path().ok_or("sift-it-transcribe isn't installed beside sift-it")?;
     let model = models::SPEECH.require().map_err(|error| format!("the speech model: {error}"))?;
@@ -36,7 +35,8 @@ pub fn unavailable() -> Option<String> {
     paths().err()
 }
 
-/// A sentence or a few, as the model heard it, with its time in seconds.
+/// What's said from `start` to `end`, in seconds: a word as the model heard it, with its punctuation, or a passage of
+/// them.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Spoken {
     pub start: f64,
@@ -90,7 +90,7 @@ impl Transcriber {
         Ok(Transcriber { child, stdin, stdout })
     }
 
-    /// What's said in a stretch of 16 kHz mono sound, with times from its start.
+    /// The words said in a stretch of 16 kHz mono sound, with times from its start.
     pub fn run(&mut self, samples: &[f32]) -> Result<Vec<Spoken>> {
         let stdin = self.stdin.as_mut().ok_or_else(|| anyhow::Error::new(Gone))?;
         let mut frame = Vec::with_capacity(4 + samples.len() * 4);
@@ -109,16 +109,16 @@ impl Transcriber {
         if let Some(error) = reply["error"].as_str() {
             bail!("the speech model failed: {error}");
         }
-        Ok(reply["segments"]
+        Ok(reply["words"]
             .as_array()
-            .map(|segments| {
-                segments
+            .map(|words| {
+                words
                     .iter()
-                    .filter_map(|segment| {
+                    .filter_map(|word| {
                         Some(Spoken {
-                            start: segment["start"].as_f64()?,
-                            end: segment["end"].as_f64()?,
-                            text: segment["text"].as_str()?.trim().to_string(),
+                            start: word["start"].as_f64()?,
+                            end: word["end"].as_f64()?,
+                            text: word["text"].as_str()?.trim().to_string(),
                         })
                     })
                     .filter(|spoken| !spoken.text.is_empty())

@@ -13,7 +13,7 @@ use crate::config::{self, Budget};
 use crate::index::Form;
 use protocol::Scan;
 
-/// The share of the Mac's memory indexing takes with `indexing.memory_mb` at auto. From 10 GB of memory on, the models
+/// The share of the Mac's memory indexing takes with `indexing.memory_mb` at auto. From 9 GB of memory on, the models
 /// run side by side; with less, they take turns.
 const INGEST_SHARE: f64 = 0.25;
 
@@ -22,10 +22,12 @@ const SEARCH_SHARE: f64 = 0.1;
 
 /// What the parts of indexing hold at their peak, as measured (docs/design.md): memory of their own (their footprint),
 /// and the model file they map and read on every call. The embedding model with both its encoders: 940 MB,
-/// and the text model's 296 MB. The speech helper with a three-minute stretch of sound: 330 MB, and its model's 706 MB.
-/// A reader, with what it has decoded.
+/// and the text model's 296 MB. The speech helper with a three-minute stretch of sound: 120 MB, the Neural Engine's
+/// copy of its model, 607 MB, and the 32 MB it maps of what Core ML compiled for the Neural Engine. The copy is the
+/// helper's, but its footprint leaves it out: `footprint` lists it apart ("owned physical footprint (neural)"), and
+/// proc_pid_rusage counts it as ri_neural_footprint. A reader, with what it has decoded.
 const MODEL: u64 = (940 + 296) << 20;
-const SPEECH: u64 = (330 + 706) << 20;
+const SPEECH: u64 = (120 + 607 + 32) << 20;
 const READER: u64 = 128 << 20;
 
 /// How many segments a search with sketches scores exactly, at least: those whose sketches come closest to the query.

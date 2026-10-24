@@ -9,30 +9,43 @@ Format follows [Keep a Changelog](https://keepachangelog.com); versions follow
 
 ### Changed
 
+- What's said in recordings and videos is written down on the Neural Engine: Parakeet Ultra through
+  [FluidAudio](https://github.com/FluidInference/FluidAudio) (Core ML), in place of transcribe.cpp on the GPU. It's
+  3.5 times as fast in the indexer (about 220 times as fast as the sound plays, was 63), takes 4.8 times less energy,
+  and leaves the GPU to the embedding model: the reading beside it takes 7% longer than alone, where it took 30% longer
+  beside transcribe.cpp. Three podcasts and four videos index in 138 s instead of 224 s. Its model is FluidInference's
+  Core ML conversion (632 MB, was a 740 MB GGUF). The helper holds about 110 MB of its own (was 315 MB), and the Neural
+  Engine 607 MB more for its copy of the model. Every recording is written down again once.
+- What's said is cut into passages where sentences end (the helper hands over each word with its time), not in
+  windows of about 28 seconds: 92% of passages end with a sentence, where half did, and a result opens closer to its
+  moment.
+- A new embedding model (or `sift-it index --reindex`) embeds what's written down of recordings again, without writing
+  it down again.
+- Building sift-it takes Xcode 26 (Swift 6.2): the speech helper is Swift now.
 - The model files are kept in the Hugging Face cache (`~/.cache/huggingface/hub`, or `$HF_HUB_CACHE`, or
-  `$HF_HOME/hub`), which other apps share. A file is found by its SHA-256 wherever in the cache it is, so a copy
-  another app downloaded (Handy's speech model, say) isn't downloaded again. sift-it only adds what's missing to the
-  cache, and never removes anything from it. The models in `~/Library/Application Support/Sift It/models` aren't used
-  any more: `sift-it model download` fetches them into the cache, and that folder can go. `sift-it model status`
-  says which cache (`cache`, in place of `folder` and `speech_model`).
+  `$HF_HOME/hub`), which other apps share. A model file is found by its hash wherever in the cache it is, so a copy
+  another app downloaded isn't downloaded again; the speech model, a folder of files, in its own repository's folder.
+  sift-it only adds what's missing to the cache, and never removes anything from it. The models in `~/Library/Application Support/Sift It/models` aren't used any more: `sift-it model download`
+  fetches them into the cache, and that folder can go. `sift-it model status` says which cache (`cache`, in place of
+  `folder` and `speech_model`).
 - The indexer loads the vision encoder only while it reads pictures and video frames, and the audio encoder only while
   it reads sound, and lets them go when the reading is over: text alone, and writing down what's said after the
   reading, take the text model only. Reading text takes 336 MB instead of 910 MB, photos 544 MB and music 601 MB
-  instead of about 870 MB, and writing down speech after the reading 690 MB with the helper instead of 1.8 GB.
+  instead of about 870 MB, and writing down speech after the reading 475 MB with the helper (and 607 MB on the Neural
+  Engine) instead of 1.8 GB.
 - llama.cpp b11856 (was b11461): passages embed 8% faster and sound 9% faster, a query about 1 ms slower. Pictures'
-  vectors move a little (cosine 0.9989 or more to the old ones), so an existing index is read again once, speech
-  included. After that, a llama.cpp release that passes `sift-it selftest` keeps the index as it is: the index records
-  the model and the pipeline's version, no longer the llama.cpp release.
-- The speech helper maps its model (transcribe.cpp 0.4.1) instead of copying it into memory: 330 MB of its own
-  instead of 1 GB. Its transcripts are the same, so they aren't written down again.
+  vectors move a little (cosine 0.9989 or more to the old ones), so an existing index is read again once. After that, a
+  llama.cpp release that passes `sift-it selftest` keeps the index as it is: the index records the model and the
+  pipeline's version, no longer the llama.cpp release.
 - The engine's model has a context made for one query: 32 MB of compute buffers instead of 63 MB.
-- ggml's Metal residency sets are off, in sift-it and its speech helper. They kept about 330 MB wired for three minutes
-  after every search, and a thread woke 174 times a second for as long as the engine ran, idle or not. Embedding is as
-  fast without them.
+- ggml's Metal residency sets are off. They kept about 330 MB wired for three minutes after every search, and a thread
+  woke 174 times a second for as long as the engine ran, idle or not. Embedding is as fast without them.
 
 ### Removed
 
 - `SIFT_IT_MODELS` and `SIFT_IT_SPEECH_MODEL`: `HF_HUB_CACHE` or `HF_HOME` say where the models are.
+- transcribe.cpp, and the speech model's GGUF (`handy-computer/parakeet-ultra-gguf`): sift-it doesn't download it any
+  more, and Handy's copy no longer serves it. sift-it leaves it in the Hugging Face cache, for the apps that use it.
 
 ## [0.3.1] — 2026-10-19
 

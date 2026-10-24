@@ -1,6 +1,6 @@
 [workspace]
-members = ["crates/llama", "crates/protocol", "transcribe"]
-default-members = [".", "crates/llama", "crates/protocol", "transcribe"]
+members = ["crates/llama", "crates/protocol"]
+default-members = [".", "crates/llama", "crates/protocol"]
 
 # One version for the binary and its crates: a release bumps it here.
 [workspace.package]
@@ -41,6 +41,7 @@ ratatui-image = { version = "11.1.0", default-features = false, features = ["cro
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+sha1 = "0.11.0"
 sha2 = "0.11.1"
 ureq = "3.4.2"
 

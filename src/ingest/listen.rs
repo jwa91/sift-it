@@ -1,5 +1,5 @@
 //! Listening: what's said in recordings and videos the reading is done with, written down on a lane of its own. The
-//! speech extractor (extract/speech.rs) hands over a stretch of a file at a time; its sentences are cut into passages
+//! speech extractor (extract/speech.rs) hands over a stretch of a file at a time; its words are cut into passages
 //! (segment/speech.rs), embedded and stored as soon as they're back, so a file stopped partway goes on from there. When
 //! memory allows (resources::IngestPlan), the lane runs beside the reading, on a thread of its own that talks to the
 //! speech helper; else `transcribe_next` writes down one file at a time once everything is read.
@@ -46,7 +46,7 @@ pub struct Speech {
 }
 
 enum Heard {
-    /// The sentences heard from `start` to `end` seconds.
+    /// The words heard from `start` to `end` seconds.
     Stretch {
         start: f64,
         end: f64,
@@ -121,6 +121,22 @@ impl Indexer {
         });
         self.end_listening(listening, outcome, on_event)?;
         Ok(true)
+    }
+
+    /// Embeds what's written down of a recording or video that was just read, when its passages have no vectors
+    /// (another model makes them now, Writer::requeue_vectors): the same passages, stored again with new ones. What's
+    /// said isn't written down again.
+    pub(super) fn embed_transcript(&mut self, row: &FileRow) -> Result<()> {
+        let Some((progress, passages)) = self.index.transcript_to_embed(row.id)? else { return Ok(()) };
+        let tags = crate::adapters::macos::av::tags(&row.path);
+        let title = tags["title"].as_str().map_or_else(|| prepare::title(&row.path, row.kind), str::to_string);
+        let texts: Vec<String> =
+            passages.iter().map(|p| prepare::spoken(&title, p.text.as_deref().unwrap_or_default())).collect();
+        let mut vectors = self.embed.texts(&texts.iter().map(String::as_str).collect::<Vec<_>>())?.into_iter();
+        let passages: Vec<NewSegment> =
+            passages.into_iter().map(|p| NewSegment { vector: vectors.next(), ..p }).collect();
+        self.index.add_transcript(row, 0.0, &passages, None, &progress)?;
+        Ok(())
     }
 
     /// The next recording or video waiting for what's said in it to be written down, from where it got to (one
