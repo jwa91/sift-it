@@ -4,8 +4,9 @@
 //!   index.sqlite    the index
 //!   vectors/        its vectors (index/vectors.rs)
 //!   status.json     what the background indexer is doing (for front ends)
-//!   models/         the model files
 //!   previews/       thumbnails rendered for search results
+//!
+//! The model files aren't in it: they're in the Hugging Face cache that other apps share (models.rs).
 //!
 //! config.json has a section for each part of the work, and what a change costs follows from its section:
 //!
@@ -41,10 +42,6 @@ pub fn home() -> PathBuf {
 
 pub fn dirs_home() -> PathBuf {
     PathBuf::from(std::env::var_os("HOME").expect("HOME isn't set"))
-}
-
-pub fn models_dir() -> PathBuf {
-    std::env::var_os("SIFT_IT_MODELS").map(PathBuf::from).unwrap_or_else(|| home().join("models"))
 }
 
 pub fn index_path() -> PathBuf {

@@ -1,12 +1,13 @@
-//! Embedding: the model's only owner. It loads the model when something first needs a vector: with its image and audio
-//! encoders for the reading, or the text model alone (a third of the memory, quick to load) when only text does.
-//! Texts are embedded in batches, one model call for up to BATCH of them.
+//! Embedding: the model's only owner. It loads the text model when something first needs a vector, and its image and
+//! audio encoders (the larger half, and memory of their own) when a picture or sound does. The encoders go when the
+//! reading is over, the text model when indexing has been idle a while. Texts are embedded in batches, one model call
+//! for up to BATCH of them.
 
 use super::{Payload, Piece};
 use crate::index::NewSegment;
+use crate::models;
 use anyhow::Result;
-use embedder::{Embedder, ModelFiles};
-use std::path::PathBuf;
+use embedder::{Embedder, Inputs};
 
 /// Texts embedded in one model call, at most.
 const BATCH: usize = 16;
@@ -15,24 +16,24 @@ const BATCH: usize = 16;
 /// it failed (it stays in the keyword index).
 pub type Embedded = (i64, NewSegment, bool);
 
+#[derive(Default)]
 pub struct Embed {
-    models: PathBuf,
     embedder: Option<Embedder>,
-    /// The loaded model has the image and audio encoders (else it's the text model alone).
-    media: bool,
     /// Texts waiting for a model call, with their file.
     batch: Vec<(i64, Piece)>,
 }
 
 impl Embed {
-    /// Embedding with the model in `models`, loaded on first need.
-    pub fn new(models: PathBuf) -> Self {
-        Self { models, embedder: None, media: false, batch: Vec::new() }
-    }
-
-    /// Frees the model (about 1 GB) until it's needed again.
+    /// Frees the model until it's needed again.
     pub fn release(&mut self) {
         self.embedder = None;
+    }
+
+    /// Frees the image and audio encoders until a picture or sound needs them again.
+    pub fn release_encoders(&mut self) {
+        if let Some(embedder) = &mut self.embedder {
+            embedder.release_encoders();
+        }
     }
 
     pub fn loaded(&self) -> bool {
@@ -69,7 +70,7 @@ impl Embed {
                 _ => "",
             })
             .collect();
-        let vectors = self.model(true)?.embed_texts(&texts);
+        let vectors = self.model()?.embed_texts(&texts);
         let failed = vectors.is_err();
         let mut vectors = vectors.unwrap_or_default().into_iter();
         Ok(pieces.into_iter().map(|(file, piece)| (file, segment(piece, vectors.next()), failed)).collect())
@@ -80,36 +81,36 @@ impl Embed {
     pub fn one(&mut self, piece: Piece) -> Result<(NewSegment, bool)> {
         let vector = match &piece.payload {
             Payload::None | Payload::Text(_) => Ok(None),
-            Payload::Image(image) => self.model(true)?.embed_image(image).map(Some),
-            Payload::Audio(samples) => self.model(true)?.embed_audio(samples).map(Some),
+            Payload::Image(image) => self.encoders()?.embed_image(image).map(Some),
+            Payload::Audio(samples) => self.encoders()?.embed_audio(samples).map(Some),
         };
         let failed = vector.is_err();
         Ok((segment(piece, vector.ok().flatten()), failed))
     }
 
-    /// Texts embedded together, with whichever model is loaded (else the text model alone): their vectors, or none
-    /// when the call failed.
+    /// Texts embedded together: their vectors, or none when the call failed.
     pub fn texts(&mut self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
         if texts.is_empty() {
             return Ok(Vec::new());
         }
-        Ok(self.model(false)?.embed_texts(texts).unwrap_or_default())
+        Ok(self.model()?.embed_texts(texts).unwrap_or_default())
     }
 
-    /// Loads the model with its encoders now, if it isn't: the reading needs it, and it isn't loaded twice.
-    pub fn load_media(&mut self) -> Result<()> {
-        self.model(true).map(drop)
-    }
-
-    /// The loaded model, or one loaded now: with its image and audio encoders when `media` needs them, else the text
-    /// model alone. A text model makes way for one with the encoders, never the other way.
-    fn model(&mut self, media: bool) -> Result<&mut Embedder> {
-        if self.embedder.is_none() || (media && !self.media) {
-            self.embedder = None;
-            self.embedder = Some(Embedder::load(&ModelFiles::in_folder(&self.models)?, !media)?);
-            self.media = media;
+    /// The text model, loaded now if it isn't.
+    fn model(&mut self) -> Result<&mut Embedder> {
+        if self.embedder.is_none() {
+            self.embedder = Some(Embedder::load(&models::TEXT.require()?, Inputs::Documents)?);
         }
         Ok(self.embedder.as_mut().expect("just loaded"))
+    }
+
+    /// The text model with its image and audio encoders, loaded now if they aren't.
+    fn encoders(&mut self) -> Result<&mut Embedder> {
+        let embedder = self.model()?;
+        if !embedder.has_encoders() {
+            embedder.load_encoders(&models::MEDIA.require()?)?;
+        }
+        Ok(embedder)
     }
 }
 

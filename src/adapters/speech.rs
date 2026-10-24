@@ -5,36 +5,17 @@
 //! binary: transcribe.cpp brings its own ggml, and the helper gives back all of its memory when there's nothing left to
 //! write down.
 
-use crate::config;
+use crate::models;
 use anyhow::{Context, Result, anyhow, bail};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
-/// The speech model: Moondream's Parakeet Ultra (a post-trained Parakeet TDT 0.6B v3), Handy's GGUF conversion at Q8_0.
-pub const MODEL_FILE: &str = "parakeet-ultra-Q8_0.gguf";
-pub const MODEL_REPOSITORY: &str = "handy-computer/parakeet-ultra-gguf";
-pub const MODEL_REVISION: &str = "a1539be1b849ea7463b88343e5277b373d0c4ea9";
-pub const MODEL_BYTES: u64 = 740_363_168;
-pub const MODEL_SHA256: &str = "007a59761e9258779f189df396b50d12b83bb5b79e66df4b955c230d2f2a0a59";
-
 /// What wrote the transcripts: stored with the index, so a change of model or engine writes them again.
+/// transcribe.cpp 0.4.1 writes the same as 0.4.0 (two podcasts, 71 minutes, compared word for word and to the
+/// hundredth of a second), so its transcripts stand.
 pub const SOURCE: &str = "parakeet-ultra-q8_0/transcribe.cpp-0.4.0/v1";
-
-/// The speech model's file: in the models folder (`sift-it model download`), or else Handy's copy of the same file,
-/// so both apps share one download.
-pub fn model_path() -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os("SIFT_IT_SPEECH_MODEL") {
-        return Some(PathBuf::from(path)).filter(|path| path.exists());
-    }
-    let ours = config::models_dir().join(MODEL_FILE);
-    if ours.exists() {
-        return Some(ours);
-    }
-    let handy = config::dirs_home().join("Library/Application Support/com.pais.handy/models").join(MODEL_FILE);
-    handy.exists().then_some(handy)
-}
 
 /// The helper, beside this binary (the release and `make install` put it there; cargo builds it beside it too).
 fn helper_path() -> Option<PathBuf> {
@@ -43,11 +24,10 @@ fn helper_path() -> Option<PathBuf> {
     helper.exists().then_some(helper)
 }
 
-/// The helper and the model, or why speech can't be written down now.
+/// The helper and the model (models::SPEECH), or why speech can't be written down now.
 fn paths() -> Result<(PathBuf, PathBuf), String> {
     let helper = helper_path().ok_or("sift-it-transcribe isn't installed beside sift-it")?;
-    let model = model_path()
-        .ok_or_else(|| format!("the speech model isn't downloaded (sift-it model download): no {MODEL_FILE}"))?;
+    let model = models::SPEECH.require().map_err(|error| format!("the speech model: {error}"))?;
     Ok((helper, model))
 }
 

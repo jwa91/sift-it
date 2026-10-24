@@ -223,11 +223,7 @@ impl Indexer {
             match heard {
                 Heard::Stretch { start, end, spoken } => {
                     let listening = speech.listening.as_mut().expect("a stretch of the file it's on");
-                    // The reading needs the model with its encoders: loaded now, it isn't loaded twice.
-                    let stored = self
-                        .embed
-                        .load_media()
-                        .and_then(|()| self.store_heard(listening, start, end, spoken, on_event));
+                    let stored = self.store_heard(listening, start, end, spoken, on_event);
                     // The thread waits for this whatever happened.
                     let _ = speech.go.send(matches!(stored, Ok(true)) && !stop());
                     stored?;

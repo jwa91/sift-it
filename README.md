@@ -56,7 +56,9 @@ See [the ranking notes](docs/ranking.md) for the formulas, evaluation method, an
 ## Install
 
 Requirements: Apple Silicon and macOS 14 or later. The model download is 1.6 GB: 865 MB to search, and 740 MB to write
-down what's said in recordings. If [Handy](https://handy.computer) has the same speech model, sift-it uses its copy.
+down what's said in recordings. The files go into the Hugging Face cache (`~/.cache/huggingface/hub`, or
+`$HF_HUB_CACHE`, or `$HF_HOME/hub`), which other apps share: a file one of them has already, like
+[Handy](https://handy.computer)'s copy of the speech model, isn't downloaded again.
 
 ```sh
 brew install jwa91/tap/sift-it
@@ -231,11 +233,13 @@ Run `sift-it --help` for all commands and options.
 
 Data lives in `~/Library/Application Support/Sift It`, or the folder specified by `SIFT_IT_HOME`.
 This folder contains `config.json`, `index.sqlite`, `vectors/`, `status.json`, `indexer.log`, `engine.log`,
-`engine.sock`, `models/`, and `previews/`.
+`engine.sock`, and `previews/`.
 When the folder's path is too long for a socket's name (104 bytes on macOS), the engine's socket is reached through a
 link to the folder in your temporary folder, `sift-it-<hash>`.
-`SIFT_IT_SPEECH_MODEL` points at another copy of the speech model.
-`brew uninstall --zap sift-it` removes the installation and its data.
+The model files are in the Hugging Face cache, and `sift-it model status` says which one. sift-it only adds what's
+missing to that cache, and never removes anything from it.
+`brew uninstall --zap sift-it` removes the installation and its data, and leaves the model files in the cache, which
+other apps may use.
 
 ### Configuration
 
@@ -260,9 +264,10 @@ sift-it config indexing.memory_mb 4096
 | `log` | the size of the indexer's log | at once |
 
 `indexing.memory_mb` decides only how fast indexing goes, never what it writes. At `auto` it's a quarter of the
-Mac's memory. With room for the embedding model and the speech model together (about 1 GB each, plus 256 MB for two
-readers), what's said in recordings is written down beside the reading; with less, the models take turns. Reading
-takes up to a third of the cores, two to four files at once, and a small budget makes that fewer. `sift-it status` shows the plan.
+Mac's memory. With room for the embedding model and the speech model together (about 1.2 and 1 GB, their mapped
+model files included, plus 256 MB for two readers), what's said in recordings is written down beside the reading; with
+less, the models take turns: the image and audio encoders go before the speech model starts. Reading takes up to a
+third of the cores, two to four files at once, and a small budget makes that fewer. `sift-it status` shows the plan.
 
 A reading value resolves in four steps, and the last one that sets it wins: the top of `reading`, the kind
 (`reading.video`), the file type (`reading.types.mov`), then each rule in `reading.rules` whose path matches.

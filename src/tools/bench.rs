@@ -3,15 +3,28 @@
 use crate::config;
 use crate::index;
 use crate::ingest::discover::crawl;
+use crate::models;
 use crate::query;
 use anyhow::Result;
 use protocol::{Kind, Search};
 
-/// How fast the model embeds here: passages in a batch and one at a time, pictures at three token budgets, and 30 s
-/// of sound.
+/// How fast the model embeds here: a query as the engine embeds it, passages in a batch and one at a time, pictures at
+/// three token budgets, and 30 s of sound.
 pub fn embed() -> Result<()> {
-    let files = embedder::ModelFiles::in_folder(&config::models_dir())?;
-    let mut model = embedder::Embedder::load(&files, false)?;
+    let text = models::TEXT.require()?;
+    let mut queries = embedder::Embedder::load(&text, embedder::Inputs::Queries)?;
+    let mut times: Vec<f64> = (0..50)
+        .map(|i| {
+            let started = std::time::Instant::now();
+            queries.embed_text(&embedder::prompts::query(&format!("the warranty for washing machine {i}")))?;
+            Ok(started.elapsed().as_secs_f64() * 1000.0)
+        })
+        .collect::<Result<_>>()?;
+    drop(queries);
+    times.sort_by(f64::total_cmp);
+    println!("a query: {:.1} ms (the median of 50)", times[25]);
+    let mut model = embedder::Embedder::load(&text, embedder::Inputs::Documents)?;
+    model.load_encoders(&models::MEDIA.require()?)?;
     let passage = "The tenant pays a security deposit of two months' rent, returned within fourteen days of the \
         end of the lease minus the cost of any damage beyond normal wear. Gas, water and electricity are paid by \
         the tenant; internet is included in the rent. "

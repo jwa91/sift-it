@@ -43,7 +43,8 @@ adapters    index (SQLite and vector files) · embedder (llama.cpp) · transcrib
   Markdown, code, records (CSV, JSON, YAML, TOML), pages, frames, sound windows, speech. Pure, and tested on its own.
 - **Prepare:** a segment becomes the model's input: the prompt with the file's title, a picture fitted to its token
   budget, a window of sound.
-- **Embed:** the model's only owner. It batches inputs and hands back vectors.
+- **Embed:** the model's only owner. It batches inputs and hands back vectors. It holds the text model, and the image
+  and audio encoders only while pictures or sound are read.
 - **Write:** the index's only writer. It keeps the rule that a segment's vectors are appended before the segment is
   committed.
 - **Schedule:** what goes first (changes, then the cheapest), how many files are read at once, and whether speech is
@@ -114,7 +115,7 @@ src/
   main.rs                the CLI: commands and arguments
   config/                the schema (mod.rs), which files (sources.rs), and the cascade of reading values (reading.rs)
   resources.rs           the Mac's facts; plans for search and ingest
-  models.rs              the model files: what's there, and downloading them
+  models.rs              the model files in the Hugging Face cache: found by their hash, and downloaded
   index/                 the facade: catalog (SQLite), vector files, the vectors as searches read them
   ingest/
     discover/            what's new or changed (mod.rs), crawling (crawl.rs), what reading costs (cost.rs)
@@ -123,7 +124,7 @@ src/
     segment/             per content type: text by its form (passages; prose, code, records), pictures, frames,
                          sound, speech
     prepare.rs           prompts, fitting pictures, sound
-    embed.rs             the embedding stage, the model's owner
+    embed.rs             the embedding stage, the model's owner: the text model, and the encoders while needed
     write.rs             files put together and written
     schedule.rs          order, readers, the run
     listen.rs            speech's lane, beside the reading or after it

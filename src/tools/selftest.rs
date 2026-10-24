@@ -2,9 +2,10 @@
 //! pipeline (tests/reference). Any change to llama.cpp, the model files, the image sizing or the prompts must still
 //! pass this, or an existing index would no longer agree with new queries.
 
+use crate::models;
 use anyhow::{Context, Result, bail};
 use embedder::imaging;
-use embedder::{Decoded, Embedder, ModelFiles, prompts};
+use embedder::{Decoded, Embedder, Inputs, prompts};
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -17,13 +18,13 @@ const BUILT_IN: [(&str, &[u8]); 4] = [
 ];
 
 /// Runs against the built-in reference (written to a temporary folder: mtmd's decoders read files).
-pub fn run_built_in(models: &ModelFiles) -> Result<()> {
+pub fn run_built_in() -> Result<()> {
     let folder = std::env::temp_dir().join(format!("sift-it-selftest-{}", std::process::id()));
     std::fs::create_dir_all(&folder)?;
     for (name, bytes) in BUILT_IN {
         std::fs::write(folder.join(name), bytes)?;
     }
-    let result = run(models, &folder);
+    let result = run(&folder);
     let _ = std::fs::remove_dir_all(&folder);
     result
 }
@@ -31,16 +32,20 @@ pub fn run_built_in(models: &ModelFiles) -> Result<()> {
 /// Runtimes that agree measure ≥ 0.999; less is a change people would see in their results.
 const AGREEMENT: f32 = 0.999;
 
-pub fn run(models: &ModelFiles, folder: &Path) -> Result<()> {
+pub fn run(folder: &Path) -> Result<()> {
     let reference: serde_json::Value = serde_json::from_slice(
         &std::fs::read(folder.join("vectors.json"))
             .with_context(|| format!("no vectors.json in {}", folder.display()))?,
     )?;
     let expected: BTreeMap<String, Vec<f32>> = serde_json::from_value(reference["vectors"].clone())?;
 
+    let text = models::TEXT.require()?;
     let started = std::time::Instant::now();
-    let mut embedder = Embedder::load(models, false)?;
+    let mut embedder = Embedder::load(&text, Inputs::Documents)?;
     eprintln!("model loaded in {:.2} s", started.elapsed().as_secs_f64());
+    let started = std::time::Instant::now();
+    embedder.load_encoders(&models::MEDIA.require()?)?;
+    eprintln!("encoders loaded in {:.2} s", started.elapsed().as_secs_f64());
 
     let long = (1..=60)
         .map(|n| {
@@ -73,6 +78,12 @@ pub fn run(models: &ModelFiles, folder: &Path) -> Result<()> {
     for ((name, _), vector) in texts.iter().zip(vectors) {
         made.insert(name.to_string(), vector);
     }
+    // The queries again, as the engine embeds them: one at a time, in a context made for queries.
+    let mut queries = Embedder::load(&text, Inputs::Queries)?;
+    for (name, text) in texts.iter().filter(|(name, _)| name.starts_with("query")) {
+        made.insert(format!("{name} (engine)"), queries.embed_text(text)?);
+    }
+    drop(queries);
 
     for (name, file, budget) in
         [("screen-280", "screen.png", 280), ("photo-140", "photo.jpg", 140), ("frame-70", "photo.jpg", 70)]
@@ -98,10 +109,11 @@ pub fn run(models: &ModelFiles, folder: &Path) -> Result<()> {
 
     let mut worst = 1.0f32;
     for (name, vector) in &made {
-        let Some(reference) = expected.get(name) else { bail!("no reference vector for {name}") };
+        let reference = expected.get(name.trim_end_matches(" (engine)"));
+        let Some(reference) = reference else { bail!("no reference vector for {name}") };
         let cosine: f32 = vector.iter().zip(reference).map(|(a, b)| a * b).sum();
         worst = worst.min(cosine);
-        println!("{name:<14} cosine {cosine:.5}{}", if cosine < AGREEMENT { "  ✗" } else { "" });
+        println!("{name:<20} cosine {cosine:.5}{}", if cosine < AGREEMENT { "  ✗" } else { "" });
     }
     if worst < AGREEMENT {
         bail!("vectors differ from the reference (worst cosine {worst:.5} < {AGREEMENT})");

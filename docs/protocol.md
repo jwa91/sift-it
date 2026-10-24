@@ -141,7 +141,7 @@ Ends `sift-it serve` once the requests before it are answered: `{"id": 10, "ok":
 ```json
 {"event": "ready", "version": "0.3.1", "build": "0.3.1+3f2a…", "index": "/…/index.sqlite", "meaning": "unloaded"}
 {"event": "meaning", "state": "loading"}
-{"event": "meaning", "state": "unavailable", "error": "the model isn't downloaded"}
+{"event": "meaning", "state": "unavailable", "error": "embeddinggemma-2-Q8_0.gguf isn't downloaded (run `sift-it model download`)"}
 {"event": "config", "error": "can't read config.json: …"}
 {"event": "indexer", "state": "indexing", "done": 12, "total": 40, …}
 ```

@@ -33,8 +33,8 @@ testbed:
 
 # Search quality on the testbed, in an index of its own (needs the model).
 eval: build testbed
-	SIFT_IT_HOME=$(CURDIR)/testbed/.sift SIFT_IT_MODELS="$(HOME)/Library/Application Support/Sift It/models" \
-	  sh -c 'target/release/sift-it folders add testbed >/dev/null && target/release/sift-it config sources.code true >/dev/null \
+	SIFT_IT_HOME=$(CURDIR)/testbed/.sift sh -c 'target/release/sift-it folders add testbed >/dev/null \
+	  && target/release/sift-it config sources.code true >/dev/null \
 	  && target/release/sift-it index >/dev/null 2>&1 && target/release/sift-it eval evals/evals.json'
 
 # A release, from this Mac: built, signed and notarized with its keychain (scripts/codesign.sh says what it needs), and

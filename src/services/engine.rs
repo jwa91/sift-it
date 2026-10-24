@@ -15,9 +15,10 @@
 
 use crate::config::{self, Config};
 use crate::index::{Reader, Vectors};
+use crate::models::ModelFile;
 use crate::query::{Query, Searcher};
 use anyhow::{Context, Result, bail};
-use embedder::{Embedder, ModelFiles};
+use embedder::{Embedder, Inputs};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use protocol::{
     Done, Event, Failure, IndexerStatus, MeaningState, Mode, Op, Request, Results, Search, Settings, Status, Text,
@@ -154,7 +155,8 @@ struct Loaded {
 /// uses it in its own process.
 pub struct Core {
     index: PathBuf,
-    models: PathBuf,
+    /// The text model, as the cache has it.
+    model: &'static ModelFile,
     searcher: Mutex<Option<Searcher>>,
     meaning: Mutex<Loaded>,
     /// Signalled when a load ends.
@@ -167,10 +169,14 @@ pub struct Core {
 }
 
 impl Core {
-    pub fn new(index: &Path, models: &Path, events: Box<dyn Fn(&Event) + Send + Sync>) -> Result<Arc<Self>> {
+    pub fn new(
+        index: &Path,
+        model: &'static ModelFile,
+        events: Box<dyn Fn(&Event) + Send + Sync>,
+    ) -> Result<Arc<Self>> {
         Ok(Arc::new(Self {
             index: index.to_path_buf(),
-            models: models.to_path_buf(),
+            model,
             searcher: Mutex::new(None),
             meaning: Mutex::new(Loaded { meaning: Meaning::Unloaded, generation: 0 }),
             loaded: Condvar::new(),
@@ -340,7 +346,7 @@ impl Core {
 
     fn load(&self, generation: u64) {
         let loaded = (|| -> Result<(Embedder, Vectors)> {
-            let embedder = Embedder::load(&ModelFiles::in_folder(&self.models)?, true)?;
+            let embedder = Embedder::load(&self.model.require()?, Inputs::Queries)?;
             let vectors = Vectors::load(&Reader::open(&self.index)?)?;
             Ok((embedder, vectors))
         })();
@@ -405,7 +411,7 @@ fn send(writer: &Writer, message: &impl Serialize) -> bool {
 
 /// `sift-it engine`: answers clients on the socket until a `stop` request. Exits at once when another engine already
 /// answers there.
-pub fn run(index: &Path, models: &Path) -> Result<()> {
+pub fn run(index: &Path) -> Result<()> {
     build();
     let socket = socket_path();
     if connect().is_ok() {
@@ -430,7 +436,7 @@ pub fn run(index: &Path, models: &Path) -> Result<()> {
         })
     };
     let _indexer = watch_indexer(broadcast.clone())?;
-    let core = Core::new(index, models, Box::new(move |event| broadcast(event)))?;
+    let core = Core::new(index, &crate::models::TEXT, Box::new(move |event| broadcast(event)))?;
     for stream in listener.incoming() {
         let Ok(stream) = stream else { continue };
         let core = core.clone();
@@ -545,12 +551,9 @@ mod tests {
         add(&mut Writer::open(&index).unwrap(), "/a/pancakes.txt", Kind::Plaintext, passages);
         let events = Arc::new(Mutex::new(Vec::new()));
         let seen = events.clone();
-        let core = Core::new(
-            &index,
-            &folder.join("no-models"),
-            Box::new(move |event| seen.lock().unwrap().push(event.clone())),
-        )
-        .unwrap();
+        // A model no cache has.
+        static NONE: ModelFile = ModelFile { sha256: "none", ..crate::models::TEXT };
+        let core = Core::new(&index, &NONE, Box::new(move |event| seen.lock().unwrap().push(event.clone()))).unwrap();
         let request =
             |mode| Search { q: "pancakes".into(), mode: Some(mode), limit: 5, wait: true, ..Default::default() };
 
