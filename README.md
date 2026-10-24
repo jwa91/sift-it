@@ -55,10 +55,11 @@ See [the ranking notes](docs/ranking.md) for the formulas, evaluation method, an
 
 ## Install
 
-Requirements: Apple Silicon and macOS 14 or later. The model download is 1.6 GB: 865 MB to search, and 740 MB to write
+Requirements: Apple Silicon and macOS 14 or later. The model download is 1.5 GB: 865 MB to search, and 632 MB to write
 down what's said in recordings. The files go into the Hugging Face cache (`~/.cache/huggingface/hub`, or
-`$HF_HUB_CACHE`, or `$HF_HOME/hub`), which other apps share: a file one of them has already, like
-[Handy](https://handy.computer)'s copy of the speech model, isn't downloaded again.
+`$HF_HUB_CACHE`, or `$HF_HOME/hub`), which other apps share: a file one of them has already isn't downloaded again.
+[Handy](https://handy.computer)'s copy of the speech model no longer counts: sift-it now runs a Core ML conversion
+of it.
 
 ```sh
 brew install jwa91/tap/sift-it
@@ -187,11 +188,12 @@ The embedding model can miss or confuse sounds and pictures. See [the documented
 
 Once everything is indexed, the indexer writes down what's said in recordings and videos with
 [Parakeet Ultra](https://huggingface.co/moondream/parakeet-ultra), which understands 25 European languages, Dutch and
-English among them. It runs on [transcribe.cpp](https://github.com/handy-computer/transcribe.cpp) in a helper process,
-`sift-it-transcribe`, at a lower priority than everything else, and gives its memory back when it's done. It writes a
-recording down a few minutes at a time: any change in your folders comes first, and it goes on where it stopped.
-On an Apple silicon Mac it writes down a 30-minute podcast in under half a minute. Beside the reading it goes slower,
-since both use the GPU: together they take about as long as one after the other.
+English among them. It runs on the Neural Engine, through [FluidAudio](https://github.com/FluidInference/FluidAudio)
+in a helper process, `sift-it-transcribe`, at a lower priority than everything else, and gives its memory back when
+it's done. It writes a recording down a few minutes at a time: any change in your folders comes first, and it goes on
+where it stopped. On an Apple M5 it writes down a 35-minute podcast in under ten seconds. Beside the reading, which has
+the GPU, it goes on at about three quarters of that speed, and the reading hardly slows: only its passages wait for the
+GPU, to be embedded.
 
 Each passage is a sentence or a few, with its time: a search for a word said in a podcast opens it at that moment.
 `sift-it status` shows how far it is; `sift-it config reading.depth meaning` turns it off.
@@ -264,8 +266,9 @@ sift-it config indexing.memory_mb 4096
 | `log` | the size of the indexer's log | at once |
 
 `indexing.memory_mb` decides only how fast indexing goes, never what it writes. At `auto` it's a quarter of the
-Mac's memory. With room for the embedding model and the speech model together (about 1.2 and 1 GB, their mapped
-model files included, plus 256 MB for two readers), what's said in recordings is written down beside the reading; with
+Mac's memory. With room for the embedding model and the speech model together (about 1.2 and 0.75 GB, the text model's
+mapped file and the Neural Engine's copy of the speech model included, plus 256 MB for two readers), what's said in
+recordings is written down beside the reading; with
 less, the models take turns: the vision and audio encoders go before the speech model starts. Reading takes up to a
 third of the cores, two to four files at once, and a small budget makes that fewer. `sift-it status` shows the plan.
 
@@ -310,8 +313,9 @@ The mixed-file evaluation needs a larger demo collection, which isn't part of th
 - [llama.cpp](https://github.com/ggml-org/llama.cpp) provides model execution under the MIT License.
 - [Parakeet Ultra](https://huggingface.co/moondream/parakeet-ultra), by Moondream (post-trained from NVIDIA's
   Parakeet TDT 0.6B v3), writes down speech under CC-BY-4.0, in
-  [Handy's GGUF conversion](https://huggingface.co/handy-computer/parakeet-ultra-gguf).
-- [transcribe.cpp](https://github.com/handy-computer/transcribe.cpp), by the Handy team, runs it under the MIT License.
+  [FluidInference's Core ML conversion](https://huggingface.co/FluidInference/parakeet-ultra-coreml).
+- [FluidAudio](https://github.com/FluidInference/FluidAudio), by FluidInference, runs it on the Neural Engine under the
+  Apache License 2.0.
 
 sift-it uses the [MIT License](LICENSE). The license preserves DigUp's copyright notice alongside the sift-it copyright notice.
 The copied reference files also include [DigUp's original MIT notice](tests/reference/LICENSE).

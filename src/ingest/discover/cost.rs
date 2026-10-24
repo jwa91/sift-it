@@ -1,7 +1,7 @@
 //! What reading a file costs, about: what orders the queue (cheapest first), and what `sift-it status` and
 //! `sift-it estimate` say is left. The costs are measured ones (`sift-it bench-embed` measures a Mac's own): text at
 //! about 10,000 tokens a second, a photo in 0.15 s, a screenshot (picture, text and OCR) in 0.5 s, 30 s of sound in
-//! 0.25 s. Writing down what's said is measured with the speech helper: 78 times as fast as the sound plays.
+//! 0.25 s. Writing down what's said is measured with the speech helper: 220 times as fast as the sound plays.
 
 use super::crawl::Found;
 use crate::adapters::macos::{self, av};
@@ -26,11 +26,12 @@ const FRAMES_PER_SECOND: f64 = 0.07 / 2.5;
 const OPEN: f64 = 0.02;
 /// textutil starting.
 const TEXTUTIL: f64 = 0.05;
-/// Writing down what's said: a 32-minute podcast in 24 s with nothing else running, 78 times as fast as it plays.
-const SPEECH_PER_SECOND: f64 = 1.0 / 78.0;
+/// Writing down what's said, its passages embedded: three podcasts and four videos (124 minutes) in 34 s with nothing
+/// else running, about 220 times as fast as they play.
+const SPEECH_PER_SECOND: f64 = 1.0 / 220.0;
 
-/// About how long writing down what's said in `seconds` of sound takes. Beside the reading, the two share the GPU: the
-/// sum of both is about how long they take together.
+/// About how long writing down what's said in `seconds` of sound takes. Beside the reading it has the Neural Engine,
+/// and only its passages wait for the GPU, so together they take less than the sum of both.
 pub fn speech(seconds: f64) -> f64 {
     seconds * SPEECH_PER_SECOND
 }

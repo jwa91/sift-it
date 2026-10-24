@@ -1,7 +1,6 @@
 //! Speech: what's said in a recording or a video's sound, written down by the speech model (adapters/speech.rs). Sound
 //! goes to it in chunks of about three minutes, cut where it's quietest so no word is cut in two, and each chunk's
-//! sentences, with their times, are handed over as soon as they're back: a file stopped partway goes on from there
-//! later. A slow extractor, so it runs on a lane of its own (ingest/listen.rs).
+//! words, with their times, are handed over as soon as they're back: a file stopped partway goes on from there later. A slow extractor, so it runs on a lane of its own (ingest/listen.rs).
 
 use crate::adapters::speech::{Spoken, Transcriber};
 use crate::ingest::segment::sound::{SILENCE, rms};
@@ -23,7 +22,7 @@ pub enum Outcome {
 }
 
 /// Writes down what's said in a file from `from` seconds on, a chunk at a time: after each, `on_chunk(start, end,
-/// sentences)` (seconds from the file's start) stores it and says whether to go on. After the last chunk the file is
+/// words)` (seconds from the file's start) stores it and says whether to go on. After the last chunk the file is
 /// finished, whatever `on_chunk` says: there's nothing to go on with.
 pub fn transcribe(
     transcriber: &mut Transcriber,

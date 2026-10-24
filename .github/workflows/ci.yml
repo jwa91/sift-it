@@ -28,6 +28,10 @@ jobs:
           rustup toolchain install stable --profile minimal --component rustfmt,clippy
           rustup default stable
 
+      # The speech helper needs Swift 6.2 (FluidAudio's traits); the image's default Xcode is 16.4.
+      - name: Select Xcode 26
+        run: sudo xcode-select -s "$(ls -d /Applications/Xcode_26*.app | sort -V | tail -1)"
+
       # fmt, clippy (warnings are errors) and unit tests. The model-dependent checks (make selftest, make eval)
       # need the 865 MB model and run locally before a release.
       - name: Run checks

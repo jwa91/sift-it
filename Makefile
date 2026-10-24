@@ -1,4 +1,4 @@
-.PHONY: llama build install check selftest testbed eval release snapshot clean
+.PHONY: llama helper build install check selftest testbed eval release snapshot clean
 
 BIN_DIR ?= $(HOME)/.local/bin
 LLAMA := vendor/llama-build/TAG
@@ -11,7 +11,14 @@ $(LLAMA): scripts/build-llama.sh scripts/llama.cpp.patch
 
 llama: $(LLAMA)
 
-build: $(LLAMA)
+# The speech helper, sift-it-transcribe: Swift, with FluidAudio at its pinned revision (transcribe/Package.resolved),
+# put beside sift-it. It needs Swift 6.2 or later (Xcode 26): FluidAudio's traits leave out what it doesn't use.
+helper:
+	swift build -c release --package-path transcribe --scratch-path target/swift
+	install -d target/release
+	install -m 0755 target/swift/release/sift-it-transcribe target/release/
+
+build: $(LLAMA) helper
 	cargo build --release
 
 install: build
@@ -20,7 +27,7 @@ install: build
 	@echo "installed sift-it and sift-it-transcribe to $(BIN_DIR)"
 	@echo "ensure $(BIN_DIR) is on your PATH"
 
-check: $(LLAMA)
+check: $(LLAMA) helper
 	cargo fmt --all --check
 	cargo clippy --release -- -D warnings
 	cargo test --release

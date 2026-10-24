@@ -15,7 +15,7 @@
 
 use crate::config::{self, Config};
 use crate::index::{Reader, Vectors};
-use crate::models::ModelFile;
+use crate::models::Model;
 use crate::query::{Query, Searcher};
 use anyhow::{Context, Result, bail};
 use embedder::{Embedder, Inputs};
@@ -156,7 +156,7 @@ struct Loaded {
 pub struct Core {
     index: PathBuf,
     /// The text model, as the cache has it.
-    model: &'static ModelFile,
+    model: &'static Model,
     searcher: Mutex<Option<Searcher>>,
     meaning: Mutex<Loaded>,
     /// Signalled when a load ends.
@@ -169,11 +169,7 @@ pub struct Core {
 }
 
 impl Core {
-    pub fn new(
-        index: &Path,
-        model: &'static ModelFile,
-        events: Box<dyn Fn(&Event) + Send + Sync>,
-    ) -> Result<Arc<Self>> {
+    pub fn new(index: &Path, model: &'static Model, events: Box<dyn Fn(&Event) + Send + Sync>) -> Result<Arc<Self>> {
         Ok(Arc::new(Self {
             index: index.to_path_buf(),
             model,
@@ -552,7 +548,10 @@ mod tests {
         let events = Arc::new(Mutex::new(Vec::new()));
         let seen = events.clone();
         // A model no cache has.
-        static NONE: ModelFile = ModelFile { sha256: "none", ..crate::models::TEXT };
+        static NONE: Model = Model {
+            files: &[crate::models::File { path: "none.gguf", bytes: 1, blob: "none" }],
+            ..crate::models::TEXT
+        };
         let core = Core::new(&index, &NONE, Box::new(move |event| seen.lock().unwrap().push(event.clone()))).unwrap();
         let request =
             |mode| Search { q: "pancakes".into(), mode: Some(mode), limit: 5, wait: true, ..Default::default() };
