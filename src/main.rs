@@ -123,6 +123,29 @@ enum Command {
     /// Time the model on texts, pictures and sound (for tuning)
     #[command(hide = true)]
     BenchEmbed,
+    /// Experiment: embed photos, video frames and sound, a fixed number of each, timed
+    #[command(hide = true)]
+    BenchMedia {
+        #[arg(default_value_t = 100)]
+        count: usize,
+    },
+    /// Experiment: embed the texts in a file with the text encoder that's on, timed (for comparing encoders)
+    #[command(hide = true)]
+    BenchTexts {
+        file: PathBuf,
+        /// Write the vectors here
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Load the text model alone, as queries do (else with the encoders, as the indexer does)
+        #[arg(long)]
+        text_only: bool,
+        /// Go round the texts until this many seconds have passed
+        #[arg(long, default_value_t = 0.0)]
+        seconds: f64,
+        /// Texts a model call (the indexer's is 16)
+        #[arg(long, default_value_t = 16)]
+        batch: usize,
+    },
     /// Time search over an index of random vectors in each form of the vectors (for tuning)
     #[command(hide = true)]
     BenchSearch {
@@ -338,6 +361,10 @@ fn run(cli: Cli) -> Result<()> {
         }
         Command::BenchSearch { vectors } => tools::bench::search(vectors),
         Command::BenchEmbed => tools::bench::embed(),
+        Command::BenchMedia { count } => tools::bench::media(count),
+        Command::BenchTexts { file, out, text_only, seconds, batch } => {
+            tools::bench::texts(&file, out.as_deref(), text_only, seconds, batch)
+        }
         Command::Selftest { folder } => {
             let models = embedder::ModelFiles::in_folder(&config::models_dir())?;
             match folder {

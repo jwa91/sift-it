@@ -10,6 +10,12 @@ links = "llama"
 [dependencies]
 anyhow = "1.0.104"
 fast_image_resize = "6.1.0"
+# Experiment: the text model on Core ML (coreml.rs).
+half = "2"
+libc = "0.2"
+objc2 = "0.6.5"
+objc2-core-ml = { version = "0.3.2", default-features = false, features = ["std", "MLDictionaryFeatureProvider", "MLFeatureProvider", "MLFeatureValue", "MLModel", "MLModelConfiguration", "MLModel_MLModelCompilation", "MLMultiArray", "MLFeatureType"] }
+objc2-foundation = { version = "0.3.2", features = ["NSArray", "NSDictionary", "NSError", "NSString", "NSURL", "NSValue"] }
 
 [build-dependencies]
 bindgen = "0.73.2"

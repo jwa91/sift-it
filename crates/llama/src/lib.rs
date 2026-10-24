@@ -6,6 +6,7 @@
 //! `<bos> <image soft tokens> <eos>` (the same for audio). The model has no causal mask and no KV cache to keep, so each input
 //! goes through the text model in one `llama_process` call; several short texts share one call as separate sequences.
 
+pub mod coreml;
 pub mod imaging;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -57,8 +58,64 @@ impl ModelFiles {
 /// A short description of the pipeline that made a vector. Stored with the index: vectors from a different pipeline
 /// must never be compared with these.
 pub fn vector_source() -> String {
+    if std::env::var_os("SIFT_IT_COREML").is_some() {
+        return format!("embeddinggemma-2-fp16/coreml+llama.cpp-{}/v1", ll::BUILD_TAG);
+    }
     format!("embeddinggemma-2-q8_0/llama.cpp-{}/v1", ll::BUILD_TAG)
 }
+
+/// Experiment: with SIFT_IT_PROFILE_OPS set, every node of the model's graph is computed and waited for on its own,
+/// and the time from one node's end to the next one's is booked to that node's operation. Waiting after each node
+/// adds a fixed cost to each, so small operations look slower than they are: `op_profile` is a map of where time
+/// goes, not a stopwatch.
+mod profile {
+    use super::ll;
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    use std::time::Instant;
+
+    /// When the last node ended, and per operation its nodes and seconds.
+    type State = (Instant, HashMap<String, (u32, f64)>);
+    static STATE: Mutex<Option<State>> = Mutex::new(None);
+
+    pub fn on() -> bool {
+        std::env::var_os("SIFT_IT_PROFILE_OPS").is_some()
+    }
+
+    pub unsafe extern "C" fn callback(node: *mut ll::ggml_tensor, ask: bool, _: *mut std::ffi::c_void) -> bool {
+        if ask {
+            return true;
+        }
+        let now = Instant::now();
+        if let Some((last, by_op)) = STATE.lock().unwrap().as_mut() {
+            let op = unsafe { std::ffi::CStr::from_ptr(ll::ggml_op_desc(node)) }.to_string_lossy().into_owned();
+            let entry = by_op.entry(op).or_insert((0, 0.0));
+            entry.0 += 1;
+            entry.1 += (now - *last).as_secs_f64();
+            *last = now;
+        }
+        true
+    }
+
+    /// A model call begins: the time until its first node ends is that node's.
+    pub fn start() {
+        let mut state = STATE.lock().unwrap();
+        match state.as_mut() {
+            Some((last, _)) => *last = Instant::now(),
+            None => *state = Some((Instant::now(), HashMap::new())),
+        }
+    }
+
+    /// (operation, nodes, seconds), the most time first.
+    pub fn report() -> Vec<(String, u32, f64)> {
+        let state = STATE.lock().unwrap();
+        let mut rows: Vec<_> = state.iter().flat_map(|(_, m)| m.iter().map(|(k, v)| (k.clone(), v.0, v.1))).collect();
+        rows.sort_by(|a, b| b.2.total_cmp(&a.2));
+        rows
+    }
+}
+
+pub use profile::report as op_profile;
 
 pub struct Embedder {
     model: *mut ll::llama_model,
@@ -75,6 +132,8 @@ pub struct Embedder {
     sequences: i32,
     tokens: usize,
     position: ll::llama_pos,
+    /// Experiment: texts on the Neural Engine (coreml.rs) instead of llama.cpp, when SIFT_IT_COREML is set.
+    coreml: Option<coreml::TextEncoder>,
 }
 
 // llama.cpp's objects may move between threads, as long as one thread uses them at a time (`&mut self`).
@@ -143,9 +202,16 @@ impl Embedder {
             (Some(path), false) => Some(c_path(path)?),
             (None, false) => bail!("the image and audio encoders ({MEDIA_FILE}) aren't downloaded"),
         };
+        let coreml = match std::env::var_os("SIFT_IT_COREML") {
+            Some(folder) => Some(coreml::TextEncoder::load(Path::new(&folder))?),
+            None => None,
+        };
+        // With texts on Core ML, a text-only embedder needs llama.cpp's tokenizer alone.
+        let vocab_only = coreml.is_some() && text_only;
         unsafe {
             let mut model_params = ll::llama_model_default_params();
             model_params.n_gpu_layers = 999;
+            model_params.vocab_only = vocab_only;
             let model = ll::llama_model_load_from_file(c_path(&files.text)?.as_ptr(), model_params);
             if model.is_null() {
                 bail!("llama.cpp couldn't load {}", files.text.display());
@@ -164,8 +230,11 @@ impl Embedder {
             params.kv_unified = true;
             params.embeddings = true;
             params.pooling_type = ll::LLAMA_POOLING_TYPE_MEAN;
-            let context = ll::llama_init_from_model(model, params);
-            if context.is_null() {
+            if profile::on() {
+                params.cb_eval = Some(profile::callback);
+            }
+            let context = if vocab_only { std::ptr::null_mut() } else { ll::llama_init_from_model(model, params) };
+            if context.is_null() && !vocab_only {
                 ll::llama_model_free(model);
                 bail!("llama.cpp couldn't create a context");
             }
@@ -190,15 +259,16 @@ impl Embedder {
                 model,
                 context,
                 media,
-                batch: ll::llama_batch_ext_init(context),
+                batch: if vocab_only { std::ptr::null_mut() } else { ll::llama_batch_ext_init(context) },
                 vocab,
                 eos: ll::llama_vocab_eos(vocab),
-                dim: ll::llama_model_n_embd_out(model) as usize,
+                dim: if vocab_only { DIM } else { ll::llama_model_n_embd_out(model) as usize },
                 row: ll::llama_model_n_embd_inp(model) as usize,
                 max_tokens,
                 sequences: 0,
                 tokens: 0,
                 position: 0,
+                coreml,
             };
             if embedder.dim != DIM {
                 bail!("the model makes {}-dimensional vectors, not {DIM}", embedder.dim);
@@ -211,6 +281,12 @@ impl Embedder {
 
     /// One vector per text, in order. Prompts (query or document framing) are the caller's: see `prompts`.
     pub fn embed_texts(&mut self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+        if self.coreml.is_some() {
+            let tokens: Vec<Vec<ll::llama_token>> = texts.iter().map(|text| self.tokenize(text)).collect();
+            if let Some(coreml) = &mut self.coreml {
+                return coreml.embed(&tokens);
+            }
+        }
         let mut vectors = Vec::with_capacity(texts.len());
         self.reset();
         for text in texts {
@@ -353,6 +429,11 @@ impl Embedder {
         }
     }
 
+    /// What loading the Core ML text encoder took, when it's in use.
+    pub fn coreml_report(&self) -> Option<&str> {
+        self.coreml.as_ref().map(|c| c.load_report.as_str())
+    }
+
     /// How many tokens the model sees for this text.
     pub fn count_tokens(&self, text: &str) -> usize {
         self.tokenize(text).len()
@@ -424,6 +505,9 @@ impl Embedder {
 
     /// Runs the text model over the batch: one normalized vector per sequence, in order.
     fn run(&mut self) -> Result<Vec<Vec<f32>>> {
+        if profile::on() {
+            profile::start();
+        }
         let status = unsafe { ll::llama_process(self.context, ll::LLAMA_PROCESS_TYPE_ENCODE, self.batch) };
         let result = if status != 0 {
             Err(anyhow!("llama_process failed ({status})"))
@@ -448,11 +532,15 @@ impl Embedder {
 impl Drop for Embedder {
     fn drop(&mut self) {
         unsafe {
-            ll::llama_batch_ext_free(self.batch);
+            if !self.batch.is_null() {
+                ll::llama_batch_ext_free(self.batch);
+            }
             if !self.media.is_null() {
                 ll::mtmd_free(self.media);
             }
-            ll::llama_free(self.context);
+            if !self.context.is_null() {
+                ll::llama_free(self.context);
+            }
             ll::llama_model_free(self.model);
         }
     }

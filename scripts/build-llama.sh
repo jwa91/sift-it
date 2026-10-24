@@ -8,13 +8,20 @@
 # run `make selftest` to check the vectors still match.
 set -euo pipefail
 
-TAG=b11461
-COMMIT=4d756bc72bf00a4aacf410ae15a2d315f3db400d
+# Experiment: LLAMA_TAG, LLAMA_COMMIT and LLAMA_DIR build another release beside this one (vendor/llama-$TAG and
+# vendor/llama-build-$TAG); build the engine against it with SIFT_LLAMA_BUILD=vendor/llama-build-$TAG.
+TAG=${LLAMA_TAG:-b11461}
+COMMIT=${LLAMA_COMMIT:-4d756bc72bf00a4aacf410ae15a2d315f3db400d}
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-SOURCE="$ROOT/vendor/llama.cpp"
-BUILD="$ROOT/vendor/llama.cpp/build-sift"
-OUT="$ROOT/vendor/llama-build"
+if [[ -n "${LLAMA_TAG:-}" ]]; then
+  SOURCE="$ROOT/vendor/llama-$TAG"
+  OUT="$ROOT/vendor/llama-build-$TAG"
+else
+  SOURCE="$ROOT/vendor/llama.cpp"
+  OUT="$ROOT/vendor/llama-build"
+fi
+BUILD="$SOURCE/build-sift"
 
 if [[ ! -d "$SOURCE/.git" ]]; then
   git -c advice.detachedHead=false clone --quiet --depth 1 --branch "$TAG" https://github.com/ggml-org/llama.cpp "$SOURCE"
@@ -26,11 +33,13 @@ fi
 
 # An embedding model only needs the pooled vectors, but llama.cpp reserves a logits row (vocabulary-sized: 262k floats
 # for Gemma, 1 MiB) for every token of every input. Skip that for non-causal embedding contexts.
+# (Newer releases skip it themselves: `has_logits = !cparams.embeddings || graph_has_logits`.)
 CONTEXT="$SOURCE/src/llama-context.cpp"
 if grep -q '^    bool has_logits     = true;$' "$CONTEXT"; then
   sed -i '' 's/^    bool has_logits     = true;$/    bool has_logits     = !(cparams.embeddings \&\& !cparams.causal_attn);/' "$CONTEXT"
 fi
-grep -q 'bool has_logits     = !(cparams.embeddings && !cparams.causal_attn);' "$CONTEXT" \
+grep -q -e 'bool has_logits     = !(cparams.embeddings && !cparams.causal_attn);' \
+  -e 'bool has_logits     = !cparams.embeddings || graph_has_logits;' "$CONTEXT" \
   || { echo "couldn't apply the logits fix to $CONTEXT" >&2; exit 1; }
 
 cmake -S "$SOURCE" -B "$BUILD" -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0 \

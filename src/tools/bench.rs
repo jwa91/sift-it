@@ -4,8 +4,10 @@ use crate::config;
 use crate::index;
 use crate::ingest::discover::crawl;
 use crate::query;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use protocol::{Kind, Search};
+use std::io::{BufRead, Write};
+use std::path::Path;
 
 /// How fast the model embeds here: passages in a batch and one at a time, pictures at three token budgets, and 30 s
 /// of sound.
@@ -155,4 +157,130 @@ fn footprint() -> u64 {
         return 0;
     }
     info.ri_phys_footprint
+}
+
+/// Experiment: the texts in `file` (one JSON string a line, as SIFT_IT_DUMP_TEXTS writes them) embedded in batches of
+/// `batch` (16, as the indexer does), by whichever text encoder is on (SIFT_IT_COREML: Core ML, else llama.cpp). Says how long
+/// loading took and how many passages and tokens a second, and writes the vectors to `out` (768 little-endian f32 a
+/// text, in order). With `seconds`, it goes round the texts until that long has passed (for energy), and prints the
+/// wall-clock start and end so power samples can be lined up with it.
+pub fn texts(file: &Path, out: Option<&Path>, text_only: bool, seconds: f64, batch: usize) -> Result<()> {
+    let texts: Vec<String> = std::io::BufReader::new(std::fs::File::open(file)?)
+        .lines()
+        .map(|line| Ok(serde_json::from_str::<String>(&line?)?))
+        .collect::<Result<_>>()
+        .context("reading the texts")?;
+    let files = embedder::ModelFiles::in_folder(&config::models_dir())?;
+    let started = std::time::Instant::now();
+    let mut model = embedder::Embedder::load(&files, text_only)?;
+    let load = started.elapsed().as_secs_f64();
+    let encoder = if std::env::var_os("SIFT_IT_COREML").is_some() { "coreml" } else { "llama.cpp" };
+    eprintln!("{encoder}: loaded in {load:.2} s {}", model.coreml_report().unwrap_or(""));
+    let tokens: usize =
+        texts.iter().map(|t| model.count_tokens(t).min(if encoder == "coreml" { 512 } else { usize::MAX })).sum();
+    let refs: Vec<&str> = texts.iter().map(|t| t.as_str()).collect();
+    let now = || std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64();
+    let wall_start = now();
+    let started = std::time::Instant::now();
+    let mut vectors = Vec::with_capacity(texts.len());
+    let mut rounds = 0;
+    loop {
+        for texts in refs.chunks(batch) {
+            let embedded = model.embed_texts(texts)?;
+            if rounds == 0 {
+                vectors.extend(embedded);
+            }
+        }
+        rounds += 1;
+        if seconds > 0.0 {
+            // Each round's pace, to see a fanless Mac slow down as it warms.
+            eprintln!(
+                "round {rounds}: {:.0} s, {:.1} passages/s so far",
+                started.elapsed().as_secs_f64(),
+                (texts.len() * rounds) as f64 / started.elapsed().as_secs_f64()
+            );
+        }
+        if started.elapsed().as_secs_f64() >= seconds {
+            break;
+        }
+    }
+    let elapsed = started.elapsed().as_secs_f64();
+    let wall_end = now();
+    let passages = (texts.len() * rounds) as f64;
+    println!(
+        "{}",
+        serde_json::json!({
+            "encoder": encoder, "texts": texts.len(), "rounds": rounds, "tokens": tokens * rounds,
+            "seconds": elapsed, "passages_per_second": passages / elapsed,
+            "tokens_per_second": (tokens * rounds) as f64 / elapsed, "load_seconds": load,
+            "wall_start": wall_start, "wall_end": wall_end,
+        })
+    );
+    let profile = embedder::op_profile();
+    if !profile.is_empty() {
+        let total: f64 = profile.iter().map(|r| r.2).sum();
+        eprintln!("{:<16} {:>7} {:>9} {:>6} {:>9}", "op", "nodes", "ms", "%", "µs/node");
+        for (op, nodes, seconds) in &profile {
+            eprintln!(
+                "{op:<16} {nodes:>7} {:>9.1} {:>5.1}% {:>9.1}",
+                seconds * 1e3,
+                100.0 * seconds / total,
+                seconds * 1e6 / *nodes as f64
+            );
+        }
+    }
+    if let Some(out) = out {
+        let mut writer = std::io::BufWriter::new(std::fs::File::create(out)?);
+        for vector in &vectors {
+            for value in vector {
+                writer.write_all(&value.to_le_bytes())?;
+            }
+        }
+        writer.flush()?;
+    }
+    Ok(())
+}
+
+/// Experiment: fixed work for timing and energy: `count` photos at 140 tokens (the indexer's budget for a photo),
+/// `count` video frames at 70, and `count` 30 s windows of sound, each phase timed with its wall-clock start and end.
+pub fn media(count: usize) -> Result<()> {
+    let files = embedder::ModelFiles::in_folder(&config::models_dir())?;
+    let mut model = embedder::Embedder::load(&files, false)?;
+    // Noise, so nothing about the content is cheaper than a photo.
+    let mut seed = 0x2545_f491_4f6c_dd1du64;
+    let mut noise = || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    let image = embedder::imaging::Image {
+        width: 1600,
+        height: 1200,
+        rgb: (0..1600 * 1200 * 3).map(|_| noise() as u8).collect(),
+    };
+    let sound: Vec<f32> =
+        (0..embedder::AUDIO_WINDOW).map(|_| (noise() as u32 as f32 / u32::MAX as f32 - 0.5) * 0.2).collect();
+    let now = || std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64();
+    let phase = |name: &str, run: &mut dyn FnMut() -> Result<()>| -> Result<()> {
+        run()?;
+        let wall_start = now();
+        let started = std::time::Instant::now();
+        for _ in 0..count {
+            run()?;
+        }
+        let seconds = started.elapsed().as_secs_f64();
+        println!(
+            "{}",
+            serde_json::json!({"phase": name, "count": count, "seconds": seconds, "ms_each": seconds * 1000.0 / count as f64,
+                "wall_start": wall_start, "wall_end": now()})
+        );
+        Ok(())
+    };
+    let photo = embedder::imaging::fit(&image, 140)?;
+    phase("photo-140", &mut || model.embed_image(&photo).map(drop))?;
+    let frame = embedder::imaging::fit(&image, 70)?;
+    phase("frame-70", &mut || model.embed_image(&frame).map(drop))?;
+    phase("sound-30s", &mut || model.embed_audio(&sound).map(drop))?;
+    Ok(())
 }

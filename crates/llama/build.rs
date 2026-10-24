@@ -3,8 +3,11 @@ use std::{env, fs, path::PathBuf};
 
 fn main() {
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
-    // llama.cpp is built for the whole workspace, at its root.
-    let build = manifest.join("../../vendor/llama-build");
+    // llama.cpp is built for the whole workspace, at its root. Experiment: SIFT_LLAMA_BUILD picks another build (a
+    // folder relative to the workspace root, from `LLAMA_TAG=… scripts/build-llama.sh`).
+    println!("cargo:rerun-if-env-changed=SIFT_LLAMA_BUILD");
+    let build =
+        manifest.join("../..").join(env::var("SIFT_LLAMA_BUILD").unwrap_or_else(|_| "vendor/llama-build".into()));
     let lib = build.join("lib");
     let include = build.join("include");
     let tag = fs::read_to_string(build.join("TAG"))
@@ -32,6 +35,9 @@ fn main() {
         .allowlist_function("(llama|mtmd|ggml_log)_.*")
         .allowlist_type("(llama|mtmd|ggml_log)_.*")
         .allowlist_var("(LLAMA|MTMD|GGML_LOG)_.*")
+        // Experiment: the op profile (SIFT_IT_PROFILE_OPS) names each node.
+        .allowlist_type("ggml_tensor")
+        .allowlist_function("ggml_op_desc")
         .prepend_enum_name(false)
         .layout_tests(false)
         .generate()

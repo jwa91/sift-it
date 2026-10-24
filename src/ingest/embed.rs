@@ -69,6 +69,14 @@ impl Embed {
                 _ => "",
             })
             .collect();
+        // Experiment: the texts the indexer embeds, one JSON string a line, to time encoders on (bench-texts).
+        if let Some(path) = std::env::var_os("SIFT_IT_DUMP_TEXTS") {
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
+            for text in &texts {
+                writeln!(file, "{}", serde_json::to_string(text)?)?;
+            }
+        }
         let vectors = self.model(true)?.embed_texts(&texts);
         let failed = vectors.is_err();
         let mut vectors = vectors.unwrap_or_default().into_iter();
