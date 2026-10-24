@@ -65,9 +65,62 @@ three-minute chunks, cut the way `ingest/extract/speech.rs` cuts them (`speech.p
 | Transcripts vs transcribe.cpp (WER-style) | — | 7.5% English, 6.8% Dutch TTS; 6.4% / 6.9% without filler words | 0.7% / 0.55% vs FluidAudio ANE |
 
 Neither transcript is ground truth. The differences are small words, fillers, and numbers: transcribe.cpp writes
-"15", FluidAudio writes "fifteen". **The demo data has no Dutch speech** (all 30 podcasts and the NASA recordings are
-English), so the Dutch here is 25 minutes of macOS TTS (Xander, Ellen) reading the demo's Dutch Wikipedia articles.
-The user offered a real Dutch meeting recording: run the same comparison on that before switching.
+"15", FluidAudio writes "fifteen". The demo data has no Dutch speech (all 30 podcasts and the NASA recordings are
+English), so the Dutch in this table is 25 minutes of macOS TTS. Real Dutch follows.
+
+### Real Dutch: FLEURS and two NOS podcast episodes
+
+Measured on the charger, with the machine quiet. Both engines give identical transcripts on a second run.
+
+**FLEURS Dutch test split, with human transcripts** (google/fleurs `nl_nl`, CC BY 4.0: 364 read sentences, 58 min).
+Each clip went to the helper as its own chunk (`fleurs.py`).
+
+| | WER, plain | WER, compounds merged | Speed | Peak footprint |
+|---|---|---|---|---|
+| transcribe.cpp 0.4.1 | 6.55% | **5.49%** | 103× | 250 MB |
+| FluidAudio, ANE | 6.66% | **5.65%** | 150× | 58 MB |
+| Published, moondream/parakeet-ultra model card | — | 5.46% | — | — |
+
+- **Both ports match the published figure.** The model card scores with the Open ASR Leaderboard's normalizer and
+  compound merging, which is closest to the "compounds merged" column. (The brief's "about 6.7%" isn't on the card:
+  v3 scores 6.18% there.) The two engines disagree with each other on 1.2% of the words.
+- **Normalization** (`dutch.py`), applied the same way to the reference and to both transcripts:
+  - lower case, accents dropped (één = een), punctuation removed, hyphens and apostrophes split words;
+  - numbers written as they're said: 1100–1999 as years ("1940" = negentienveertig), other numbers as cardinals,
+    "11e" as an ordinal, "1,5" as één komma vijf, "10.000" as tienduizend, "%" as procent;
+  - "Compounds merged" joins two neighbouring words when the other side has them as one word (verkeers stroom =
+    verkeersstroom).
+- **Inverse text normalization isn't a switch here.** FluidAudio's (NemoTextProcessing) only knows en, fr, es, de, zh,
+  hi and ja, not Dutch. It's also a separate call, not an ASR option.
+- With short clips, each call's fixed cost weighs more, so the ANE's lead shrinks to 1.5×.
+
+**NOS "De Dag", two episodes of conversation** (a host with reporters and guests, 47 min). Fed in sift-it's
+three-minute chunks. There's no reference, so this table shows agreement only.
+
+| | transcribe.cpp 0.4.1 | FluidAudio, ANE |
+|---|---|---|
+| Speed | 83–90× real time | **256–257×** (3×) |
+| Peak footprint | 313–316 MB | 294–295 MB |
+| Disagreement (WER-style) | | 3.3% of 7,891 words (3.1% without fillers), in 186 spans |
+
+I sorted 60 of the 186 spans (spread evenly over both episodes) from their context. I didn't listen to the audio, so
+the calls are about plausibility:
+
+| Kind | Spans | Examples |
+|---|---|---|
+| number or format | 4 | je/jij, word/wordt, "Huize Soria" spelled two ways |
+| filler or repeated word | 9 | ja, nee, "dan dan", "een een" |
+| **error by transcribe.cpp** | **10** | "ronde brokken" for hondenbrokken, "staande" for staartje, "afkleden" for afknippen, two garbled clauses |
+| **error by FluidAudio** | **19** | the programme name as "nieuwshuur" (twice), the DJ Isis as "ises", three dropped phrases (one English), garbled words ("vrouwenondrukking", "samend draaien") |
+| unclear | 18 | both read naturally: de/een, al/wel, singular or plural, he or she |
+
+- **What it means:** on read Dutch the two are equally accurate. On conversation, FluidAudio makes about twice as many
+  of the clear errors. Spread over the whole disagreement, that's roughly 0.5–1 point more WER for FluidAudio.
+- **Names and dropped phrases matter most for search.** FluidAudio decodes a long chunk in 15 s windows, while
+  transcribe.cpp takes the whole chunk at once. Sent 14 s chunks instead (one window each, cut at quiet points), two
+  of FluidAudio's three dropped phrases come back. But its disagreement with transcribe.cpp rises overall (3.75%
+  against 3.38%, file by file). So its window seams explain some of the drops, but shorter chunks aren't the fix:
+  how it overlaps its windows is the place to look.
 
 ## 3. llama.cpp b11856 (today's latest) vs b11461
 
@@ -125,8 +178,12 @@ llama.cpp upgrade gave more (+18%) than tuning could. Not worth building.
    - the model comes from `FluidInference/parakeet-ultra-coreml` in the HF cache;
    - bump the speech `SOURCE`, so transcripts are written again.
 
-   First check it on real Dutch speech, and decide whether to write numbers as digits (FluidAudio has
-   inverse text normalization, which wasn't tested).
+   **It still stands for Dutch, with one check first.** On FLEURS both engines reach the published WER
+   (5.65% vs 5.49%). On conversational NOS Dutch, FluidAudio makes somewhat more clear errors (19 vs 10 of 60 spans
+   judged), roughly 0.5–1 point of WER, against 3× the speed and 4.8× less energy. Before shipping, look at how it
+   joins its 15 s windows: two of its three dropped phrases come back when each chunk fits one window, but shorter
+   chunks cost more accuracy elsewhere. Its inverse text normalization has no Dutch, so Dutch numbers come out as the
+   model writes them.
 3. **Core ML for text (worth building for the indexer, but it's the costly one; after 1 and 2).** It uses 3.6× less
    energy for 1.2–1.4× the speed, with an identical eval. The cost:
    - a second runtime for one model, while pictures and sound stay on llama.cpp;
@@ -147,7 +204,8 @@ llama.cpp upgrade gave more (+18%) than tuning could. Not worth building.
 
 - Sustained runs. Thermal pressure stayed Nominal in 30–40 s bursts at 13–15 W. Four-minute runs (in `suite.sh full`)
   would show whether the GPU path throttles on this Air, which would strengthen the case for the ANE.
-- Real Dutch speech (see 2).
+- Energy on real Dutch speech: only its speed and accuracy were measured. Energy should follow the speed, as it did
+  for English.
 - FluidAudio's CPU share (6.3 W of 9.5 W, likely the decoder loop). It may leave room for improvement there.
 - Energy with Phase 1's `GGML_METAL_NO_RESIDENCY=1`. These runs use main's residency sets.
 - The design docs' "17.7 passages/s" is another Mac's figure: `bench-embed` gives 46.6 passages/s here.
@@ -161,7 +219,7 @@ llama.cpp upgrade gave more (+18%) than tuning could. Not worth building.
 | `src/ingest/embed.rs` | `SIFT_IT_DUMP_TEXTS=<file>`: the texts the indexer embeds, for `bench-texts` |
 | `scripts/build-llama.sh`, `crates/llama/build.rs` | `LLAMA_TAG/LLAMA_COMMIT` build another release; `SIFT_LLAMA_BUILD` links it |
 | `transcribe/Cargo.toml` | transcribe-cpp 0.4.1 |
-| `experiments/energy-and-speed/` | `suite.sh` (energy suite), `power.py` (energy per workload), `live.py` (watch it live), `speech.py` + `speech-set.sh` + `wer.py` (speech), `fluid-transcribe/` (Swift helper), `opbench/` (ggml op benchmark), `cosine.py`, `eval.sh`, `memory.sh` |
+| `experiments/energy-and-speed/` | `suite.sh` (energy suite), `power.py` (energy per workload), `live.py` (watch it live), `speech.py` + `speech-set.sh` + `wer.py` (speech), `fleurs.py` + `dutch.py` + `disagree.py` (Dutch WER and agreement), `fluid-transcribe/` (Swift helper), `opbench/` (ggml op benchmark), `cosine.py`, `eval.sh`, `memory.sh` |
 
 To run it again: `suite.sh` lists what it needs in the environment. Point `SIFT_IT_MODELS` at the GGUF snapshot in
 the HF cache, and start the suite with `POWER=<file>` while `sudo powermetrics … -o <file>` runs.

@@ -9,6 +9,7 @@ cuts them: about three minutes, at the quietest tenth of a second within ten sec
 sent. The helper runs under /usr/bin/time -l, for its peak memory.
 """
 import json
+import os
 import struct
 import subprocess
 import sys
@@ -18,8 +19,9 @@ import wave
 import numpy as np
 
 RATE = 16_000
-CHUNK = 180 * RATE
-CUT_WINDOW = 10 * RATE
+# sift-it's chunks; SPEECH_CHUNK_SECONDS / SPEECH_CUT_SECONDS try others (14 / 2 keeps FluidAudio in one window).
+CHUNK = int(float(os.environ.get("SPEECH_CHUNK_SECONDS", 180)) * RATE)
+CUT_WINDOW = int(float(os.environ.get("SPEECH_CUT_SECONDS", 10)) * RATE)
 SILENCE = 0.003
 
 
@@ -63,13 +65,38 @@ def read_wav(path):
     raise ValueError(f"no data in {path}")
 
 
+class Helper:
+    """A speech helper under /usr/bin/time -l (for its peak memory): one chunk of samples in, its text out."""
+
+    def __init__(self, helper, model):
+        started = time.time()
+        self.proc = subprocess.Popen(["/usr/bin/time", "-l", helper, model], stdin=subprocess.PIPE,
+                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.ready = json.loads(self.proc.stdout.readline())
+        self.load = time.time() - started
+
+    def run(self, samples):
+        """(text, error, seconds it took)."""
+        started = time.time()
+        self.proc.stdin.write(struct.pack("<I", len(samples)) + samples.astype("<f4").tobytes())
+        self.proc.stdin.flush()
+        answer = json.loads(self.proc.stdout.readline())
+        text = " ".join(s["text"] for s in answer.get("segments", []))
+        return text, answer.get("error"), time.time() - started
+
+    def close(self):
+        """Its peak footprint and resident size, in MB."""
+        self.proc.stdin.close()
+        self.proc.wait()
+        stats = self.proc.stderr.read().decode()
+        peak = next((int(l.split()[0]) for l in stats.splitlines() if "peak memory footprint" in l), None)
+        rss = next((int(l.split()[0]) for l in stats.splitlines() if "maximum resident set size" in l), None)
+        return peak and peak / 2**20, rss and rss / 2**20
+
+
 def main():
     helper, model, out, *files = sys.argv[1:]
-    started = time.time()
-    proc = subprocess.Popen(["/usr/bin/time", "-l", helper, model], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE)
-    ready = json.loads(proc.stdout.readline())
-    load = time.time() - started
+    speaker = Helper(helper, model)
     wall_start = time.time()
     audio = busy = 0.0
     with open(out, "w") as sink:
@@ -80,24 +107,15 @@ def main():
                 audio += seconds
                 if rms(chunk) < SILENCE:
                     continue
-                t = time.time()
-                proc.stdin.write(struct.pack("<I", len(chunk)) + chunk.astype("<f4").tobytes())
-                proc.stdin.flush()
-                answer = json.loads(proc.stdout.readline())
-                took = time.time() - t
+                text, error, took = speaker.run(chunk)
                 busy += took
-                text = " ".join(s["text"] for s in answer.get("segments", []))
                 sink.write(json.dumps({"file": path, "start": start / RATE, "seconds": seconds, "took": took,
-                                       "text": text, "error": answer.get("error")}) + "\n")
+                                       "text": text, "error": error}) + "\n")
     wall_end = time.time()
-    proc.stdin.close()
-    proc.wait()
-    stats = proc.stderr.read().decode()
-    peak = next((int(l.split()[0]) for l in stats.splitlines() if "peak memory footprint" in l), None)
-    rss = next((int(l.split()[0]) for l in stats.splitlines() if "maximum resident set size" in l), None)
-    print(json.dumps({"helper": helper, "ready": ready, "load_seconds": load, "audio_seconds": audio,
-                      "busy_seconds": busy, "rtfx": audio / busy, "peak_footprint_mb": peak and peak / 2**20,
-                      "max_rss_mb": rss and rss / 2**20, "wall_start": wall_start, "wall_end": wall_end}))
+    peak, rss = speaker.close()
+    print(json.dumps({"helper": helper, "ready": speaker.ready, "load_seconds": speaker.load, "audio_seconds": audio,
+                      "busy_seconds": busy, "rtfx": audio / busy, "peak_footprint_mb": peak, "max_rss_mb": rss,
+                      "wall_start": wall_start, "wall_end": wall_end}))
 
 
 if __name__ == "__main__":
