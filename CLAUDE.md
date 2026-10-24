@@ -19,7 +19,9 @@ follows its conventions except where noted under "Exceptions".
 - Archive naming: `{name}_{version}_{os}_{arch}.tar.gz`, with `checksums.txt`
 
 ### Distribution (ADR 0008)
-- Ships as a Homebrew Cask into `jwa91/homebrew-tap/Casks/` (`brew install jwa91/tap/sift-it`)
+- `brew install jwa91/tap/sift-it` installs Sift It.app, which carries this repo's release in `Contents/Helpers`, and
+  links the `sift-it` command from there. That cask is released from sift-it-mac (see Exceptions): a release here
+  publishes the archive, and reaches people when sift-it-mac's `ENGINE_VERSION` names it.
 
 ### Release Process
 - Locally: `make release VERSION=x.y.z` runs the preflight checks (VERSION set and equal to Cargo.toml's, gh auth'd,
@@ -40,19 +42,21 @@ These family rules are Go-specific and don't apply here:
   `cargo fmt --check`, `cargo clippy -D warnings` and `cargo test`.
 - **No GoReleaser.** Its Rust builder always runs `rustup target add`, which a toolchain not managed by rustup doesn't
   allow, and its prebuilt builder is GoReleaser Pro. `scripts/release.sh` does the same steps: build, codesign +
-  notarize, `sift-it_{version}_darwin_arm64.tar.gz` + `checksums.txt`, a GitHub release, and `Casks/sift-it.rb`
-  committed to the tap through the API with the gh login (commit message `feat(sift-it): cask update to vX.Y.Z`).
+  notarize, `sift-it_{version}_darwin_arm64.tar.gz` + `checksums.txt`, and a GitHub release with the gh login.
+- **The cask comes from the app.** `Casks/sift-it.rb` is written by sift-it-mac's release: one cask with the app and the
+  command is one thing for Homebrew to trust, where a cask depending on another in an untrusted tap fails to install.
 - **darwin/arm64 only**, not `darwin+linux × amd64+arm64`. sift-it needs Metal (llama.cpp) and Apple's frameworks
-  (PDFKit, ImageIO, Vision, AVFoundation). The cask says `depends_on macos: :sonoma` (and later) and `depends_on arch: :arm64`.
+  (PDFKit, ImageIO, Vision, AVFoundation). The cask says `depends_on macos: :sonoma` (and later) and
+  `depends_on arch: :arm64`.
 - **A native build step.** `scripts/build-llama.sh` builds llama.cpp at a pinned release before cargo (a `make`
   prerequisite). CI runs on `macos-15`, not `ubuntu-latest`.
 - **No `.env.template`, no 1Password references.** The release needs no secrets of its own: the Developer ID
   certificate and a notarytool profile live in the releasing Mac's keychain (set up once per Mac; see
-  `scripts/codesign.sh`), and the GitHub release and the cask commit use the gh login. The repo holds no credentials
+  `scripts/codesign.sh`), and the GitHub release uses the gh login. The repo holds no credentials
   and no references to any.
 - **Two binaries.** `sift-it-transcribe` (transcribe/, the speech helper) ships beside `sift-it`: transcribe.cpp
-  brings its own ggml, which can't share a binary with llama.cpp's. The release signs and notarizes both, and the cask
-  installs both.
+  brings its own ggml, which can't share a binary with llama.cpp's. The release signs and notarizes both, and Sift It.app
+  carries both.
 - **No separate notarize script.** `scripts/codesign.sh` signs both binaries and notarizes them in one submission,
   after the build.
 

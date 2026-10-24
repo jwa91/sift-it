@@ -37,8 +37,8 @@ eval: build testbed
 	  sh -c 'target/release/sift-it folders add testbed >/dev/null && target/release/sift-it config sources.code true >/dev/null \
 	  && target/release/sift-it index >/dev/null 2>&1 && target/release/sift-it eval evals/evals.json'
 
-# A release, from this Mac: built, signed and notarized with its keychain (scripts/codesign.sh says what it needs),
-# published as a GitHub release, and the cask committed to jwa91/tap, both with your gh login.
+# A release, from this Mac: built, signed and notarized with its keychain (scripts/codesign.sh says what it needs), and
+# published as a GitHub release with your gh login. The cask follows from sift-it-mac, which ships it.
 # Requires Cargo.toml at $(VERSION) and the v$(VERSION) tag at HEAD, pushed. Nothing is built or published until every
 # check passes.
 release:
