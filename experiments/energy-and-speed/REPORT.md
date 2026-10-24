@@ -114,13 +114,59 @@ the calls are about plausibility:
 | **error by FluidAudio** | **19** | the programme name as "nieuwshuur" (twice), the DJ Isis as "ises", three dropped phrases (one English), garbled words ("vrouwenondrukking", "samend draaien") |
 | unclear | 18 | both read naturally: de/een, al/wel, singular or plural, he or she |
 
-- **What it means:** on read Dutch the two are equally accurate. On conversation, FluidAudio makes about twice as many
-  of the clear errors. Spread over the whole disagreement, that's roughly 0.5–1 point more WER for FluidAudio.
+- **What it means, with FluidAudio's defaults:** on read Dutch the two are equally accurate. On conversation,
+  FluidAudio makes about twice as many of the clear errors: roughly 0.5 point more WER, spread over the whole
+  disagreement.
 - **Names and dropped phrases matter most for search.** FluidAudio decodes a long chunk in 15 s windows, while
-  transcribe.cpp takes the whole chunk at once. Sent 14 s chunks instead (one window each, cut at quiet points), two
-  of FluidAudio's three dropped phrases come back. But its disagreement with transcribe.cpp rises overall (3.75%
-  against 3.38%, file by file). So its window seams explain some of the drops, but shorter chunks aren't the fix:
-  how it overlaps its windows is the place to look.
+  transcribe.cpp takes the whole chunk at once. Sent 14 s chunks instead (one window each), two of FluidAudio's three
+  dropped phrases come back, but overall disagreement rises (3.75% against 3.38%, file by file).
+
+### FluidAudio's window settings
+
+FluidAudio cuts a long chunk into windows of 15 s (`ASRConstants.maxModelSamples`), with a 2 s overlap. On v3-family
+models like Ultra, it starts each window at a nearby silence. It merges neighbouring windows by matching token IDs
+within a time tolerance (an LCS fallback, then the overlap's midpoint), and then re-decodes gaps at the seams
+(`Documentation/ASR/LongTranscription.md`).
+
+- **Not configurable through its API:** the window, the overlap, the stride and the merge are constants.
+- **Configurable through `ASRConfig`:**
+  - `melChunkContext`: an 80 ms mel prefix and fixed strides, instead of silence-aligned starts; off by default for
+    v3-family models;
+  - `dualDecodeArbitration`: probe three seam strategies, keep one per file;
+  - `seamGapRepair` and its gap threshold (1.5 s).
+- **Not tried:** its overlap-free "pause-cut" windows only work with a multifunction encoder, which Ultra doesn't ship.
+  Instead, our helper can do the same: cut each chunk at the latest pause (FluidAudio's own rule) into windows of at
+  most 15 s, and decode each one alone (`FLUID_PAUSE_CUT=1`).
+
+Each setting ran on the same NOS chunks. The 60 spans were judged again in each new transcript
+(`rejudge.py`). A sample of 20 of the new disagreements was judged too, for the two settings that changed much.
+
+| FluidAudio setting | Disagreement (all / no fillers) | Of the 60 spans: FluidAudio / transcribe.cpp errors | New disagreements (20 judged: FA / tcpp errors) | Estimated clear errors, all spans: FA / tcpp | Speed |
+|---|---|---|---|---|---|
+| defaults | 3.32% / 3.09% | 19 / 10 | — | ~59 / ~31 | 258× |
+| **`melChunkContext: true`** | 3.43% / 3.14% | **12** / 10 (7 fixed, none broken) | 53 (4 / 2) | **~48 / ~36** | 269× |
+| `dualDecodeArbitration: true` | 3.32% / 3.06% | 19 / 10 (one filler changed) | — | ~59 / ~31 | 125× |
+| seam repair from 0.5 s gaps | 3.40% / 3.18% | 18 / 10 | — | — | 194× |
+| seam repair off | 3.32% / 3.06% | 19 / 10 | — | — | 376× |
+| pause-cut windows, in our helper | 3.76% / 3.54% | 12 / 10 (10 fixed, 4 broken) | 88 (5 / 1) | ~59 / ~29 | 183× |
+
+- **Mel context narrows the gap, without closing it.** It fixes 7 of the 19 errors in the sample: "Nieuwsuur" once,
+  "Isis", two of the three dropped phrases, "bereikt" and two small words. It breaks none of the spans where
+  FluidAudio was right. Its new disagreements are mostly fillers and small words; in the sample, 4 are its errors
+  ("gasthouder" for the Gashouder) and 2 are transcribe.cpp's.
+- **The gap goes from roughly 0.5 to roughly 0.2 points of WER**, at no cost in speed. These are estimates from
+  samples of 60 and 20 spans, judged from text.
+- **The same check elsewhere:**
+  - FLEURS Dutch: 5.67% against 5.65%, unchanged. Its clips each fit one window, where the setting doesn't apply.
+  - The English podcast: agreement without fillers improves (6.28% against 6.42%), and one dropped run of words comes
+    back. Its extra deletions are fillers.
+  - No language drift showed up in either. That's the reason FluidAudio leaves it off by default (its issues
+    #594 and #803).
+- **Pause-cut windows aren't worth the code.** They fix as many errors as they make elsewhere.
+- **Dual decode and the seam-repair settings change almost nothing** on these recordings. The repair pass only costs
+  speed: 258× with it, 376× without.
+- **Caveat:** FluidAudio's docs say which seams fail can shift after the ANE recompiles the model, so results may vary
+  a little across Macs and OS updates. On this Mac, the same build gives identical transcripts run after run.
 
 ## 3. llama.cpp b11856 (today's latest) vs b11461
 
@@ -178,12 +224,12 @@ llama.cpp upgrade gave more (+18%) than tuning could. Not worth building.
    - the model comes from `FluidInference/parakeet-ultra-coreml` in the HF cache;
    - bump the speech `SOURCE`, so transcripts are written again.
 
-   **It still stands for Dutch, with one check first.** On FLEURS both engines reach the published WER
-   (5.65% vs 5.49%). On conversational NOS Dutch, FluidAudio makes somewhat more clear errors (19 vs 10 of 60 spans
-   judged), roughly 0.5–1 point of WER, against 3× the speed and 4.8× less energy. Before shipping, look at how it
-   joins its 15 s windows: two of its three dropped phrases come back when each chunk fits one window, but shorter
-   chunks cost more accuracy elsewhere. Its inverse text normalization has no Dutch, so Dutch numbers come out as the
-   model writes them.
+   **It still stands for Dutch, with `melChunkContext: true`.** On FLEURS both engines reach the published WER
+   (5.65–5.67% vs 5.49%). On conversational NOS Dutch, FluidAudio with its defaults makes about twice as many clear
+   errors as transcribe.cpp, roughly 0.5 point of WER. Mel context brings that to roughly 0.2 points, at no speed
+   cost, against 3× the speed and 4.8× less energy. It's one line in the helper:
+   `ASRConfig(…, melChunkContext: true)`. The rest of FluidAudio's seam settings, and windows of our own, aren't worth
+   it. Its inverse text normalization has no Dutch, so Dutch numbers come out as the model writes them.
 3. **Core ML for text (worth building for the indexer, but it's the costly one; after 1 and 2).** It uses 3.6× less
    energy for 1.2–1.4× the speed, with an identical eval. The cost:
    - a second runtime for one model, while pictures and sound stay on llama.cpp;
@@ -219,7 +265,7 @@ llama.cpp upgrade gave more (+18%) than tuning could. Not worth building.
 | `src/ingest/embed.rs` | `SIFT_IT_DUMP_TEXTS=<file>`: the texts the indexer embeds, for `bench-texts` |
 | `scripts/build-llama.sh`, `crates/llama/build.rs` | `LLAMA_TAG/LLAMA_COMMIT` build another release; `SIFT_LLAMA_BUILD` links it |
 | `transcribe/Cargo.toml` | transcribe-cpp 0.4.1 |
-| `experiments/energy-and-speed/` | `suite.sh` (energy suite), `power.py` (energy per workload), `live.py` (watch it live), `speech.py` + `speech-set.sh` + `wer.py` (speech), `fleurs.py` + `dutch.py` + `disagree.py` (Dutch WER and agreement), `fluid-transcribe/` (Swift helper), `opbench/` (ggml op benchmark), `cosine.py`, `eval.sh`, `memory.sh` |
+| `experiments/energy-and-speed/` | `suite.sh` (energy suite), `power.py` (energy per workload), `live.py` (watch it live), `speech.py` + `speech-set.sh` + `wer.py` (speech), `fleurs.py` + `dutch.py` + `disagree.py` + `rejudge.py` (Dutch WER, agreement, judged spans), `fluid-transcribe/` (Swift helper), `opbench/` (ggml op benchmark), `cosine.py`, `eval.sh`, `memory.sh` |
 
 To run it again: `suite.sh` lists what it needs in the environment. Point `SIFT_IT_MODELS` at the GGUF snapshot in
 the HF cache, and start the suite with `POWER=<file>` while `sudo powermetrics … -o <file>` runs.

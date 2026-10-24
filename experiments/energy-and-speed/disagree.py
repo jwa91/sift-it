@@ -35,7 +35,7 @@ def main():
         assert [x["file"] for x in a] == [x["file"] for x in b], "different files"
     totals = {"all words": [0, 0], "without fillers": [0, 0]}
     spans = []
-    for x, y in zip(a, b):
+    for chunk_index, (x, y) in enumerate(zip(a, b)):
         wa, wb = dutch.merge_compounds(dutch.words(x["text"]), dutch.words(y["text"]))
         for label, (p, q) in (("all words", (wa, wb)),
                               ("without fillers", ([w for w in wa if w not in dutch.FILLERS],
@@ -45,7 +45,8 @@ def main():
         for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, wa, wb, autojunk=False).get_opcodes():
             if tag == "equal":
                 continue
-            spans.append({"file": os.path.basename(x["file"]), "at": x["start"],
+            spans.append({"chunk": chunk_index, "i1": i1, "i2": i2,
+                          "file": os.path.basename(x["file"]), "at": x["start"],
                           "before": " ".join(wa[max(0, i1 - CONTEXT):i1]), "a": " ".join(wa[i1:i2]),
                           "b": " ".join(wb[j1:j2]), "after": " ".join(wa[i2:i2 + CONTEXT])})
     for label, (n, e) in totals.items():
@@ -54,8 +55,11 @@ def main():
     if rest:
         count = int(rest[1]) if len(rest) > 1 else 60
         step = max(1, len(spans) // count)
+        sample = spans[::step][:count]
+        # The same spans, by place, for rejudge.py.
+        json.dump(sample, open(rest[0] + ".json", "w"))
         with open(rest[0], "w") as out:
-            for k, span in enumerate(spans[::step][:count], 1):
+            for k, span in enumerate(sample, 1):
                 out.write(f"{k:3d} [{span['file']} {span['at']:.0f}s] …{span['before']} "
                           f"[A: {span['a'] or '∅'} | B: {span['b'] or '∅'}] {span['after']}…\n")
 
