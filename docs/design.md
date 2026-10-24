@@ -62,6 +62,14 @@ mapped model files come on top, as file pages in memory, counted once however ma
   is as fast, within the noise of three rounds of `sift-it bench-embed` (medians, without and with): a query 10.7 and
   11.9 ms, 44 and 45 passages a second, 30 s of sound 309 and 318 ms. A shorter keep-alive
   (`GGML_METAL_RESIDENCY_KEEP_ALIVE_S`) would let the memory go sooner, but the thread would keep waking.
+- The environment llama.cpp wants is set first thing, while one thread runs (`embedder::set_environment`).
+  - **What's set:** the residency switch above, and AGX_RELAX_CDM_CTXSTORE_TIMEOUT=1, which ggml's Metal backend adds
+    itself when it registers.
+  - **Why it matters:** macOS reallocates the environment's list to add a variable, so a process another thread starts
+    at that moment can get a list that was just freed. When the indexer loaded the model, its readers were starting
+    textutil, and two or three documents failed with "Bad address" now and then.
+  - **Now:** set beforehand, the backend's setenv rewrites the same value in place. `make selftest` fails if loading
+    the models changes the environment.
 
 ## Indexing
 

@@ -40,6 +40,7 @@ pub fn run(folder: &Path) -> Result<()> {
     let expected: BTreeMap<String, Vec<f32>> = serde_json::from_value(reference["vectors"].clone())?;
 
     let text = models::TEXT.require()?;
+    let environment: Vec<_> = std::env::vars_os().collect();
     let started = std::time::Instant::now();
     let mut embedder = Embedder::load(&text, Inputs::Documents)?;
     eprintln!("model loaded in {:.2} s", started.elapsed().as_secs_f64());
@@ -96,6 +97,10 @@ pub fn run(folder: &Path) -> Result<()> {
     }
     embedder.release_encoders();
     load_encoder(&mut embedder, Encoder::Audio, &mmproj)?;
+    // Every variable llama.cpp sets belongs in embedder::set_environment(), before other threads run.
+    if std::env::vars_os().collect::<Vec<_>>() != environment {
+        bail!("loading the models changed the environment: set that variable in embedder::set_environment()");
+    }
     let samples = embedder.decode_audio(&folder.join("speech.wav"))?;
     let started = std::time::Instant::now();
     made.insert("speech".into(), embedder.embed_audio(&samples)?);
