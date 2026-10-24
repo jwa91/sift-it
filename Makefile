@@ -4,8 +4,9 @@ BIN_DIR ?= $(HOME)/.local/bin
 LLAMA := vendor/llama-build/TAG
 VERSION_IN_CARGO := $(shell sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 
-# llama.cpp at its pinned release, static, with Metal (a minute or two, once).
-$(LLAMA):
+# llama.cpp at its pinned release with sift-it's patch, static, with Metal (a minute or two, once, and again when the
+# release or the patch changes).
+$(LLAMA): scripts/build-llama.sh scripts/llama.cpp.patch
 	scripts/build-llama.sh
 
 llama: $(LLAMA)

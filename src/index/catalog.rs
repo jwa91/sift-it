@@ -597,7 +597,7 @@ impl Writer {
     }
 
     /// Makes sure the index's vectors come from the pipeline that makes new ones (`source`, see
-    /// embedder::vector_source). When they don't, every file is queued again; true then.
+    /// embedder::VECTOR_SOURCE). When they don't, every file is queued again; true then.
     pub fn adopt_vector_source(&self, source: &str) -> Result<bool> {
         self.adopt("vector_source", source, || self.requeue_all())
     }

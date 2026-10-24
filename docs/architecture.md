@@ -43,8 +43,8 @@ adapters    index (SQLite and vector files) · embedder (llama.cpp) · transcrib
   Markdown, code, records (CSV, JSON, YAML, TOML), pages, frames, sound windows, speech. Pure, and tested on its own.
 - **Prepare:** a segment becomes the model's input: the prompt with the file's title, a picture fitted to its token
   budget, a window of sound.
-- **Embed:** the model's only owner. It batches inputs and hands back vectors. It holds the text model, and the image
-  and audio encoders only while pictures or sound are read.
+- **Embed:** the model's only owner. It batches inputs and hands back vectors. It holds the text model, the vision
+  encoder only while pictures or video frames are read, and the audio encoder only while sound is.
 - **Write:** the index's only writer. It keeps the rule that a segment's vectors are appended before the segment is
   committed.
 - **Schedule:** what goes first (changes, then the cheapest), how many files are read at once, and whether speech is

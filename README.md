@@ -266,7 +266,7 @@ sift-it config indexing.memory_mb 4096
 `indexing.memory_mb` decides only how fast indexing goes, never what it writes. At `auto` it's a quarter of the
 Mac's memory. With room for the embedding model and the speech model together (about 1.2 and 1 GB, their mapped
 model files included, plus 256 MB for two readers), what's said in recordings is written down beside the reading; with
-less, the models take turns: the image and audio encoders go before the speech model starts. Reading takes up to a
+less, the models take turns: the vision and audio encoders go before the speech model starts. Reading takes up to a
 third of the cores, two to four files at once, and a small budget makes that fewer. `sift-it status` shows the plan.
 
 A reading value resolves in four steps, and the last one that sets it wins: the top of `reading`, the kind

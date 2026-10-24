@@ -1,13 +1,13 @@
-//! Embedding: the model's only owner. It loads the text model when something first needs a vector, and its image and
-//! audio encoders (the larger half, and memory of their own) when a picture or sound does. The encoders go when the
-//! reading is over, the text model when indexing has been idle a while. Texts are embedded in batches, one model call
-//! for up to BATCH of them.
+//! Embedding: the model's only owner. It loads the text model when something first needs a vector, the vision encoder
+//! when a picture or a video frame does, and the audio encoder when sound does (each memory of its own). The encoders go
+//! when the reading is over, the text model when indexing has been idle a while. Texts are embedded in batches, one
+//! model call for up to BATCH of them.
 
 use super::{Payload, Piece};
 use crate::index::NewSegment;
 use crate::models;
 use anyhow::Result;
-use embedder::{Embedder, Inputs};
+use embedder::{Embedder, Encoder, Inputs};
 
 /// Texts embedded in one model call, at most.
 const BATCH: usize = 16;
@@ -29,7 +29,7 @@ impl Embed {
         self.embedder = None;
     }
 
-    /// Frees the image and audio encoders until a picture or sound needs them again.
+    /// Frees the encoders until a picture or sound needs one again.
     pub fn release_encoders(&mut self) {
         if let Some(embedder) = &mut self.embedder {
             embedder.release_encoders();
@@ -81,8 +81,8 @@ impl Embed {
     pub fn one(&mut self, piece: Piece) -> Result<(NewSegment, bool)> {
         let vector = match &piece.payload {
             Payload::None | Payload::Text(_) => Ok(None),
-            Payload::Image(image) => self.encoders()?.embed_image(image).map(Some),
-            Payload::Audio(samples) => self.encoders()?.embed_audio(samples).map(Some),
+            Payload::Image(image) => self.encoder(Encoder::Vision)?.embed_image(image).map(Some),
+            Payload::Audio(samples) => self.encoder(Encoder::Audio)?.embed_audio(samples).map(Some),
         };
         let failed = vector.is_err();
         Ok((segment(piece, vector.ok().flatten()), failed))
@@ -104,11 +104,11 @@ impl Embed {
         Ok(self.embedder.as_mut().expect("just loaded"))
     }
 
-    /// The text model with its image and audio encoders, loaded now if they aren't.
-    fn encoders(&mut self) -> Result<&mut Embedder> {
+    /// The text model with an encoder, loaded now if it isn't.
+    fn encoder(&mut self, encoder: Encoder) -> Result<&mut Embedder> {
         let embedder = self.model()?;
-        if !embedder.has_encoders() {
-            embedder.load_encoders(&models::MEDIA.require()?)?;
+        if !embedder.has_encoder(encoder) {
+            embedder.load_encoder(encoder, &models::MEDIA.require()?)?;
         }
         Ok(embedder)
     }
