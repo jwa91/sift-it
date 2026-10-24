@@ -60,6 +60,13 @@ down what's said in recordings. If [Handy](https://handy.computer) has the same 
 
 ```sh
 brew install jwa91/tap/sift-it
+```
+
+That installs [Sift It](https://github.com/jwa91/sift-it-mac), the Mac app, with sift-it inside it and the `sift-it`
+command on your path. Open Sift It: its welcome window downloads the model, asks which folders to search, and starts
+indexing in the background. In a terminal, the same is:
+
+```sh
 sift-it model download
 sift-it folders add ~/Documents ~/Desktop ~/Downloads
 sift-it service install
