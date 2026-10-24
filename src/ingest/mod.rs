@@ -102,11 +102,11 @@ pub struct Indexer {
 }
 
 impl Indexer {
-    /// An indexer writing to `index`. Vectors from another pipeline (another model or llama.cpp) are dropped, and
-    /// their files queued again: they'd never compare right with new queries. Vector files no partition uses (what a
+    /// An indexer writing to `index`. Vectors from another source (another model, or a pipeline that makes other
+    /// vectors) are dropped, and their files queued again: they'd never compare right with new queries. Vector files no partition uses (what a
     /// crash left, or what was dropped) go.
     pub fn new(mut index: Writer) -> Result<Self> {
-        if index.adopt_vector_source(&embedder::vector_source())? {
+        if index.adopt_vector_source(embedder::VECTOR_SOURCE)? {
             eprintln!("the index was made by another model or pipeline: everything is indexed again");
         }
         if index.adopt_speech_source(crate::adapters::speech::SOURCE)? {

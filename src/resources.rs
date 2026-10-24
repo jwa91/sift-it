@@ -21,7 +21,7 @@ const INGEST_SHARE: f64 = 0.25;
 const SEARCH_SHARE: f64 = 0.1;
 
 /// What the parts of indexing hold at their peak, as measured (docs/design.md): memory of their own (their footprint),
-/// and the model file they map and read on every call. The embedding model with its image and audio encoders: 940 MB,
+/// and the model file they map and read on every call. The embedding model with both its encoders: 940 MB,
 /// and the text model's 296 MB. The speech helper with a three-minute stretch of sound: 330 MB, and its model's 706 MB.
 /// A reader, with what it has decoded.
 const MODEL: u64 = (940 + 296) << 20;

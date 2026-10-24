@@ -5,7 +5,7 @@
 use crate::models;
 use anyhow::{Context, Result, bail};
 use embedder::imaging;
-use embedder::{Decoded, Embedder, Inputs, prompts};
+use embedder::{Embedder, Encoder, Inputs, prompts};
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -43,9 +43,7 @@ pub fn run(folder: &Path) -> Result<()> {
     let started = std::time::Instant::now();
     let mut embedder = Embedder::load(&text, Inputs::Documents)?;
     eprintln!("model loaded in {:.2} s", started.elapsed().as_secs_f64());
-    let started = std::time::Instant::now();
-    embedder.load_encoders(&models::MEDIA.require()?)?;
-    eprintln!("encoders loaded in {:.2} s", started.elapsed().as_secs_f64());
+    let mmproj = models::MEDIA.require()?;
 
     let long = (1..=60)
         .map(|n| {
@@ -85,20 +83,20 @@ pub fn run(folder: &Path) -> Result<()> {
     }
     drop(queries);
 
+    // Each encoder on its own, as indexing loads them.
+    load_encoder(&mut embedder, Encoder::Vision, &mmproj)?;
     for (name, file, budget) in
         [("screen-280", "screen.png", 280), ("photo-140", "photo.jpg", 140), ("frame-70", "photo.jpg", 70)]
     {
-        let Decoded::Image(image) = embedder.decode_with_mtmd(&folder.join(file))? else {
-            bail!("{file} isn't an image")
-        };
+        let image = embedder.decode_image(&folder.join(file))?;
         let started = std::time::Instant::now();
         let vector = embedder.embed_image(&imaging::fit(&image, budget)?)?;
         eprintln!("{name} in {:.0} ms", started.elapsed().as_secs_f64() * 1000.0);
         made.insert(name.into(), vector);
     }
-    let Decoded::Audio(samples) = embedder.decode_with_mtmd(&folder.join("speech.wav"))? else {
-        bail!("speech.wav isn't audio")
-    };
+    embedder.release_encoders();
+    load_encoder(&mut embedder, Encoder::Audio, &mmproj)?;
+    let samples = embedder.decode_audio(&folder.join("speech.wav"))?;
     let started = std::time::Instant::now();
     made.insert("speech".into(), embedder.embed_audio(&samples)?);
     eprintln!(
@@ -119,5 +117,13 @@ pub fn run(folder: &Path) -> Result<()> {
         bail!("vectors differ from the reference (worst cosine {worst:.5} < {AGREEMENT})");
     }
     println!("all vectors match the reference (worst cosine {worst:.5})");
+    Ok(())
+}
+
+/// Loads an encoder, and says how long that took.
+fn load_encoder(embedder: &mut Embedder, encoder: Encoder, mmproj: &Path) -> Result<()> {
+    let started = std::time::Instant::now();
+    embedder.load_encoder(encoder, mmproj)?;
+    eprintln!("{encoder} encoder loaded in {:.2} s", started.elapsed().as_secs_f64());
     Ok(())
 }

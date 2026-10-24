@@ -36,7 +36,7 @@ pub const TEXT: ModelFile = ModelFile {
     sha256: "2188ac1deca4b77dffefd603c2776a9d76d9d74ec01841392982ebb840b09135",
 };
 
-/// Its image and audio encoders, for pictures and sound.
+/// Its vision and audio encoders (the mmproj), for pictures and sound. Each loads on its own.
 pub const MEDIA: ModelFile = ModelFile {
     repository: "ggml-org/embeddinggemma-2-GGUF",
     revision: "bfcd298762cc34d0357ece5ebdd31791a3a374d8",

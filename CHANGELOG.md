@@ -15,10 +15,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com); versions follow
   cache, and never removes anything from it. The models in `~/Library/Application Support/Sift It/models` aren't used
   any more: `sift-it model download` fetches them into the cache, and that folder can go. `sift-it model status`
   says which cache (`cache`, in place of `folder` and `speech_model`).
-- The indexer loads the image and audio encoders only while it reads pictures and sound, and lets them go when the
-  reading is over: text alone, and writing down what's said after the reading, take the text model only. Reading
-  text takes 336 MB instead of 910 MB, and writing down speech after the reading 690 MB with the helper instead of
-  1.8 GB.
+- The indexer loads the vision encoder only while it reads pictures and video frames, and the audio encoder only while
+  it reads sound, and lets them go when the reading is over: text alone, and writing down what's said after the
+  reading, take the text model only. Reading text takes 336 MB instead of 910 MB, photos 544 MB and music 601 MB
+  instead of about 870 MB, and writing down speech after the reading 690 MB with the helper instead of 1.8 GB.
+- llama.cpp b11856 (was b11461): passages embed 8% faster and sound 9% faster, a query about 1 ms slower. Pictures'
+  vectors move a little (cosine 0.9989 or more to the old ones), so an existing index is read again once, speech
+  included. After that, a llama.cpp release that passes `sift-it selftest` keeps the index as it is: the index records
+  the model and the pipeline's version, no longer the llama.cpp release.
 - The speech helper maps its model (transcribe.cpp 0.4.1) instead of copying it into memory: 330 MB of its own
   instead of 1 GB. Its transcripts are the same, so they aren't written down again.
 - The engine's model has a context made for one query: 32 MB of compute buffers instead of 63 MB.

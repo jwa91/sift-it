@@ -1,5 +1,5 @@
 // Links the llama.cpp build from scripts/build-llama.sh and generates Rust bindings for its C API (llama.h, mtmd.h).
-use std::{env, fs, path::PathBuf};
+use std::{env, path::PathBuf};
 
 fn main() {
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
@@ -7,14 +7,12 @@ fn main() {
     let build = manifest.join("../../vendor/llama-build");
     let lib = build.join("lib");
     let include = build.join("include");
-    let tag = fs::read_to_string(build.join("TAG"))
-        .expect("llama.cpp isn't built yet: run `make llama` (scripts/build-llama.sh)")
-        .trim()
-        .to_string();
+    // scripts/build-llama.sh writes TAG last, after a build.
+    let built = build.join("TAG");
+    assert!(built.exists(), "llama.cpp isn't built yet: run `make llama` (scripts/build-llama.sh)");
 
-    println!("cargo:rerun-if-changed={}", build.join("TAG").display());
+    println!("cargo:rerun-if-changed={}", built.display());
     println!("cargo:rerun-if-changed=wrapper.h");
-    println!("cargo:rustc-env=SIFT_LLAMA_TAG={tag}");
 
     println!("cargo:rustc-link-search=native={}", lib.display());
     for name in ["llama", "mtmd", "ggml", "ggml-base", "ggml-cpu", "ggml-metal", "ggml-blas", "vendor-hash"] {

@@ -7,9 +7,10 @@ use crate::models;
 use crate::query;
 use anyhow::Result;
 use protocol::{Kind, Search};
+use std::path::Path;
 
 /// How fast the model embeds here: a query as the engine embeds it, passages in a batch and one at a time, pictures at
-/// three token budgets, and 30 s of sound.
+/// three token budgets, and 30 s of sound. And what each encoder takes to load, and holds.
 pub fn embed() -> Result<()> {
     let text = models::TEXT.require()?;
     let mut queries = embedder::Embedder::load(&text, embedder::Inputs::Queries)?;
@@ -24,7 +25,7 @@ pub fn embed() -> Result<()> {
     times.sort_by(f64::total_cmp);
     println!("a query: {:.1} ms (the median of 50)", times[25]);
     let mut model = embedder::Embedder::load(&text, embedder::Inputs::Documents)?;
-    model.load_encoders(&models::MEDIA.require()?)?;
+    let mmproj = models::MEDIA.require()?;
     let passage = "The tenant pays a security deposit of two months' rent, returned within fourteen days of the \
         end of the lease minus the cost of any damage beyond normal wear. Gas, water and electricity are paid by \
         the tenant; internet is included in the rent. "
@@ -42,6 +43,7 @@ pub fn embed() -> Result<()> {
     }
     let seconds = started.elapsed().as_secs_f64();
     println!("the same one at a time: {:.2} s, {:.1} passages/s", seconds, 64.0 / seconds);
+    load_encoder(&mut model, embedder::Encoder::Vision, &mmproj)?;
     let image = embedder::imaging::Image { width: 1024, height: 768, rgb: vec![128; 1024 * 768 * 3] };
     for budget in [70, 140, 280] {
         let fitted = embedder::imaging::fit(&image, budget)?;
@@ -52,6 +54,7 @@ pub fn embed() -> Result<()> {
         }
         println!("picture at {budget} tokens: {:.0} ms", started.elapsed().as_secs_f64() * 100.0);
     }
+    load_encoder(&mut model, embedder::Encoder::Audio, &mmproj)?;
     let sound: Vec<f32> = (0..embedder::AUDIO_WINDOW).map(|i| ((i as f32) * 0.05).sin() * 0.1).collect();
     model.embed_audio(&sound)?;
     let started = std::time::Instant::now();
@@ -59,6 +62,16 @@ pub fn embed() -> Result<()> {
         model.embed_audio(&sound)?;
     }
     println!("30 s of sound: {:.0} ms", started.elapsed().as_secs_f64() * 200.0);
+    Ok(())
+}
+
+/// Loads an encoder, and says what that took: the time, and the memory of its own it holds.
+fn load_encoder(model: &mut embedder::Embedder, encoder: embedder::Encoder, mmproj: &Path) -> Result<()> {
+    let before = footprint();
+    let started = std::time::Instant::now();
+    model.load_encoder(encoder, mmproj)?;
+    let ms = started.elapsed().as_secs_f64() * 1000.0;
+    println!("the {encoder} encoder: loaded in {ms:.0} ms, holding {} MB", footprint().saturating_sub(before) >> 20);
     Ok(())
 }
 

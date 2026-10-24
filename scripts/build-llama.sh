@@ -3,18 +3,19 @@
 #
 #   scripts/build-llama.sh          → vendor/llama-build/{lib,include}
 #
-# The tag is pinned: EmbeddingGemma 2 (text, vision and audio) needs b11452 or later, and a newer llama.cpp can make
-# slightly different vectors, which would make an existing index disagree with new queries. Bump TAG on purpose, then
-# run `make selftest` to check the vectors still match.
+# The release is pinned, with sift-it's change to mtmd (scripts/llama.cpp.patch). Another release can make slightly
+# different vectors, which would make an existing index disagree with new queries: bump TAG on purpose, then run
+# `make selftest`. When it passes, indexes keep their vectors; when it doesn't, bump `embedder::VECTOR_SOURCE`.
 set -euo pipefail
 
-TAG=b11461
-COMMIT=4d756bc72bf00a4aacf410ae15a2d315f3db400d
+TAG=b11856
+COMMIT=3642238cc12050c8ab70afdf4b3121ea365c7579
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SOURCE="$ROOT/vendor/llama.cpp"
 BUILD="$ROOT/vendor/llama.cpp/build-sift"
 OUT="$ROOT/vendor/llama-build"
+PATCH="$ROOT/scripts/llama.cpp.patch"
 
 if [[ ! -d "$SOURCE/.git" ]]; then
   git -c advice.detachedHead=false clone --quiet --depth 1 --branch "$TAG" https://github.com/ggml-org/llama.cpp "$SOURCE"
@@ -24,14 +25,10 @@ if [[ "$(git -C "$SOURCE" rev-parse HEAD)" != "$COMMIT" ]]; then
   exit 1
 fi
 
-# An embedding model only needs the pooled vectors, but llama.cpp reserves a logits row (vocabulary-sized: 262k floats
-# for Gemma, 1 MiB) for every token of every input. Skip that for non-causal embedding contexts.
-CONTEXT="$SOURCE/src/llama-context.cpp"
-if grep -q '^    bool has_logits     = true;$' "$CONTEXT"; then
-  sed -i '' 's/^    bool has_logits     = true;$/    bool has_logits     = !(cparams.embeddings \&\& !cparams.causal_attn);/' "$CONTEXT"
+# The patch, unless it's applied already.
+if ! git -C "$SOURCE" apply --reverse --check "$PATCH" 2> /dev/null; then
+  git -C "$SOURCE" apply "$PATCH"
 fi
-grep -q 'bool has_logits     = !(cparams.embeddings && !cparams.causal_attn);' "$CONTEXT" \
-  || { echo "couldn't apply the logits fix to $CONTEXT" >&2; exit 1; }
 
 cmake -S "$SOURCE" -B "$BUILD" -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0 \
   -DBUILD_SHARED_LIBS=OFF -DGGML_METAL=ON -DGGML_METAL_EMBED_LIBRARY=ON -DGGML_NATIVE=OFF \

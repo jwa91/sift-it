@@ -6,4 +6,5 @@ Abdur Rahim holds the copyright for this material. [LICENSE](LICENSE) contains D
 
 DigUp generated the vectors with EmbeddingGemma 2 (ggml-org Q8_0) on llama.cpp b11461.
 DigUp reports cosine ≥ 0.999 against the transformers/MLX reference.
-`sift-it selftest` compares its output with these vectors for the same inputs.
+`sift-it selftest` compares its output with these vectors for the same inputs, whichever llama.cpp release sift-it
+is built with.

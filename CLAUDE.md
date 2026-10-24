@@ -70,6 +70,7 @@ These family rules are Go-specific and don't apply here:
   of 19 at the right place, 0/4 false alarms. "someone who can fix a leaking tap" finds contacts.csv first, but too
   weakly to show it (a table's many rows lower its score); "penguin in the film" opens where the narration names it,
   a few seconds before it's shown.
-- The index records which pipeline made its vectors (`embedder::vector_source`); bump its version when vectors change
-  on purpose, and indexes re-embed. When a kind is read or cut differently, bump its `ingest::read::version` instead:
+- The index records what made its vectors (`embedder::VECTOR_SOURCE`): the model and the pipeline's version, not the
+  llama.cpp release. Bump the version when vectors change, on purpose or with a llama.cpp release that fails
+  `make selftest`, and indexes re-embed. When a kind is read or cut differently, bump its `ingest::read::version` instead:
   only its files are read again.

@@ -118,7 +118,7 @@ impl Searcher {
             return Ok(false);
         }
         self.data_version = version;
-        self.compatible = self.index.meta("vector_source")?.is_none_or(|source| source == embedder::vector_source());
+        self.compatible = self.index.meta("vector_source")?.is_none_or(|source| source == embedder::VECTOR_SOURCE);
         self.file_kinds = self.index.file_kinds()?;
         if self.loaded {
             self.vectors.catch_up(&self.index)?;

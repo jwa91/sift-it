@@ -25,8 +25,8 @@ list would no longer be comparable.
 
 ## The models
 
-Three model files, 1.6 GB together: EmbeddingGemma 2's text model (310 MB) and its image and audio encoders
-(555 MB), and Parakeet Ultra for speech (740 MB).
+Three model files, 1.6 GB together: EmbeddingGemma 2's text model (310 MB) and its vision and audio encoders
+(555 MB, one file), and Parakeet Ultra for speech (740 MB).
 
 - **Stored once.** They're kept in the Hugging Face cache that other apps share (`$HF_HUB_CACHE`, else
   `$HF_HOME/hub`, else `~/.cache/huggingface/hub`), in its layout. The hub names a file's blob after its SHA-256, so a
@@ -36,11 +36,12 @@ Three model files, 1.6 GB together: EmbeddingGemma 2's text model (310 MB) and i
   never removes anything, and uninstalling it leaves the files there for the other apps.
 - **Loaded once.** llama.cpp and transcribe.cpp map the weights from their files and Metal uses them in place, so the
   engine and the indexer share the text model's pages, and macOS can drop them when memory runs short and read them
-  again. Only the image and audio encoders are read into memory of their own: llama.cpp's mtmd copies them.
+  again. Only the vision and audio encoders are read into memory of their own: llama.cpp's mtmd copies them.
 - **Only what a step needs.** A search by meaning loads the text model, with a context made for one query. The
-  indexer loads the text model for text, the encoders while it reads pictures and sound, and the speech helper while
-  it writes down what's said. When the reading is over, the encoders go, so on a small budget the speech helper runs
-  beside the text model alone.
+  indexer loads the text model for text, the vision encoder while it reads pictures and video frames, the audio
+  encoder while it reads sound, and the speech helper while it writes down what's said. Both encoders are in one file,
+  and each loads on its own (a switch sift-it adds to mtmd: `scripts/llama.cpp.patch`). When the reading is over, the
+  encoders go, so on a small budget the speech helper runs beside the text model alone.
 
 Measured on an M5 with 24 GB, on part of the demo folder, as footprint: the memory a process has of its own. The
 mapped model files come on top, as file pages in memory, counted once however many processes map them.
@@ -48,8 +49,9 @@ mapped model files come on top, as file pages in memory, counted once however ma
 - The engine holds 162 MB after a search by meaning, and 49 MB once it lets the model go. Its context for one query
   of up to 256 tokens takes 32 MB of compute buffers, where a context for documents (16 passages, or 2,048 tokens)
   takes 276 MB. Most of the rest is llama.cpp's tokenizer: 800,000 small allocations for its 262,000 tokens.
-- The indexer holds 336 MB while it reads text, and 940 MB while it reads pictures and sound: the encoders take about
-  600 MB.
+- The indexer holds 338 MB while it reads text, 544 MB while it reads photos, 601 MB while it reads music, and 877 MB
+  while it reads videos, which take both encoders. The vision encoder holds 289 MB and loads in 51 ms; the audio
+  encoder holds 321 MB and loads in 69 ms (`sift-it bench-embed`, the file in memory).
 - While speech is written down with the models taking turns, the indexer holds 360 MB and the speech helper 330 MB.
 - The engine and the indexer reading text at once hold 500 MB together.
 - ggml's Metal backend keeps its buffers resident for three minutes after each call (residency sets, macOS 15 and
@@ -218,7 +220,7 @@ The index stores, per file, a fingerprint of how it was read: its reader's versi
 uses, as the cascade resolves them for that file. A sync compares it like the size and the modified time, so a change
 queues exactly the files it affects, wherever in the cascade it was made. Whether speech is written down stays out of
 it: that comes after reading, so moving between `meaning` and `speech` adds or drops transcripts without reading a
-file again. `embedder::vector_source` and `speech::source` cover the models: another model reads everything again.
+file again. `embedder::VECTOR_SOURCE` and `speech::source` cover the models: another model reads everything again.
 
 ### The cascade
 

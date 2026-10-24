@@ -1,0 +1,77 @@
+sift-it's change to llama.cpp, applied by scripts/build-llama.sh.
+
+mtmd loads every encoder an mmproj holds. EmbeddingGemma 2's (ggml-org's mmproj-embeddinggemma-2-Q8_0.gguf) holds a
+vision and an audio encoder, which mtmd copies into memory of their own: 215 and 312 MiB. use_vision and use_audio in
+mtmd_context_params say which to load, so pictures load only the vision encoder and sound only the audio encoder, from
+the one file. Both default to true, as before.
+
+diff --git a/tools/mtmd/clip.cpp b/tools/mtmd/clip.cpp
+index d204708..9805968 100644
+--- a/tools/mtmd/clip.cpp
++++ b/tools/mtmd/clip.cpp
+@@ -4321,7 +4321,7 @@ struct clip_init_result clip_init(const char * fname, struct clip_context_params
+             ctx_params.progress_callback_user_data);
+         bool skip_audio = false;
+ 
+-        if (loader.has_vision) {
++        if (loader.has_vision && ctx_params.use_vision) {
+             ctx_vision = new clip_ctx(ctx_params);
+             loader.load_hparams(ctx_vision->model, CLIP_MODALITY_VISION);
+             loader.load_tensors(*ctx_vision);
+@@ -4335,7 +4335,7 @@ struct clip_init_result clip_init(const char * fname, struct clip_context_params
+             skip_audio = ctx_vision->model.proj_type == PROJECTOR_TYPE_GEMMA3NV;
+         }
+ 
+-        if (loader.has_audio && !skip_audio) {
++        if (loader.has_audio && ctx_params.use_audio && !skip_audio) {
+             ctx_audio = new clip_ctx(ctx_params);
+             loader.load_hparams(ctx_audio->model, CLIP_MODALITY_AUDIO);
+             loader.load_tensors(*ctx_audio);
+diff --git a/tools/mtmd/clip.h b/tools/mtmd/clip.h
+index cd3f434..3777b08 100644
+--- a/tools/mtmd/clip.h
++++ b/tools/mtmd/clip.h
+@@ -55,6 +55,8 @@ struct clip_context_params {
+     int image_min_tokens;
+     int image_max_tokens;
+     bool warmup;
++    bool use_vision;
++    bool use_audio;
+     ggml_backend_sched_eval_callback cb_eval;
+     void * cb_eval_user_data;
+     bool no_alloc;
+diff --git a/tools/mtmd/mtmd.cpp b/tools/mtmd/mtmd.cpp
+index e18f639..7f50236 100644
+--- a/tools/mtmd/mtmd.cpp
++++ b/tools/mtmd/mtmd.cpp
+@@ -506,6 +506,8 @@ mtmd_context_params mtmd_context_params_default() {
+         /* media_marker      */ mtmd_default_marker(),
+         /* flash_attn_type   */ LLAMA_FLASH_ATTN_TYPE_AUTO,
+         /* warmup            */ true,
++        /* use_vision        */ true,
++        /* use_audio         */ true,
+         /* image_min_tokens  */ -1,
+         /* image_max_tokens  */ -1,
+         /* cb_eval           */ nullptr,
+@@ -613,6 +615,8 @@ struct mtmd_context {
+             /* image_min_tokens  */ ctx_params.image_min_tokens,
+             /* image_max_tokens  */ ctx_params.image_max_tokens,
+             /* warmup            */ ctx_params.warmup,
++            /* use_vision        */ ctx_params.use_vision,
++            /* use_audio         */ ctx_params.use_audio,
+             /* cb_eval           */ ctx_params.cb_eval,
+             /* cb_eval_user_data */ ctx_params.cb_eval_user_data,
+             /* no_alloc          */ no_alloc,
+diff --git a/tools/mtmd/mtmd.h b/tools/mtmd/mtmd.h
+index 0a6bf4c..168a2fc 100644
+--- a/tools/mtmd/mtmd.h
++++ b/tools/mtmd/mtmd.h
+@@ -106,6 +106,8 @@ struct mtmd_context_params {
+     const char * media_marker;
+     enum llama_flash_attn_type flash_attn_type;
+     bool warmup; // whether to run a warmup encode pass after initialization
++    bool use_vision; // load the vision encoder, if the mmproj has one (default: true)
++    bool use_audio;  // load the audio encoder, if the mmproj has one (default: true)
+ 
+     // limit number of image tokens, only for vision models with dynamic resolution
+     int image_min_tokens; // minimum number of tokens for image input (default: read from metadata)

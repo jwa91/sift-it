@@ -1,6 +1,7 @@
 //! EmbeddingGemma 2 on llama.cpp (Metal). Text goes straight into the text model; images and audio go through the
-//! model's own encoders (llama.cpp's mtmd library) and their output rows are fed to the text model in place of tokens.
-//! Every input becomes one mean-pooled, L2-normalized 768-dimensional vector in the same space.
+//! model's own encoders (llama.cpp's mtmd library), each loaded on its own, and their output rows are fed to the text
+//! model in place of tokens. Every input becomes one mean-pooled, L2-normalized 768-dimensional vector in the same
+//! space.
 //!
 //! Inputs are framed the way the reference implementation (transformers) frames them: `<bos> text <eos>`, and
 //! `<bos> <image soft tokens> <eos>` (the same for audio). The model has no causal mask and no KV cache to keep, so each input
@@ -19,9 +20,6 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 #[allow(non_upper_case_globals, non_camel_case_types, non_snake_case, dead_code, clippy::all)]
 mod ll {
     include!(concat!(env!("OUT_DIR"), "/llama.rs"));
-
-    /// The llama.cpp release the engine was built with.
-    pub const BUILD_TAG: &str = env!("SIFT_LLAMA_TAG");
 }
 
 /// The width of every vector.
@@ -46,17 +44,34 @@ pub enum Inputs {
 /// The tokens a query may have. 256 holds a pasted paragraph (about 1,000 characters); a longer query keeps its start.
 const QUERY_TOKENS: usize = 256;
 
-/// A short description of the pipeline that made a vector. Stored with the index: vectors from a different pipeline
-/// must never be compared with these.
-pub fn vector_source() -> String {
-    format!("embeddinggemma-2-q8_0/llama.cpp-{}/v1", ll::BUILD_TAG)
+/// What makes the vectors: the model, and the version of the pipeline around it (the prompts, the framing, the
+/// picture sizing). Stored with the index: vectors from another source are never compared with these. The llama.cpp
+/// release isn't in it: one that passes `sift-it selftest` makes the same vectors. Bump the version when they move,
+/// on purpose or with a release that doesn't pass, and indexes embed everything again.
+pub const VECTOR_SOURCE: &str = "embeddinggemma-2-q8_0/v1";
+
+/// The model's media encoders. Both are in one file (the mmproj), and each loads on its own: the vision encoder for
+/// pictures and video frames, the audio encoder for sound.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Encoder {
+    Vision,
+    Audio,
+}
+
+impl std::fmt::Display for Encoder {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str(match self {
+            Encoder::Vision => "vision",
+            Encoder::Audio => "audio",
+        })
+    }
 }
 
 pub struct Embedder {
     model: *mut ll::llama_model,
     context: *mut ll::llama_context,
-    /// The image and audio encoders, while they're loaded (else null).
-    media: *mut ll::mtmd_context,
+    /// The encoders, by `Encoder`, each while it's loaded (else null).
+    encoders: [*mut ll::mtmd_context; 2],
     batch: *mut ll::llama_batch_ext,
     vocab: *const ll::llama_vocab,
     eos: ll::llama_token,
@@ -133,13 +148,6 @@ impl Drop for Chunks {
     }
 }
 
-/// What mtmd's own decoders (stb_image, miniaudio) make of a file. Used to check the pipeline against reference
-/// vectors made from the same decoders.
-pub enum Decoded {
-    Image(Image),
-    Audio(Vec<f32>),
-}
-
 impl Embedder {
     /// Loads the text model from its GGUF file, with a context made for `inputs`. Its weights are mapped from the
     /// file, not copied: processes that load it share them, and macOS can drop them under pressure and read them again.
@@ -178,7 +186,7 @@ impl Embedder {
             let mut embedder = Self {
                 model,
                 context,
-                media: std::ptr::null_mut(),
+                encoders: [std::ptr::null_mut(); 2],
                 batch: ll::llama_batch_ext_init(context),
                 vocab,
                 eos: ll::llama_vocab_eos(vocab),
@@ -199,10 +207,10 @@ impl Embedder {
         }
     }
 
-    /// Loads the image and audio encoders from their GGUF file (the mmproj), unless they're loaded. llama.cpp reads
-    /// them into memory of their own (about 0.6 GB), so they're loaded only while pictures or sound are embedded.
-    pub fn load_encoders(&mut self, media: &Path) -> Result<()> {
-        if !self.media.is_null() {
+    /// Loads an encoder from the model's mmproj, unless it's loaded. mtmd reads it into memory of its own, so it's
+    /// loaded only while pictures or sound need it.
+    pub fn load_encoder(&mut self, encoder: Encoder, mmproj: &Path) -> Result<()> {
+        if self.has_encoder(encoder) {
             return Ok(());
         }
         unsafe {
@@ -210,28 +218,33 @@ impl Embedder {
             params.use_gpu = true;
             params.print_timings = false;
             params.warmup = true;
+            // The mmproj holds both encoders: this one alone (scripts/llama.cpp.patch).
+            params.use_vision = encoder == Encoder::Vision;
+            params.use_audio = encoder == Encoder::Audio;
             // Images arrive already sized for their token budget (imaging::fit): mtmd must take them as they are.
             params.image_min_tokens = 1;
             params.image_max_tokens = 1120;
-            let encoders = ll::mtmd_init_from_file(c_path(media)?.as_ptr(), self.model, params);
-            if encoders.is_null() {
-                bail!("llama.cpp couldn't load the image and audio encoders");
+            let loaded = ll::mtmd_init_from_file(c_path(mmproj)?.as_ptr(), self.model, params);
+            if loaded.is_null() {
+                bail!("llama.cpp couldn't load the {encoder} encoder from {}", mmproj.display());
             }
-            self.media = encoders;
+            self.encoders[encoder as usize] = loaded;
         }
         Ok(())
     }
 
-    /// Frees the image and audio encoders; the text model stays.
+    /// Frees the encoders; the text model stays.
     pub fn release_encoders(&mut self) {
-        if !self.media.is_null() {
-            unsafe { ll::mtmd_free(self.media) };
-            self.media = std::ptr::null_mut();
+        for encoder in &mut self.encoders {
+            if !encoder.is_null() {
+                unsafe { ll::mtmd_free(*encoder) };
+                *encoder = std::ptr::null_mut();
+            }
         }
     }
 
-    pub fn has_encoders(&self) -> bool {
-        !self.media.is_null()
+    pub fn has_encoder(&self, encoder: Encoder) -> bool {
+        !self.encoders[encoder as usize].is_null()
     }
 
     /// One vector per text, in order. Prompts (query or document framing) are the caller's: see `prompts`.
@@ -260,7 +273,7 @@ impl Embedder {
 
     /// An image's vector. It must already be sized for its token budget (`imaging::fit`).
     pub fn embed_image(&mut self, image: &Image) -> Result<Vec<f32>> {
-        self.require_media()?;
+        let context = self.encoder(Encoder::Vision)?;
         let expected = image.width as usize * image.height as usize * 3;
         if image.rgb.len() != expected {
             bail!("image buffer is {} bytes, expected {expected}", image.rgb.len());
@@ -269,12 +282,12 @@ impl Embedder {
         if bitmap.is_null() {
             bail!("mtmd couldn't take a {}×{} image", image.width, image.height);
         }
-        self.embed_media(Bitmap(bitmap))
+        self.embed_media(context, Bitmap(bitmap))
     }
 
     /// A stretch of 16 kHz mono audio's vector; past 30 seconds is cut off.
     pub fn embed_audio(&mut self, samples: &[f32]) -> Result<Vec<f32>> {
-        self.require_media()?;
+        let context = self.encoder(Encoder::Audio)?;
         if samples.is_empty() {
             bail!("no audio samples");
         }
@@ -283,15 +296,38 @@ impl Embedder {
         if bitmap.is_null() {
             bail!("mtmd couldn't take {} audio samples", samples.len());
         }
-        self.embed_media(Bitmap(bitmap))
+        self.embed_media(context, Bitmap(bitmap))
     }
 
-    /// Decodes an image or audio file with mtmd's own decoders (stb_image, miniaudio at 16 kHz).
-    pub fn decode_with_mtmd(&self, path: &Path) -> Result<Decoded> {
-        self.require_media()?;
+    /// A picture as mtmd's own decoder (stb_image) reads it, with the vision encoder. Used to check the pipeline
+    /// against reference vectors made from the same decoders.
+    pub fn decode_image(&self, path: &Path) -> Result<Image> {
+        let bitmap = self.decode(Encoder::Vision, path)?;
+        unsafe {
+            let data = ll::mtmd_bitmap_get_data(bitmap.0);
+            Ok(Image {
+                width: ll::mtmd_bitmap_get_nx(bitmap.0),
+                height: ll::mtmd_bitmap_get_ny(bitmap.0),
+                rgb: std::slice::from_raw_parts(data, ll::mtmd_bitmap_get_n_bytes(bitmap.0)).to_vec(),
+            })
+        }
+    }
+
+    /// Sound as mtmd's own decoder (miniaudio, at 16 kHz) reads it, with the audio encoder.
+    pub fn decode_audio(&self, path: &Path) -> Result<Vec<f32>> {
+        let bitmap = self.decode(Encoder::Audio, path)?;
+        unsafe {
+            let data = ll::mtmd_bitmap_get_data(bitmap.0) as *const f32;
+            Ok(std::slice::from_raw_parts(data, ll::mtmd_bitmap_get_n_bytes(bitmap.0) / 4).to_vec())
+        }
+    }
+
+    /// A file decoded by mtmd for `encoder`.
+    fn decode(&self, encoder: Encoder, path: &Path) -> Result<Bitmap> {
+        let context = self.encoder(encoder)?;
         unsafe {
             let wrapper = ll::mtmd_helper_bitmap_init_from_file(
-                self.media,
+                context,
                 c_path(path)?.as_ptr(),
                 false,
                 ll::mtmd_helper_init_opt_default(),
@@ -303,29 +339,23 @@ impl Embedder {
                 bail!("mtmd can't read {}", path.display());
             }
             let bitmap = Bitmap(wrapper.bitmap);
-            let data = ll::mtmd_bitmap_get_data(bitmap.0);
-            let bytes = ll::mtmd_bitmap_get_n_bytes(bitmap.0);
-            if ll::mtmd_bitmap_is_audio(bitmap.0) {
-                let samples = std::slice::from_raw_parts(data as *const f32, bytes / 4);
-                Ok(Decoded::Audio(samples.to_vec()))
-            } else {
-                Ok(Decoded::Image(Image {
-                    width: ll::mtmd_bitmap_get_nx(bitmap.0),
-                    height: ll::mtmd_bitmap_get_ny(bitmap.0),
-                    rgb: std::slice::from_raw_parts(data, bytes).to_vec(),
-                }))
+            if ll::mtmd_bitmap_is_audio(bitmap.0) != (encoder == Encoder::Audio) {
+                bail!("{} isn't for the {encoder} encoder", path.display());
             }
+            Ok(bitmap)
         }
     }
 
-    fn require_media(&self) -> Result<()> {
-        if self.media.is_null() {
-            bail!("the image and audio encoders aren't loaded");
+    /// The encoder's mtmd context, if it's loaded.
+    fn encoder(&self, encoder: Encoder) -> Result<*mut ll::mtmd_context> {
+        let context = self.encoders[encoder as usize];
+        if context.is_null() {
+            bail!("the {encoder} encoder isn't loaded");
         }
-        Ok(())
+        Ok(context)
     }
 
-    fn embed_media(&mut self, bitmap: Bitmap) -> Result<Vec<f32>> {
+    fn embed_media(&mut self, context: *mut ll::mtmd_context, bitmap: Bitmap) -> Result<Vec<f32>> {
         unsafe {
             let chunks = Chunks(ll::mtmd_input_chunks_init());
             let marker = ll::mtmd_default_marker();
@@ -336,7 +366,7 @@ impl Embedder {
                 parse_special: true,
             };
             let bitmaps = [bitmap.0 as *const ll::mtmd_bitmap];
-            let status = ll::mtmd_tokenize(self.media, chunks.0, &text, bitmaps.as_ptr(), 1);
+            let status = ll::mtmd_tokenize(context, chunks.0, &text, bitmaps.as_ptr(), 1);
             if status != 0 {
                 bail!("mtmd couldn't prepare the input ({status})");
             }
@@ -354,11 +384,11 @@ impl Embedder {
                         self.add_token(token)?;
                     }
                 } else {
-                    if ll::mtmd_encode_chunk(self.media, chunk) != 0 {
+                    if ll::mtmd_encode_chunk(context, chunk) != 0 {
                         self.reset();
                         bail!("the media encoder failed");
                     }
-                    let rows = ll::mtmd_get_output_embd(self.media);
+                    let rows = ll::mtmd_get_output_embd(context);
                     if rows.is_null() {
                         self.reset();
                         bail!("the media encoder returned nothing");
