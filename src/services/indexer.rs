@@ -301,7 +301,7 @@ pub fn run() -> Result<()> {
     reporter.write(true);
 
     let index = Writer::open(&config::index_path()).context("can't open the index")?;
-    let mut indexer = Indexer::new(index, config::models_dir())?;
+    let mut indexer = Indexer::new(index)?;
     let (sender, receiver) = channel();
     let mut watcher = watch(&config, sender.clone())?;
     let mut changes = Changes {
@@ -394,7 +394,8 @@ pub fn run() -> Result<()> {
                 indexer.release_model();
             } else {
                 waiting_reason = None;
-                if !crate::models::status(&config::models_dir()).media {
+                let models = crate::models::status();
+                if !(models.text && models.media) {
                     reporter.set(IndexerState::Waiting, Some("Waiting for the model to download".into()));
                 } else {
                     let seen = Cell::new(config_time);

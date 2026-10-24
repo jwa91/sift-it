@@ -11,7 +11,7 @@ pub mod imaging;
 use anyhow::{Context, Result, anyhow, bail};
 use imaging::Image;
 use std::ffi::{CStr, CString, c_char, c_void};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Once;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
@@ -30,29 +30,21 @@ pub const DIM: usize = 768;
 pub const AUDIO_RATE: usize = 16_000;
 pub const AUDIO_WINDOW: usize = 30 * AUDIO_RATE;
 
-/// Sequences that may share one call to the text model.
+/// Sequences that may share one call to the text model, when it embeds documents.
 const MAX_SEQUENCES: i32 = 16;
 
-/// The two GGUF files: the text model (all that queries need) and the image and audio encoders.
-#[derive(Debug, Clone)]
-pub struct ModelFiles {
-    pub text: PathBuf,
-    pub media: Option<PathBuf>,
+/// What a context is made for, which decides its size.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Inputs {
+    /// One query at a time, of up to QUERY_TOKENS tokens: its compute buffers take 32 MB, a ninth of a document
+    /// context's.
+    Queries,
+    /// Up to MAX_SEQUENCES passages in one call, or a picture, or 30 s of sound, of up to 2,048 tokens together.
+    Documents,
 }
 
-pub const TEXT_FILE: &str = "embeddinggemma-2-Q8_0.gguf";
-pub const MEDIA_FILE: &str = "mmproj-embeddinggemma-2-Q8_0.gguf";
-
-impl ModelFiles {
-    pub fn in_folder(folder: &Path) -> Result<Self> {
-        let text = folder.join(TEXT_FILE);
-        if !text.exists() {
-            bail!("the model isn't downloaded: no {} (run `sift-it model download`)", text.display());
-        }
-        let media = folder.join(MEDIA_FILE);
-        Ok(Self { text, media: media.exists().then_some(media) })
-    }
-}
+/// The tokens a query may have. 256 holds a pasted paragraph (about 1,000 characters); a longer query keeps its start.
+const QUERY_TOKENS: usize = 256;
 
 /// A short description of the pipeline that made a vector. Stored with the index: vectors from a different pipeline
 /// must never be compared with these.
@@ -63,6 +55,7 @@ pub fn vector_source() -> String {
 pub struct Embedder {
     model: *mut ll::llama_model,
     context: *mut ll::llama_context,
+    /// The image and audio encoders, while they're loaded (else null).
     media: *mut ll::mtmd_context,
     batch: *mut ll::llama_batch_ext,
     vocab: *const ll::llama_vocab,
@@ -71,6 +64,7 @@ pub struct Embedder {
     dim: usize,
     row: usize,
     max_tokens: usize,
+    max_sequences: i32,
     // The batch being filled: its sequences, its tokens, and the next position in the current sequence.
     sequences: i32,
     tokens: usize,
@@ -92,6 +86,19 @@ unsafe extern "C" fn log_callback(level: ll::ggml_log_level, text: *const c_char
     {
         eprint!("llama.cpp: {text}");
     }
+}
+
+/// Tells ggml's Metal backend, before it starts, to keep no buffers resident between calls. Its residency sets keep
+/// the model's memory wired for three minutes after the last call, renewed by a thread that wakes every 5 ms for as
+/// long as the process lives, idle or not. Without them, Metal makes memory resident for the calls that use it, and
+/// embedding is as fast (docs/design.md). The backend reads this from the environment, which processes this one starts
+/// inherit: the speech helper's ggml has the same residency sets.
+///
+/// # Safety
+///
+/// It sets an environment variable: no other thread may be running.
+pub unsafe fn without_residency() {
+    unsafe { std::env::set_var("GGML_METAL_NO_RESIDENCY", "1") };
 }
 
 fn init_backend() {
@@ -134,33 +141,31 @@ pub enum Decoded {
 }
 
 impl Embedder {
-    /// Loads the model. `text_only` loads just the text model (for queries: about a third of the memory and quick to
-    /// start); otherwise the image and audio encoders as well.
-    pub fn load(files: &ModelFiles, text_only: bool) -> Result<Self> {
+    /// Loads the text model from its GGUF file, with a context made for `inputs`. Its weights are mapped from the
+    /// file, not copied: processes that load it share them, and macOS can drop them under pressure and read them again.
+    pub fn load(text: &Path, inputs: Inputs) -> Result<Self> {
         init_backend();
-        let media_path = match (&files.media, text_only) {
-            (_, true) => None,
-            (Some(path), false) => Some(c_path(path)?),
-            (None, false) => bail!("the image and audio encoders ({MEDIA_FILE}) aren't downloaded"),
-        };
         unsafe {
             let mut model_params = ll::llama_model_default_params();
             model_params.n_gpu_layers = 999;
-            let model = ll::llama_model_load_from_file(c_path(&files.text)?.as_ptr(), model_params);
+            let model = ll::llama_model_load_from_file(c_path(text)?.as_ptr(), model_params);
             if model.is_null() {
-                bail!("llama.cpp couldn't load {}", files.text.display());
+                bail!("llama.cpp couldn't load {}", text.display());
             }
             // Each input must fit in one micro-batch. 2048 tokens holds a long passage, a 1120-token image or a 30 s
-            // clip (750 tokens). Queries are short, so the query encoder reserves less.
-            let max_tokens = std::env::var("SIFT_IT_BATCH_TOKENS")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(if text_only { 512 } else { 2048 });
+            // clip (750 tokens).
+            let (max_tokens, sequences) = match inputs {
+                Inputs::Queries => (QUERY_TOKENS, 1),
+                Inputs::Documents => {
+                    let tokens = std::env::var("SIFT_IT_BATCH_TOKENS").ok().and_then(|v| v.parse().ok());
+                    (tokens.unwrap_or(2048), MAX_SEQUENCES)
+                }
+            };
             let mut params = ll::llama_context_default_params();
             params.n_ctx = max_tokens as u32;
             params.n_batch = max_tokens as u32;
             params.n_ubatch = max_tokens as u32;
-            params.n_seq_max = MAX_SEQUENCES as u32;
+            params.n_seq_max = sequences as u32;
             params.kv_unified = true;
             params.embeddings = true;
             params.pooling_type = ll::LLAMA_POOLING_TYPE_MEAN;
@@ -169,33 +174,18 @@ impl Embedder {
                 ll::llama_model_free(model);
                 bail!("llama.cpp couldn't create a context");
             }
-            let mut media = std::ptr::null_mut();
-            if let Some(path) = media_path {
-                let mut media_params = ll::mtmd_context_params_default();
-                media_params.use_gpu = true;
-                media_params.print_timings = false;
-                media_params.warmup = true;
-                // Images arrive already sized for their token budget (imaging::fit): mtmd must take them as they are.
-                media_params.image_min_tokens = 1;
-                media_params.image_max_tokens = 1120;
-                media = ll::mtmd_init_from_file(path.as_ptr(), model, media_params);
-                if media.is_null() {
-                    ll::llama_free(context);
-                    ll::llama_model_free(model);
-                    bail!("llama.cpp couldn't load the image and audio encoders");
-                }
-            }
             let vocab = ll::llama_model_get_vocab(model);
             let mut embedder = Self {
                 model,
                 context,
-                media,
+                media: std::ptr::null_mut(),
                 batch: ll::llama_batch_ext_init(context),
                 vocab,
                 eos: ll::llama_vocab_eos(vocab),
                 dim: ll::llama_model_n_embd_out(model) as usize,
                 row: ll::llama_model_n_embd_inp(model) as usize,
                 max_tokens,
+                max_sequences: sequences,
                 sequences: 0,
                 tokens: 0,
                 position: 0,
@@ -209,13 +199,48 @@ impl Embedder {
         }
     }
 
+    /// Loads the image and audio encoders from their GGUF file (the mmproj), unless they're loaded. llama.cpp reads
+    /// them into memory of their own (about 0.6 GB), so they're loaded only while pictures or sound are embedded.
+    pub fn load_encoders(&mut self, media: &Path) -> Result<()> {
+        if !self.media.is_null() {
+            return Ok(());
+        }
+        unsafe {
+            let mut params = ll::mtmd_context_params_default();
+            params.use_gpu = true;
+            params.print_timings = false;
+            params.warmup = true;
+            // Images arrive already sized for their token budget (imaging::fit): mtmd must take them as they are.
+            params.image_min_tokens = 1;
+            params.image_max_tokens = 1120;
+            let encoders = ll::mtmd_init_from_file(c_path(media)?.as_ptr(), self.model, params);
+            if encoders.is_null() {
+                bail!("llama.cpp couldn't load the image and audio encoders");
+            }
+            self.media = encoders;
+        }
+        Ok(())
+    }
+
+    /// Frees the image and audio encoders; the text model stays.
+    pub fn release_encoders(&mut self) {
+        if !self.media.is_null() {
+            unsafe { ll::mtmd_free(self.media) };
+            self.media = std::ptr::null_mut();
+        }
+    }
+
+    pub fn has_encoders(&self) -> bool {
+        !self.media.is_null()
+    }
+
     /// One vector per text, in order. Prompts (query or document framing) are the caller's: see `prompts`.
     pub fn embed_texts(&mut self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
         let mut vectors = Vec::with_capacity(texts.len());
         self.reset();
         for text in texts {
             let tokens = self.tokenize(text);
-            if self.sequences == MAX_SEQUENCES || self.tokens + tokens.len() > self.max_tokens {
+            if self.sequences == self.max_sequences || self.tokens + tokens.len() > self.max_tokens {
                 vectors.extend(self.run()?);
             }
             self.begin();
@@ -295,7 +320,7 @@ impl Embedder {
 
     fn require_media(&self) -> Result<()> {
         if self.media.is_null() {
-            bail!("this embedder was loaded text-only");
+            bail!("the image and audio encoders aren't loaded");
         }
         Ok(())
     }
@@ -447,11 +472,9 @@ impl Embedder {
 
 impl Drop for Embedder {
     fn drop(&mut self) {
+        self.release_encoders();
         unsafe {
             ll::llama_batch_ext_free(self.batch);
-            if !self.media.is_null() {
-                ll::mtmd_free(self.media);
-            }
             ll::llama_free(self.context);
             ll::llama_model_free(self.model);
         }

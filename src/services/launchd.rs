@@ -57,7 +57,8 @@ impl Agent {
         let binary = stable_binary()?;
         let log = self.log_path();
         let mut environment = String::new();
-        for name in ["SIFT_IT_HOME", "SIFT_IT_MODELS"] {
+        // The data folder, and where the model files are (models::hub), as this process has them.
+        for name in ["SIFT_IT_HOME", "HF_HUB_CACHE", "HF_HOME"] {
             if let Ok(value) = std::env::var(name) {
                 environment
                     .push_str(&format!("\n        <key>{name}</key>\n        <string>{}</string>", escape(&value)));

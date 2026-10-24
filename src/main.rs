@@ -178,6 +178,8 @@ enum ModelAction {
 }
 
 fn main() {
+    // Safety: nothing else runs yet.
+    unsafe { embedder::without_residency() };
     if let Err(error) = run(Cli::parse()) {
         eprintln!("sift-it: {error:#}");
         std::process::exit(1);
@@ -237,7 +239,7 @@ fn run(cli: Cli) -> Result<()> {
             Ok(())
         }
         Command::Serve => clients::serve::serve(),
-        Command::Engine { action: None } => services::engine::run(&config::index_path(), &config::models_dir()),
+        Command::Engine { action: None } => services::engine::run(&config::index_path()),
         Command::Engine { action: Some(action) } => {
             let Some(mut engine) = clients::Client::running() else {
                 println!("the engine isn't running");
@@ -259,10 +261,10 @@ fn run(cli: Cli) -> Result<()> {
         Command::Status { json } => status(json),
         Command::Model { action } => match action {
             ModelAction::Status => {
-                println!("{}", serde_json::to_string_pretty(&models::status(&config::models_dir()))?);
+                println!("{}", serde_json::to_string_pretty(&models::status())?);
                 Ok(())
             }
-            ModelAction::Download { json } => models::download(&config::models_dir(), &mut |progress| {
+            ModelAction::Download { json } => models::download(&mut |progress| {
                 if json {
                     println!("{}", serde_json::to_string(&progress).unwrap());
                 } else if let models::Progress::Downloading { file, done, total } = progress {
@@ -283,7 +285,7 @@ fn run(cli: Cli) -> Result<()> {
         },
         Command::Eval { file, verbose, compare } => {
             // The engine's own answers, in this process: what's measured is what front ends get.
-            let core = services::engine::Core::new(&config::index_path(), &config::models_dir(), Box::new(|_| {}))?;
+            let core = services::engine::Core::new(&config::index_path(), &models::TEXT, Box::new(|_| {}))?;
             let outcome = tools::eval::run(&file, &core, verbose, compare);
             // The model goes before the process does (llama.cpp aborts when its Metal device is freed under one).
             core.unload();
@@ -296,7 +298,7 @@ fn run(cli: Cli) -> Result<()> {
                 .ok_or_else(|| anyhow::anyhow!("Sift It doesn't read .{} files", config::extension_of(&path)))?;
             let settings = config.reading.resolve(&path, kind);
             let mut model = if tokens {
-                Some(embedder::Embedder::load(&embedder::ModelFiles::in_folder(&config::models_dir())?, true)?)
+                Some(embedder::Embedder::load(&models::TEXT.require()?, embedder::Inputs::Documents)?)
             } else {
                 None
             };
@@ -338,13 +340,10 @@ fn run(cli: Cli) -> Result<()> {
         }
         Command::BenchSearch { vectors } => tools::bench::search(vectors),
         Command::BenchEmbed => tools::bench::embed(),
-        Command::Selftest { folder } => {
-            let models = embedder::ModelFiles::in_folder(&config::models_dir())?;
-            match folder {
-                Some(folder) => tools::selftest::run(&models, &folder),
-                None => tools::selftest::run_built_in(&models),
-            }
-        }
+        Command::Selftest { folder } => match folder {
+            Some(folder) => tools::selftest::run(&folder),
+            None => tools::selftest::run_built_in(),
+        },
     }
 }
 
@@ -399,7 +398,7 @@ fn index(json: bool, reindex: bool) -> Result<()> {
     if reindex {
         index.requeue_all()?;
     }
-    let mut indexer = ingest::Indexer::new(index, config::models_dir())?;
+    let mut indexer = ingest::Indexer::new(index)?;
     let mut report = |event: ingest::Event| {
         if json {
             println!("{}", serde_json::to_string(&event).unwrap());
@@ -486,7 +485,7 @@ fn status(json: bool) -> Result<()> {
     let index = index::Reader::open(&config::index_path())?;
     let stats = index.stats()?;
     let config = Config::load()?;
-    let models = models::status(&config::models_dir());
+    let models = models::status();
     let transcripts = index.transcripts()?;
     let queued = index.queued(5)?;
     let plan = resources::IngestPlan::of(&config.indexing);

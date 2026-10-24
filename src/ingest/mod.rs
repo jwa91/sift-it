@@ -102,10 +102,10 @@ pub struct Indexer {
 }
 
 impl Indexer {
-    /// An indexer writing to `index`, with the model in `models`. Vectors from another pipeline (another model or
-    /// llama.cpp) are dropped, and their files queued again: they'd never compare right with new queries. Vector files
-    /// no partition uses (what a crash left, or what was dropped) go.
-    pub fn new(mut index: Writer, models: PathBuf) -> Result<Self> {
+    /// An indexer writing to `index`. Vectors from another pipeline (another model or llama.cpp) are dropped, and
+    /// their files queued again: they'd never compare right with new queries. Vector files no partition uses (what a
+    /// crash left, or what was dropped) go.
+    pub fn new(mut index: Writer) -> Result<Self> {
         if index.adopt_vector_source(&embedder::vector_source())? {
             eprintln!("the index was made by another model or pipeline: everything is indexed again");
         }
@@ -113,10 +113,10 @@ impl Indexer {
             eprintln!("what's said in recordings was written down by another speech model: it's written down again");
         }
         index.tidy_vectors()?;
-        Ok(Self { index, embed: Embed::new(models) })
+        Ok(Self { index, embed: Embed::default() })
     }
 
-    /// Frees the model (about 1 GB) until it's needed again.
+    /// Frees the model until it's needed again.
     pub fn release_model(&mut self) {
         self.embed.release();
     }

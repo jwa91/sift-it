@@ -23,6 +23,44 @@ the kinds it wants.
 Ranking is tuned on one eval set that covers everything. Ranking can't be set per folder, because two results in one
 list would no longer be comparable.
 
+## The models
+
+Three model files, 1.6 GB together: EmbeddingGemma 2's text model (310 MB) and its image and audio encoders
+(555 MB), and Parakeet Ultra for speech (740 MB).
+
+- **Stored once.** They're kept in the Hugging Face cache that other apps share (`$HF_HUB_CACHE`, else
+  `$HF_HOME/hub`, else `~/.cache/huggingface/hub`), in its layout. The hub names a file's blob after its SHA-256, so a
+  file is there when any repository's folder in the cache holds a whole blob of that name, whichever app or revision
+  put it there: Handy's copy of the speech model serves sift-it too. What's missing is downloaded at a pinned
+  revision and checked against its hash before it gets that name. sift-it only adds what's missing to the cache and
+  never removes anything, and uninstalling it leaves the files there for the other apps.
+- **Loaded once.** llama.cpp and transcribe.cpp map the weights from their files and Metal uses them in place, so the
+  engine and the indexer share the text model's pages, and macOS can drop them when memory runs short and read them
+  again. Only the image and audio encoders are read into memory of their own: llama.cpp's mtmd copies them.
+- **Only what a step needs.** A search by meaning loads the text model, with a context made for one query. The
+  indexer loads the text model for text, the encoders while it reads pictures and sound, and the speech helper while
+  it writes down what's said. When the reading is over, the encoders go, so on a small budget the speech helper runs
+  beside the text model alone.
+
+Measured on an M5 with 24 GB, on part of the demo folder, as footprint: the memory a process has of its own. The
+mapped model files come on top, as file pages in memory, counted once however many processes map them.
+
+- The engine holds 162 MB after a search by meaning, and 49 MB once it lets the model go. Its context for one query
+  of up to 256 tokens takes 32 MB of compute buffers, where a context for documents (16 passages, or 2,048 tokens)
+  takes 276 MB. Most of the rest is llama.cpp's tokenizer: 800,000 small allocations for its 262,000 tokens.
+- The indexer holds 336 MB while it reads text, and 940 MB while it reads pictures and sound: the encoders take about
+  600 MB.
+- While speech is written down with the models taking turns, the indexer holds 360 MB and the speech helper 330 MB.
+- The engine and the indexer reading text at once hold 500 MB together.
+- ggml's Metal backend keeps its buffers resident for three minutes after each call (residency sets, macOS 15 and
+  later), renewed by a thread that wakes every 5 ms for as long as the process lives, idle or not: 174 times a second
+  in an idle engine. In the engine, one search by meaning kept about 330 MB of the GPU's memory wired for three
+  minutes. sift-it turns them off (`GGML_METAL_NO_RESIDENCY`, which the speech helper inherits): Metal makes memory
+  resident for the calls that use it, nothing stays wired between calls, and the idle engine doesn't wake. Embedding
+  is as fast, within the noise of three rounds of `sift-it bench-embed` (medians, without and with): a query 10.7 and
+  11.9 ms, 44 and 45 passages a second, 30 s of sound 309 and 318 ms. A shorter keep-alive
+  (`GGML_METAL_RESIDENCY_KEEP_ALIVE_S`) would let the memory go sooner, but the thread would keep waking.
+
 ## Indexing
 
 The indexer reads files with the full models: text, image and sound, and speech in the `sift-it-transcribe` helper.
@@ -33,21 +71,22 @@ Every vector it writes is f32, and what it produces never depends on the Mac it 
 - how many workers read files at once, each holding decoded media
 - whether the embedding model and the speech helper run side by side or one after the other
 
-At `auto` it's a quarter of the Mac's memory. Side by side takes both models, about 1 GB each, and two readers. When
-the budget holds that, embedding and transcription run together: a thread hands the speech helper the recordings
-already read, and the embedding thread embeds and stores what comes back between files. With less, the models take
-turns, and what's said is written down once everything else is read. Reading takes at most a third of the cores, two
-to four files at once, and a small budget makes that fewer, down to one. The vectors are the same either way.
+At `auto` it's a quarter of the Mac's memory. Side by side takes both models, about 1.2 and 1 GB with their mapped
+model files, and two readers. When the budget holds that, embedding and transcription run together: a thread hands the
+speech helper the recordings already read, and the embedding thread embeds and stores what comes back between files.
+With less, the models take turns, and what's said is written down once everything else is read, beside the text model
+alone. Reading takes at most a third of the cores, two to four files at once, and a small budget makes that fewer, down
+to one. The vectors are the same either way.
 
 Measured:
 
 - The embedding model's batch size changes nothing: 17.7 passages a second one at a time, and 17.7, 18.1 and 18.0 in
-  batches of 2,048, 4,096 and 8,192 tokens, with the same 0.9 to 1.0 GB footprint. So it isn't part of the budget, and
-  stays at 2,048 tokens (an image takes 1,120). Whether a bigger GPU gains from bigger batches,
+  batches of 2,048, 4,096 and 8,192 tokens, with the same footprint. So it isn't part of the budget, and stays at
+  2,048 tokens (an image takes 1,120). Whether a bigger GPU gains from bigger batches,
   `SIFT_IT_BATCH_TOKENS=4096 sift-it bench-embed` shows.
-- The speech helper peaks at 1.0 GB with a three-minute stretch, which takes it 12 s.
-- Two readers index the testbed in 20 s, one in 29 s, both at a 940 MB peak: what a reader decodes is small next to
-  the model. The budget reckons with 128 MB a reader.
+- The speech helper peaks at 330 MB with a three-minute stretch, which takes it 12 s, and maps its model's 706 MB.
+- Two readers index the testbed in 20 s, one in 29 s, at the same peak: what a reader decodes is small next to the
+  model. The budget reckons with 128 MB a reader.
 
 The indexer follows the folders with FSEvents and makes a full sync now and then. It waits for a charger (when
 `indexing.on_battery` is off) and out of Low Power Mode, and lets the model go when there's nothing to do.
@@ -110,8 +149,9 @@ A search is by `words` or by `meaning`, set per request with a default in `searc
 
 ### What the engine holds
 
-Nothing loads before it's needed. The first search by meaning loads the encoder and maps the vectors. What's loaded
-stays until an `unload` request, a change of settings, or the engine stopping. There are no idle timers.
+Nothing loads before it's needed. The first search by meaning loads the text model and maps the vectors. What's loaded
+stays until an `unload` request or the engine stopping. A change of settings is taken in at the next search without
+loading anything again, since every form of the vectors is mapped. There are no idle timers.
 
 `search.vectors` decides which form a search scans:
 
@@ -134,8 +174,8 @@ rows as the sketches are bytes. Searches typed letter by letter share most of th
 letter those rows are already in memory. The query's median, which the lift needs, comes from a fixed sample of 8,192
 rows that the engine copies into memory at load, 24 MB.
 
-llama.cpp maps the model's weights from their file the same way. Whether Metal uses them without a copy, so macOS can
-drop them under pressure too, `footprint` shows.
+llama.cpp maps the model's weights from their file the same way, and Metal uses them in place: they're file pages in
+memory, not in the engine's footprint, and macOS can drop them under pressure too ([The models](#the-models)).
 
 `sift-it bench-search` measures all three forms: memory, time per search cold and warm, and how much of the exact top
 20 the sketch search keeps. `sift-it eval --compare` measures that last part on real queries, with 256 to 8,192
@@ -156,7 +196,8 @@ Measured:
 ## Configuration
 
 Each Mac has one `config.json`. The data folder holds it with `index.sqlite`, `vectors/`, `status.json`,
-`indexer.log`, `models/`, `previews/` and the engine's socket.
+`indexer.log`, `previews/` and the engine's socket. The model files are in the Hugging Face cache (see
+[The models](#the-models)).
 
 Some settings express intent: what gets indexed and how deep, timing, memory. The user decides those. Others set
 quality: how files are read and how results rank. An eval decides those. A quality constant becomes a setting only once an eval

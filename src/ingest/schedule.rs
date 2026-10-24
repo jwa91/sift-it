@@ -224,6 +224,9 @@ impl Indexer {
         finished.store(true, Ordering::Relaxed);
         drop(receivers);
         self.embed.forget();
+        // The reading is over, and its pictures and sound with it: the encoders go (writing down speech, which may
+        // come next, needs the text model alone).
+        self.embed.release_encoders();
         // The speech thread stops after the stretch it's on, which is stored: no work is lost, and the file goes on
         // from there.
         let outcome = match (speech, helper) {
@@ -314,7 +317,7 @@ mod tests {
             let found = Found { path: path.clone(), kind: Kind::Plaintext, size: 1, modified: 1.0, settings };
             index.queue(&found.new_file(), None, 0.0).unwrap();
         }
-        let mut indexer = Indexer::new(index, folder.join("models")).unwrap();
+        let mut indexer = Indexer::new(index).unwrap();
         let mut failed = Vec::new();
         let mut events = |event| {
             if let Event::Failed { path, .. } = event {

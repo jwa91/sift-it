@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com); versions follow
 [SemVer](https://semver.org).
 
+## [Unreleased]
+
+### Changed
+
+- The model files are kept in the Hugging Face cache (`~/.cache/huggingface/hub`, or `$HF_HUB_CACHE`, or
+  `$HF_HOME/hub`), which other apps share. A file is found by its SHA-256 wherever in the cache it is, so a copy
+  another app downloaded (Handy's speech model, say) isn't downloaded again. sift-it only adds what's missing to the
+  cache, and never removes anything from it. The models in `~/Library/Application Support/Sift It/models` aren't used
+  any more: `sift-it model download` fetches them into the cache, and that folder can go. `sift-it model status`
+  says which cache (`cache`, in place of `folder` and `speech_model`).
+- The indexer loads the image and audio encoders only while it reads pictures and sound, and lets them go when the
+  reading is over: text alone, and writing down what's said after the reading, take the text model only. Reading
+  text takes 336 MB instead of 910 MB, and writing down speech after the reading 690 MB with the helper instead of
+  1.8 GB.
+- The speech helper maps its model (transcribe.cpp 0.4.1) instead of copying it into memory: 330 MB of its own
+  instead of 1 GB. Its transcripts are the same, so they aren't written down again.
+- The engine's model has a context made for one query: 32 MB of compute buffers instead of 63 MB.
+- ggml's Metal residency sets are off, in sift-it and its speech helper. They kept about 330 MB wired for three minutes
+  after every search, and a thread woke 174 times a second for as long as the engine ran, idle or not. Embedding is as
+  fast without them.
+
+### Removed
+
+- `SIFT_IT_MODELS` and `SIFT_IT_SPEECH_MODEL`: `HF_HUB_CACHE` or `HF_HOME` say where the models are.
+
 ## [0.3.1] — 2026-10-19
 
 ### Changed
