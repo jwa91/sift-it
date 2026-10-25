@@ -5,7 +5,20 @@ All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com); versions follow
 [SemVer](https://semver.org).
 
-## [Unreleased]
+## [0.4.2] — 2026-10-25
+
+Conversations with agents become searchable, iCloud Drive's Optimize Mac Storage no longer costs what's indexed, and
+the docs say what sift-it is today.
+
+### Added
+
+- Claude Code's and Codex's session logs are a kind of their own, `conversation`, in any chosen folder
+  (`~/.claude/projects`, `~/.codex/sessions`, even though they're hidden). What the user said and what the agent
+  answered is read, as exchanges (a new segment, `exchange`, placed by when it was said); tool calls and their output,
+  thinking and subagents' transcripts aren't. A result is named by the conversation's title, and carries the folder it
+  started in and the command that resumes it, which `sift-it open` runs. A log still being written is read on from
+  where it ended.
+- `vectors_by_kind` in status: the vectors of each kind's files, beside `by_kind`.
 
 ### Changed
 
@@ -14,10 +27,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com); versions follow
   is read again when it's back; work it still had waits for its download. sift-it never downloads a file: reading one
   that's only in the cloud fails instead, previews included. `cloud` in status counts the files waiting for their
   download, and `sift-it estimate` counts them apart (`cloud` in its JSON).
-
-### Added
-
-- `vectors_by_kind` in status: the vectors of each kind's files, beside `by_kind`.
+- Audio, not recordings: the CLI, the terminal search and its filter say "audio", as the app does.
+- The README and docs say what sift-it is and does now, without comparisons to earlier versions of itself.
 
 ## [0.4.1] — 2026-10-25
 
