@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com); versions follow
 [SemVer](https://semver.org).
 
+## [0.4.3] — 2026-10-25
+
+### Added
+
+- `sift-it mcp`: an MCP server over stdio, for agents such as Claude Code, Claude Desktop and Codex. Two read-only
+  tools: `search`, with each result's place, excerpt and, for a conversation, the command that resumes it; and `read`,
+  a result's passage with the ones around it (a conversation's neighbouring exchanges), or an indexed file's text.
+  It's a client of the engine like the app, so it loads no model itself. It answers the current MCP revision and the
+  `initialize` handshake of earlier ones.
+- A skill for agents with a shell (`skills/sift-it/SKILL.md`), and the README's Agents section on setting up both.
+- `around` in the protocol's `text` request: the segments before and after the one asked for.
+
 ## [0.4.2] — 2026-10-25
 
 Conversations with agents become searchable, iCloud Drive's Optimize Mac Storage no longer costs what's indexed, and
