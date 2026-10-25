@@ -6,7 +6,7 @@ mod audio;
 mod document;
 mod image;
 mod notebook;
-mod pdf;
+pub(super) mod pdf;
 pub mod speech;
 pub mod text;
 mod video;
