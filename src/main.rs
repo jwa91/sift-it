@@ -170,7 +170,7 @@ enum ServiceAction {
 enum ModelAction {
     /// Whether the model files are there
     Status,
-    /// Download the model files (1.6 GB, once: 865 MB to search, 740 MB to write down speech)
+    /// Download the model files (1.5 GB, once: 865 MB to search, 632 MB to write down speech)
     Download {
         #[arg(long)]
         json: bool,
@@ -402,7 +402,10 @@ fn folders(action: Option<FolderAction>) -> Result<()> {
         config.change_folders(action, &paths)?;
         config.save()?;
     }
-    println!("{}", serde_json::to_string_pretty(&config)?);
+    // The folders, one a line; what's left out of them is `sift-it config sources.ignore`.
+    for folder in &config.sources.paths {
+        println!("{}", folder.display());
+    }
     Ok(())
 }
 
