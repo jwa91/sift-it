@@ -1,9 +1,10 @@
 //! Preview images for search results: a picture's thumbnail, a PDF page, a video frame, a recording's waveform with
 //! the stretch that matched. Each is made once per file version, place and size, in the previews folder: JPEG for
-//! front ends, PNG for terminals (the kitty graphics protocol takes PNG).
+//! front ends, PNG for terminals (the kitty graphics protocol takes PNG). A file only in iCloud has none: drawing it
+//! would download it.
 
-use crate::adapters::macos;
-use anyhow::Result;
+use crate::adapters::macos::{self, icloud};
+use anyhow::{Result, bail};
 use protocol::Drawn;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
@@ -36,7 +37,11 @@ fn render_as(
     png: bool,
 ) -> Result<PathBuf> {
     let size = size.clamp(64, 2048);
-    let modified = std::fs::metadata(path)?.modified()?;
+    let metadata = std::fs::metadata(path)?;
+    if icloud::cloud_only(&metadata) {
+        bail!("{} is only in iCloud: it has no preview until it's downloaded", path.display());
+    }
+    let modified = metadata.modified()?;
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     (path, modified, kind, loc.map(f64::to_bits), loc_end.map(f64::to_bits), size, png).hash(&mut hasher);
     let extension = if png { "png" } else { "jpg" };

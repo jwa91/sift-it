@@ -195,6 +195,11 @@ fn run(cli: Cli) -> Result<()> {
         <Cli as clap::CommandFactory>::command().print_help()?;
         return Ok(());
     };
+    // Reading a file that's only in iCloud fails instead of downloading it, but where a file is opened for someone:
+    // the app or editor it opens in downloads it, as from Finder.
+    if !matches!(command, Command::Open { .. } | Command::Find { .. }) {
+        adapters::macos::icloud::never_download();
+    }
     match command {
         Command::Find { words } => clients::finder::run(&words.join(" ")),
         Command::Folders { action } => folders(action),
@@ -215,6 +220,12 @@ fn run(cli: Cli) -> Result<()> {
                     let kinds = e.by_kind.iter().map(|(k, n)| format!("{n} {k}")).collect::<Vec<_>>().join(", ");
                     let all = tools::estimate::describe(e.seconds as f64);
                     println!("{}: {} files ({kinds}), {all}", e.folder.display(), e.files);
+                    if e.cloud > 0 {
+                        println!(
+                            "  {} only in iCloud: found by their names, and read once they're downloaded",
+                            e.cloud
+                        );
+                    }
                     for round in &e.rounds {
                         let amount = match round.unit {
                             "seconds" => format!(
@@ -571,6 +582,9 @@ fn status(json: bool) -> Result<()> {
         "files:    {} ({} done, {} with rounds to go, {} with a round that failed)",
         stats.files, stats.done, stats.pending, stats.failed
     );
+    if stats.cloud > 0 {
+        println!("          {} only in iCloud wait for their download", stats.cloud);
+    }
     println!("vectors:  {} in {} segments", stats.vectors, stats.segments);
     for round in &rounds {
         println!("{:<9} {}", format!("{}:", round.round.as_str()), describe_round(round));

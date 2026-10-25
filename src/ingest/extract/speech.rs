@@ -2,6 +2,7 @@
 //! goes to it in chunks of about three minutes, cut where it's quietest so no word is cut in two, and each chunk's
 //! words, with their times, are handed over as soon as they're back: a file stopped partway goes on from there later. A slow extractor, so it runs on a lane of its own (ingest/listen.rs).
 
+use crate::adapters::macos::icloud;
 use crate::adapters::speech::{Spoken, Transcriber};
 use crate::ingest::segment::sound::{SILENCE, rms};
 use anyhow::{Result, bail};
@@ -30,6 +31,9 @@ pub fn transcribe(
     from: f64,
     on_chunk: &mut dyn FnMut(f64, f64, Vec<Spoken>) -> Result<bool>,
 ) -> Result<Outcome> {
+    if icloud::cloud_only_at(path) {
+        bail!("it's only in iCloud");
+    }
     let mut buffer: Vec<f32> = Vec::with_capacity(CHUNK + CUT_WINDOW * 2);
     let mut start = from; // the second of buffer[0]
     let mut send = |chunk: &[f32], start: f64| -> Result<bool> {

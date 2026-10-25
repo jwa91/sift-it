@@ -5,7 +5,8 @@
 
 use super::Event;
 use super::read::Ended;
-use crate::index::{Done, NewSegment, Work, Writer};
+use crate::adapters::macos::icloud;
+use crate::index::{Done, FileRow, NewSegment, Work, Writer};
 use anyhow::Result;
 use protocol::Round;
 use std::collections::HashMap;
@@ -124,6 +125,8 @@ impl Items {
         };
         let ended = match result {
             Ok(ended) => ended,
+            // Reading it failed rather than download it: macOS removed its download meanwhile.
+            Err(_) if failures == 0 && waits_for_download(index, &work.file)? => return Ok(None),
             Err(error) => {
                 let error = format!("{error:#}");
                 if index.fail(&work, &error, failures > 0)? {
@@ -151,4 +154,15 @@ impl Items {
         }
         Ok(Some(ended.done - work.done))
     }
+}
+
+/// Whether a file's work waits for its download: it's only in iCloud now (macOS removed its download since it was
+/// found), and reading it would download it. Then its work waits (Writer::wait_for_download), and goes on once it's
+/// downloaded again (discover).
+pub fn waits_for_download(index: &Writer, file: &FileRow) -> Result<bool> {
+    if !icloud::cloud_only_at(&file.path) {
+        return Ok(false);
+    }
+    index.batch(|| index.wait_for_download(file.id))?;
+    Ok(true)
 }

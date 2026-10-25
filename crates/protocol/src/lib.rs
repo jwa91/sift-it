@@ -387,9 +387,14 @@ pub struct Stats {
     pub done: i64,
     pub pending: i64,
     pub failed: i64,
+    /// Files only in iCloud whose work waits for their download: found by their names, or by what was read of them
+    /// before macOS removed their download.
+    pub cloud: i64,
     pub segments: i64,
     pub vectors: i64,
     pub by_kind: HashMap<String, i64>,
+    /// The vectors of each kind's files.
+    pub vectors_by_kind: HashMap<String, i64>,
     /// The index's size on disk.
     pub bytes: u64,
 }

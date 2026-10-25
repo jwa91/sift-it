@@ -1,7 +1,8 @@
 //! Which files get indexed, and finding them. Only the chosen folders are read, and in them never hidden folders,
-//! app bundles and libraries, build output, dependency folders, keys and other secrets, iCloud files that are only
-//! in the cloud (reading those would download them), or what `sources.ignore` leaves out.
+//! app bundles and libraries, build output, dependency folders, keys and other secrets, or what `sources.ignore`
+//! leaves out. An iCloud file that's only in the cloud is found with nothing read of it: reading it would download it.
 
+use crate::adapters::macos::icloud;
 use crate::config::{Config, Settings, extension_of, is_pdf};
 use crate::index::NewFile;
 use crate::ingest;
@@ -108,6 +109,9 @@ pub struct Found {
     pub modified: f64,
     /// What it's read with (config.json's reading values, resolved for it).
     pub settings: Settings,
+    /// Only in iCloud: its name, size and times are here, its data isn't, and nothing of it is read till it's
+    /// downloaded.
+    pub cloud: bool,
 }
 
 impl Found {
@@ -276,7 +280,7 @@ fn consider(path: &Path, name: &str, config: &Config, in_project: bool) -> Optio
         return None;
     }
     let metadata = std::fs::metadata(path).ok()?;
-    if is_cloud_only(&metadata) || metadata.len() == 0 {
+    if metadata.len() == 0 {
         return None;
     }
     let modified = metadata
@@ -291,6 +295,7 @@ fn consider(path: &Path, name: &str, config: &Config, in_project: bool) -> Optio
         size: metadata.len(),
         modified,
         settings: config.reading.resolve(path, kind),
+        cloud: icloud::cloud_only(&metadata),
     })
 }
 
@@ -306,13 +311,6 @@ fn is_secret(name: &str, extension: &str) -> bool {
         || lower.contains("credential")
 }
 
-/// An iCloud file that's only in the cloud: its data would be downloaded when read.
-fn is_cloud_only(metadata: &std::fs::Metadata) -> bool {
-    use std::os::darwin::fs::MetadataExt;
-    const SF_DATALESS: u32 = 0x4000_0000;
-    metadata.st_flags() & SF_DATALESS != 0
-}
-
 /// A file's kind, by its type (`sources.kinds`), a picture of the screen being a screenshot. None for a type that
 /// isn't read.
 pub fn kind_of(config: &Config, path: &Path) -> Option<Kind> {
@@ -321,7 +319,8 @@ pub fn kind_of(config: &Config, path: &Path) -> Option<Kind> {
     Some(if kind == Kind::Image && is_screenshot(path, &name) { Kind::Screenshot } else { kind })
 }
 
-/// macOS marks the screenshots it takes (kMDItemIsScreenCapture); other tools name them so.
+/// macOS marks the screenshots it takes (kMDItemIsScreenCapture); other tools name them so. The mark is there for a
+/// file only in iCloud too, and reading it downloads nothing.
 fn is_screenshot(path: &Path, name: &str) -> bool {
     let lower = name.to_lowercase();
     if ["screenshot", "screen shot", "schermafbeelding", "bildschirmfoto", "capture d", "cleanshot"]

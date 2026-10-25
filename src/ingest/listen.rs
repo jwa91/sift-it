@@ -6,7 +6,7 @@
 //! (`halt`): it changed meanwhile, or the lane is stopping.
 
 use super::extract::speech::{self, Outcome};
-use super::{Event, Indexer, segment};
+use super::{Event, Indexer, segment, write};
 use crate::adapters::speech::{Gone, Spoken, Transcriber};
 use crate::index::{Done, NewSegment, Work};
 use anyhow::Result;
@@ -129,8 +129,12 @@ impl Speech {
 }
 
 impl Indexer {
-    /// Gives the speech lane a file to write down, from where it got to. One without sound is done at once.
+    /// Gives the speech lane a file to write down, from where it got to. One without sound is done at once, and one
+    /// only in iCloud now waits for its download (AVFoundation would say it has no sound).
     pub(super) fn listen(&mut self, speech: &mut Speech, work: Work, on_event: &mut dyn FnMut(Event)) -> Result<()> {
+        if write::waits_for_download(&self.index, &work.file)? {
+            return Ok(());
+        }
         if !crate::adapters::macos::av::has_audio(&work.file.path) {
             let done = Done { done: work.amount, finished: true, ..Default::default() };
             self.index.write_item(&work, &[], &done)?;
@@ -207,6 +211,8 @@ impl Indexer {
             }
             Ok(_) => {}
             Err(error) if error.is::<Gone>() => return Err(error),
+            // Reading it failed rather than download it: macOS removed its download meanwhile.
+            Err(_) if write::waits_for_download(&self.index, &listening.work.file)? => {}
             Err(error) => {
                 let error = format!("{error:#}");
                 if self.index.fail(&listening.work, &error, false)? {

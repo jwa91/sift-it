@@ -173,6 +173,22 @@ they need, so a new screenshot is found by its words and by what it shows within
 read. A chip on another round lets it in between two of that round's items, and since an item is at most five
 minutes of sound or video, that's seconds. On the GPU, the other encoder goes and theirs loads (51 to 69 ms).
 
+### Files only in iCloud
+
+With Optimize Mac Storage, iCloud Drive keeps some files only in the cloud: their names, sizes, times and extended
+attributes are on the Mac, their data isn't, and reading it downloads it. sift-it never downloads one. The processes
+that read files have macOS fail such a read instead (`setiopolicy_np`, in every framework and in textutil), and
+discover reads nothing of such a file but its metadata and its screenshot mark.
+
+- A file never read is found by its name, with nothing of it read. Once it's downloaded (FSEvents tells), it's read
+  like a new file.
+- A file macOS removes the download of keeps what was read of it, and is found as before. Removing a download keeps
+  the file's size and time, so when it's back, nothing is read again. Work it still had waits for its download (a
+  work state of its own; the text round's goes on, since it needs only the index), and goes on from where it was.
+- A file changed on another device while it's only in the cloud is found by its name until it's downloaded.
+- Status counts the files that wait for their download (`cloud`), and `sift-it estimate` counts them apart. A preview
+  of one fails. Opening one is someone's own request: the app it opens in downloads it, as from Finder.
+
 ### Memory pressure
 
 The budget is a ceiling, and macOS says when memory runs short (a memory-pressure dispatch source):
@@ -554,7 +570,7 @@ gain looks bigger than it is.
 ## Not in scope
 
 - Opening files in apps beyond what `sift-it open` and the TUI do, with no settings.
-- Cloud-only files and the Photos library.
+- The Photos library.
 - OCR other than Vision. A `provider` setting comes when there's a second one.
 
 ## Later
