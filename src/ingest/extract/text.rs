@@ -1,22 +1,22 @@
 //! Text files, code and records: their lines, decoded as they come (UTF-8, UTF-16 with a byte order mark, or Latin-1),
 //! so a file of any size streams.
 
-use crate::ingest::Content;
+use crate::ingest::read::{Content, Ended};
 use anyhow::Result;
 use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
 
-pub fn read(path: &Path, content: &mut Content) -> Result<serde_json::Value> {
+pub fn read(path: &Path, content: &mut Content) -> Result<Ended> {
     feed(Lines::new(std::fs::File::open(path)?)?, content)
 }
 
 /// Hands a text's lines over as they're decoded.
-pub fn feed<R: Read>(mut lines: Lines<R>, content: &mut Content) -> Result<serde_json::Value> {
+pub fn feed<R: Read>(mut lines: Lines<R>, content: &mut Content) -> Result<Ended> {
     while let Some((line, ended)) = lines.next_line()? {
         content.line(&line, ended)?;
     }
     let lines = content.end_lines()?;
-    Ok(serde_json::json!({ "passages": content.passages, "lines": lines }))
+    Ok(Ended::whole(serde_json::json!({ "passages": content.passages, "lines": lines }), 1.0))
 }
 
 /// A text's lines, decoded as they come: UTF-8, or UTF-16 with a byte order mark. A line that isn't UTF-8 is read as

@@ -1,32 +1,66 @@
-//! Reading a file: extracted (extract/), cut into segments (segment/) and prepared for the model (prepare.rs), as a
-//! stream of pieces to a sink, so a long video never sits in memory whole. Content joins the three: an extractor hands
-//! it what it decodes, by its type.
+//! Reading a file, for one round: extracted (extract/), cut into segments (segment/) and prepared for the model
+//! (prepare.rs), as a stream of pieces to a sink, so a long video never sits in memory whole. Content joins the three:
+//! an extractor hands it what it decodes, by its type. A round that goes in items reads one item: from where the last
+//! one ended to where this one does (rounds::SLICE).
 
+use super::rounds::{self, Found};
 use super::segment::frames::Shots;
 use super::segment::passages::{self, Form, Text};
 use super::segment::pictures;
 use super::segment::sound::Windows;
 use super::{extract, prepare};
+use crate::config::Settings;
 use crate::config::is_pdf;
-use crate::config::{Depth, Settings};
 use anyhow::Result;
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use embedder::AUDIO_RATE;
 use embedder::imaging::Image;
 use objc2_core_graphics::CGImage;
-use protocol::{Kind, Segment};
+use protocol::{Kind, Round, Segment};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::path::Path;
 
-/// What the model is shown of a piece.
+/// What the model is shown of a piece, or when.
 pub enum Payload {
     /// Keyword index only.
     None,
-    /// Text, already framed with its document prompt.
+    /// Text the text round embeds, with what it was cut from (a heading, a signature, a header row), or nothing.
     Text(String),
+    /// A picture the pictures round embeds: a photo, a screenshot, a scanned page with little text on it.
+    Later,
     Image(Image),
     /// 16 kHz mono samples, at most 30 s.
     Audio(Vec<f32>),
+}
+
+/// Where an item of a round starts: how much of the file's work in it is done, and where it goes on (Work).
+#[derive(Debug, Clone, Default)]
+pub struct From {
+    pub done: f64,
+    pub resume: Option<serde_json::Value>,
+    /// The pages whose pictures wait for the pictures round (a PDF's scanned pages with little text).
+    pub pages: Vec<usize>,
+}
+
+/// How reading an item ended: what was learned about the file, how much of its work in the round is done now, where
+/// the next item goes on, and whether that was the last. For words, what decides its other rounds, and those rounds.
+#[derive(Debug, Clone, Default)]
+pub struct Ended {
+    pub info: serde_json::Value,
+    pub done: f64,
+    pub resume: Option<serde_json::Value>,
+    pub finished: bool,
+    pub found: Found,
+    pub rounds: Vec<(Round, f64)>,
+}
+
+impl Ended {
+    /// The whole of a file's work in a round, read in one item.
+    pub fn whole(info: serde_json::Value, done: f64) -> Self {
+        Self { info, done, finished: true, ..Default::default() }
+    }
 }
 
 /// A segment, prepared: what the index keeps of it, and what the model is shown.
@@ -39,6 +73,10 @@ pub struct Piece {
 }
 
 pub type Sink<'a> = &'a mut dyn FnMut(Piece) -> Result<()>;
+
+/// Where a long item says how far it has got: what it handed over so far is written, with where it goes on. It goes
+/// on unless this says to stop (the run wants its lane), and the next item goes on from there.
+pub type Checkpoint<'a> = &'a mut dyn FnMut(&Ended) -> Result<bool>;
 
 /// Goes up when the way a kind is read changes in a way that matters for what's indexed, or it learns to read files
 /// it couldn't: the files it read (or failed to) are read again.
@@ -70,28 +108,36 @@ pub fn fingerprint(path: &Path, kind: Kind, settings: &Settings) -> String {
     digest[..8].iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-/// What's said in a file of this kind is written down.
-pub fn transcribes(kind: Kind, settings: &Settings) -> bool {
-    settings.depth == Depth::Speech && (kind == Kind::Audio || (kind == Kind::Video && settings.sound))
-}
-
-/// Reads a file into pieces, streamed to `sink`; returns what was learned about it (pages, duration, size) for the
-/// index.
-pub fn read(path: &Path, kind: Kind, settings: &Settings, sink: Sink) -> Result<serde_json::Value> {
-    extract::read(path, kind, settings, &mut Content::new(path, kind, settings, sink))
+/// Reads an item of a file's work in `round` (words, OCR, pictures or sound) into pieces, streamed to `sink`, saying
+/// how far a long one has got at `checkpoint`. A file's words say which rounds it passes through next
+/// (rounds::after_words).
+pub fn read(
+    round: Round,
+    path: &Path,
+    kind: Kind,
+    settings: &Settings,
+    from: &From,
+    sink: Sink,
+    checkpoint: Checkpoint,
+) -> Result<Ended> {
+    let mut content = Content::new(path, kind, settings, from, sink, checkpoint);
+    let mut ended = extract::read(round, path, kind, settings, from, &mut content)?;
+    if round == Round::Words {
+        ended.rounds = rounds::after_words(kind, settings, &ended.found);
+    }
+    Ok(ended)
 }
 
 /// Where an extractor hands what it decodes, by its type. Each is cut by its segmenter, prepared for the model, and
 /// sent on as pieces. What was sent is counted, for what the index learns about the file.
 pub struct Content<'a> {
     settings: &'a Settings,
-    /// What the file's text is embedded with (prepare::title).
-    title: String,
     sink: Sink<'a>,
+    checkpoint: Checkpoint<'a>,
     /// The file's lines, cut by their form.
     lines: Text,
-    sound: Windows,
-    shots: Shots,
+    pub sound: Windows,
+    pub shots: Shots,
     /// Passages of text, windows of sound and frames sent.
     pub passages: usize,
     pub windows: usize,
@@ -99,18 +145,45 @@ pub struct Content<'a> {
 }
 
 impl<'a> Content<'a> {
-    fn new(path: &Path, kind: Kind, settings: &'a Settings, sink: Sink<'a>) -> Self {
+    /// Content for an item that goes on from `from`: after the frame kept last, with the windows and frames sent
+    /// before counted.
+    fn new(
+        path: &Path,
+        kind: Kind,
+        settings: &'a Settings,
+        from: &From,
+        sink: Sink<'a>,
+        checkpoint: Checkpoint<'a>,
+    ) -> Self {
+        let resume = from.resume.as_ref();
+        let count = |key: &str| resume.and_then(|resume| resume[key].as_u64()).unwrap_or(0) as usize;
+        let kept = resume.and_then(|resume| {
+            let at = resume["kept"][0].as_f64()?;
+            Some((at, BASE64.decode(resume["kept"][1].as_str()?).ok()?))
+        });
         Self {
             settings,
-            title: prepare::title(path, kind),
             sink,
+            checkpoint,
             lines: Text::new(Form::of(kind, path), settings),
             sound: Windows::default(),
-            shots: Shots::new(settings.shot_change, settings.keep_every_s),
+            shots: Shots::new(settings.shot_change, settings.keep_every_s).after(kept),
             passages: 0,
-            windows: 0,
-            frames: 0,
+            windows: count("windows"),
+            frames: count("frames"),
         }
+    }
+
+    /// How far a long item has got (`done`, in its round's unit): whether it goes on.
+    pub fn checkpoint(&mut self, done: f64) -> Result<bool> {
+        let at = Ended { done, resume: Some(self.resume()), ..Ended::default() };
+        (self.checkpoint)(&at)
+    }
+
+    /// Where the next item goes on: the frame kept last, and the windows and frames sent so far.
+    pub fn resume(&self) -> serde_json::Value {
+        let kept = self.shots.last().map(|(at, thumbnail)| json!([at, BASE64.encode(thumbnail)]));
+        json!({ "kept": kept, "windows": self.windows, "frames": self.frames })
     }
 
     /// A line of text, or a part of a long one (`ended`: the line ends with it). A passage's place is its lines.
@@ -144,16 +217,20 @@ impl<'a> Content<'a> {
         Ok(())
     }
 
-    /// A picture: a photo (with no `text`: none is read), or a screenshot with the text read off it. Returns whether
-    /// that text is long enough for passages of its own.
-    pub fn picture(&mut self, image: &CGImage, text: Option<&str>) -> Result<bool> {
-        // A screenshot is dense with small things.
-        let budget = if text.is_some() { self.settings.text_tokens } else { self.settings.tokens };
-        let text = text.unwrap_or_default();
+    /// A photo or a screenshot, whose vector the pictures round makes: at a depth that embeds.
+    pub fn picture_later(&mut self) -> Result<()> {
+        if self.settings.embeds() {
+            self.send(Segment::Picture, None, None, Payload::Later)?;
+        }
+        Ok(())
+    }
+
+    /// The text read off a screenshot: passages of its own when there's enough of it, else words with its picture.
+    /// Returns whether it was enough.
+    pub fn read_off(&mut self, text: &str) -> Result<bool> {
         let cut = pictures::cut(text, self.settings.embeds(), false);
-        if cut.picture {
-            let words = cut.words.then(|| text.to_string());
-            self.send(Segment::Picture, None, words, prepare::picture(image, budget)?)?;
+        if cut.words {
+            self.send(Segment::Picture, None, Some(text.to_string()), Payload::None)?;
         }
         if cut.passages {
             self.text(Segment::Ocr, None, text, Form::Prose)?;
@@ -161,16 +238,21 @@ impl<'a> Content<'a> {
         Ok(pictures::long(text))
     }
 
-    /// A scanned page, drawn, with the text read off it.
-    pub fn scan(&mut self, page: usize, image: &CGImage, text: &str) -> Result<()> {
+    /// The text read off a scanned page: passages, when there's enough of it; else the page is what it shows, which
+    /// the pictures round embeds, with the words found on it.
+    pub fn read_off_page(&mut self, page: usize, text: &str) -> Result<()> {
         let loc = Some(page as f64);
         let cut = pictures::cut(text, self.settings.embeds(), true);
         if cut.passages {
             return self.text(Segment::Ocr, loc, text, Form::Prose);
         }
-        // Nothing to read: what the page shows, then.
         let words = cut.words.then(|| text.to_string());
-        self.send(Segment::Picture, loc, words, prepare::picture(image, self.settings.text_tokens)?)
+        self.send(Segment::Picture, loc, words, Payload::Later)
+    }
+
+    /// What a picture shows, for the pictures round: a photo (`loc` None) or a scanned page, fitted to `budget` tokens.
+    pub fn shown(&mut self, loc: Option<f64>, image: &CGImage, budget: u32) -> Result<()> {
+        self.send(Segment::Picture, loc, None, prepare::picture(image, budget)?)
     }
 
     /// A video's frame at `at` seconds, with its thumbnail (macos::signature) to tell shots apart.
@@ -202,7 +284,7 @@ impl<'a> Content<'a> {
         passage: passages::Passage,
     ) -> Result<()> {
         self.passages += 1;
-        let payload = prepare::text(&self.title, &passage.context, &passage.text, self.settings);
+        let payload = prepare::text(passage.context, &passage.text, self.settings);
         (self.sink)(Piece { segment, loc, loc_end, text: Some(passage.text), payload })
     }
 

@@ -1,39 +1,32 @@
 //! Resources: what the Mac has, and what indexing and searching may take of it. The Mac's facts go in (its memory,
-//! read once, its cores, whether it's on battery), and plans come out. A plan is a pure function of the facts and the
-//! config, tested without a Mac of each size.
+//! read once, its cores, its power, the memory pressure macOS reports), and plans come out. A plan is a pure function of
+//! the facts and the config, tested without a Mac of each size.
 //!
-//! - IngestPlan: how many files are read at once, and whether what's said in recordings is written down beside the
-//!   reading or after it, by `indexing.memory_mb`. Neither changes what's written.
+//! - Plan: which rounds of indexing run side by side, each with its tools loaded, and how many files are read at once,
+//!   by `indexing.memory_mb`, `indexing.on_battery` and the memory pressure. None of it changes what's written.
 //! - SearchPlan: which form of the vectors a search scans, by `search.vectors` and `search.memory_mb`, and how many of
 //!   them a search with sketches scores exactly.
-//! - `wait`: whether indexing waits for a charger.
 
 use crate::adapters::macos::{self, power};
-use crate::config::{self, Budget};
+use crate::config::{self, Budget, OnBattery};
 use crate::index::Form;
-use protocol::Scan;
+pub use macos::pressure::Pressure;
+use protocol::{Round, Scan};
 
-/// The share of the Mac's memory indexing takes with `indexing.memory_mb` at auto. From 9 GB of memory on, the models
-/// run side by side; with less, they take turns.
+/// The share of the Mac's memory indexing may take with `indexing.memory_mb` at auto: a ceiling, which memory pressure
+/// lowers (Plan).
 const INGEST_SHARE: f64 = 0.25;
 
 /// The share of the Mac's memory searches may read with `search.memory_mb` at auto.
 const SEARCH_SHARE: f64 = 0.1;
 
-/// What the parts of indexing hold at their peak, as measured (docs/design.md): memory of their own (their footprint),
-/// and the model file they map and read on every call. The embedding model with both its encoders: 940 MB,
-/// and the text model's 296 MB. The speech helper with a three-minute stretch of sound: 120 MB, the Neural Engine's
-/// copy of its model, 607 MB, and the 32 MB it maps of what Core ML compiled for the Neural Engine. The copy is the
-/// helper's, but its footprint leaves it out: `footprint` lists it apart ("owned physical footprint (neural)"), and
-/// proc_pid_rusage counts it as ri_neural_footprint. A reader, with what it has decoded.
-const MODEL: u64 = (940 + 296) << 20;
-const SPEECH: u64 = (120 + 607 + 32) << 20;
+/// What a reader holds, with what it has decoded.
 const READER: u64 = 128 << 20;
 
-/// How many segments a search with sketches scores exactly, at least: those whose sketches come closest to the query.
-/// Measured on Rust's books (7,400 vectors, all on one subject, so many come close): the closest 1,024 keep all of the
-/// exact top 20 for 45 queries, the closest 256 keep 99.3%. Four times that is the margin for collections that differ.
-const CANDIDATES: usize = 4096;
+/// OCR and speech share the Neural Engine well: side by side, they get more done than one after the other. Measured
+/// (docs/design.md, "Tools and the budget"): 362 screenshots and six hours of podcasts took 242 s side by side and
+/// 286 s one after the other on the Neural Engine alone, and 347 s against 385 s beside the GPU's rounds.
+const NEURAL_ENGINE_SHARED: bool = true;
 
 /// A budget in bytes: as set, or else `share` of the Mac's memory.
 fn bytes(budget: Budget, share: f64) -> u64 {
@@ -43,32 +36,278 @@ fn bytes(budget: Budget, share: f64) -> u64 {
     }
 }
 
-/// What `indexing.memory_mb` affords.
-#[derive(Debug, PartialEq)]
-pub struct IngestPlan {
+/// Where a tool runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Chip {
+    Cpu,
+    Gpu,
+    NeuralEngine,
+}
+
+/// What a round loads to do its work. Each says its chip and what it holds at its peak, as measured (docs/design.md):
+/// memory of its own (its footprint), the model file it maps and reads on every call, and what it holds on the Neural
+/// Engine, which macOS counts to the process but leaves out of its footprint (`footprint` lists it apart, as "owned
+/// physical footprint (neural)", and proc_pid_rusage as ri_neural_footprint). A tool that isn't built yet slots in by
+/// saying the same of itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tool {
+    /// The text model: 338 MB, and its 296 MB file mapped.
+    TextModel,
+    /// The vision encoder, beside the text model: 289 MB (`sift-it bench-embed`, the file in memory).
+    VisionEncoder,
+    /// The audio encoder, beside the text model: 321 MB.
+    AudioEncoder,
+    /// Vision's text recognition: 256 MB of its own and 171 MB on the Neural Engine (the indexer reading words held
+    /// 86 MB, reading the text on 362 screenshots 340 MB).
+    TextRecognition,
+    /// The speech helper: 340 MB, 607 MB on the Neural Engine (its copy of the model), and the 32 MB it maps of what
+    /// Core ML compiled for the Neural Engine. It holds about 110 MB writing down long recordings three minutes at a
+    /// time; a run of short ones, each a chunk of a length of its own (the demo's videos, cheapest first), leaves
+    /// FluidAudio holding a buffer of each for a while: 245 to 336 MB in all.
+    SpeechModel,
+}
+
+impl Tool {
+    pub fn chip(self) -> Chip {
+        match self {
+            Tool::TextModel | Tool::VisionEncoder | Tool::AudioEncoder => Chip::Gpu,
+            Tool::TextRecognition | Tool::SpeechModel => Chip::NeuralEngine,
+        }
+    }
+
+    /// What it holds at its peak, in bytes.
+    pub fn memory(self) -> u64 {
+        (match self {
+            Tool::TextModel => 338 + 296,
+            Tool::VisionEncoder => 289,
+            Tool::AudioEncoder => 321,
+            Tool::TextRecognition => 256 + 171,
+            Tool::SpeechModel => 340 + 607 + 32,
+        }) << 20
+    }
+
+    /// The tools a round loads.
+    pub fn of(round: Round) -> &'static [Tool] {
+        match round {
+            Round::Words => &[],
+            Round::Text => &[Tool::TextModel],
+            Round::Ocr => &[Tool::TextRecognition],
+            Round::Pictures => &[Tool::TextModel, Tool::VisionEncoder],
+            Round::Sound => &[Tool::TextModel, Tool::AudioEncoder],
+            Round::Speech => &[Tool::SpeechModel],
+        }
+    }
+}
+
+/// The chip a round's work is on: its tools', or the CPU's for words.
+fn chip(round: Round) -> Chip {
+    Tool::of(round).last().map_or(Chip::Cpu, |tool| tool.chip())
+}
+
+/// Whether two rounds can run at once. On different chips they always can. On the GPU, the text round's batches go
+/// between the items of pictures or sound, since they share the text model; but pictures and sound take turns, since
+/// two rounds sharing one chip's time finish neither sooner, and the earlier one should. On the Neural Engine, OCR and
+/// speech run together (NEURAL_ENGINE_SHARED).
+fn together(a: Round, b: Round) -> bool {
+    match (chip(a), chip(b)) {
+        (one, other) if one != other => true,
+        (Chip::Gpu, _) => a == Round::Text || b == Round::Text,
+        (Chip::NeuralEngine, _) => NEURAL_ENGINE_SHARED,
+        (Chip::Cpu, _) => false,
+    }
+}
+
+/// What the Mac runs on, for `indexing.on_battery`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Power {
+    Charger,
+    Battery,
+    /// Low Power Mode, on battery or not.
+    LowPowerMode,
+}
+
+/// The facts a plan follows as they change: power, and memory pressure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Conditions {
+    pub power: Power,
+    pub pressure: Pressure,
+}
+
+/// The tools that aren't there now: a model not downloaded, a speech helper not installed.
+pub fn missing() -> Vec<Tool> {
+    let models = crate::models::status();
+    let mut missing = Vec::new();
+    if !models.text {
+        missing.push(Tool::TextModel);
+    }
+    if !models.media {
+        missing.extend([Tool::VisionEncoder, Tool::AudioEncoder]);
+    }
+    if crate::adapters::speech::unavailable().is_some() {
+        missing.push(Tool::SpeechModel);
+    }
+    missing
+}
+
+/// What the Mac runs on now.
+pub fn power() -> Power {
+    if power::low_power_mode() {
+        Power::LowPowerMode
+    } else if power::on_battery() {
+        Power::Battery
+    } else {
+        Power::Charger
+    }
+}
+
+/// A round's work waiting, as a plan sees it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Queue {
+    pub round: Round,
+    /// Some of it is new files' (the fast lane).
+    pub new: bool,
+    /// Some of it isn't.
+    pub old: bool,
+}
+
+/// What a round's work waits for, when it can't run for now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Wait {
+    /// Its turn: another round has its chip, or the budget has no room for its tool yet.
+    Turn,
+    /// A charger (`indexing.on_battery`, or Low Power Mode).
+    Charger,
+    /// Memory: macOS says it's critically short.
+    Memory,
+    /// Its model, which isn't there (not downloaded, or the speech helper can't start).
+    Model,
+}
+
+/// A round in a plan: for all its work, or for new files' only (on battery).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Running {
+    pub round: Round,
+    pub new_only: bool,
+}
+
+/// What runs side by side now.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Plan {
     /// The budget, in bytes.
     pub memory: u64,
+    /// The rounds that run, new files' first, then in order.
+    pub runs: Vec<Running>,
+    /// The rounds with work that waits, and for what.
+    pub waits: Vec<(Round, Wait)>,
     /// Files read at once.
     pub readers: usize,
-    /// What's said in recordings is written down beside the reading.
-    pub beside: bool,
 }
 
-impl IngestPlan {
-    pub fn of(indexing: &config::Indexing) -> Self {
+impl Plan {
+    /// The plan for `queues` (the rounds with work), under `conditions`, with the tools in `missing` not there.
+    pub fn of(indexing: &config::Indexing, conditions: Conditions, queues: &[Queue], missing: &[Tool]) -> Self {
         let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
-        Self::within(bytes(indexing.memory_mb, INGEST_SHARE), cores)
+        let budget = bytes(indexing.memory_mb, INGEST_SHARE);
+        Self::within(budget, cores, indexing.on_battery, conditions, queues, missing)
     }
 
-    /// The plan for `budget` bytes on a Mac with `cores` cores. Reading takes at most a third of them (two to four),
-    /// so the Mac stays quick; the budget can make that fewer, down to one. Speech is written down beside the reading
-    /// when both models fit with two readers.
-    fn within(budget: u64, cores: usize) -> Self {
-        let beside = budget >= MODEL + SPEECH + 2 * READER;
-        let left = budget.saturating_sub(MODEL + if beside { SPEECH } else { 0 });
-        Self { memory: budget, readers: ((left / READER) as usize).clamp(1, (cores / 3).clamp(2, 4)), beside }
+    /// The rounds with work are taken new files' first, then in their order, and each joins when it can run beside
+    /// those before it, and its tools fit in `budget` beside theirs: the first that needs a tool always runs, whatever
+    /// the budget, since indexing never stops for want of memory. On a memory-pressure warning, only one tool is
+    /// loaded at a time; when it's critical, nothing runs. On battery, `on_battery` says what goes on. Reading takes
+    /// what's left of the budget, at most a third of the cores (two to four), down to one.
+    fn within(
+        budget: u64,
+        cores: usize,
+        on_battery: OnBattery,
+        conditions: Conditions,
+        queues: &[Queue],
+        missing: &[Tool],
+    ) -> Self {
+        let mut plan = Plan { memory: budget, readers: 1, ..Default::default() };
+        let mut queues: Vec<Queue> = queues.to_vec();
+        queues.sort_by_key(|queue| (!queue.new, queue.round));
+        // What power lets go on: all of a round's work, or only new files'.
+        let all = |round: Round| match (conditions.power, on_battery) {
+            (Power::Charger, _) | (Power::Battery, OnBattery::All) => true,
+            (_, OnBattery::None) => false,
+            _ => round == Round::Words,
+        };
+        let new_only = on_battery != OnBattery::None;
+        let one_tool = conditions.pressure == Pressure::Warning;
+        let mut loaded: Vec<Tool> = Vec::new();
+        let mut used = READER;
+        for queue in queues {
+            let round = queue.round;
+            let runs = all(round) || (queue.new && new_only);
+            let wait = if conditions.pressure == Pressure::Critical {
+                Some(Wait::Memory)
+            } else if Tool::of(round).iter().any(|tool| missing.contains(tool)) {
+                Some(Wait::Model)
+            } else if !runs {
+                Some(Wait::Charger)
+            } else {
+                None
+            };
+            if let Some(wait) = wait {
+                plan.waits.push((round, wait));
+                continue;
+            }
+            let extra: Vec<Tool> = Tool::of(round).iter().copied().filter(|tool| !loaded.contains(tool)).collect();
+            let more: u64 = extra.iter().map(|tool| tool.memory()).sum();
+            let beside = plan.runs.iter().all(|running| together(running.round, round));
+            let fits = extra.is_empty() || loaded.is_empty() || (!one_tool && used + more <= budget);
+            if !(beside && fits) {
+                plan.waits.push((round, Wait::Turn));
+                continue;
+            }
+            plan.runs.push(Running { round, new_only: !all(round) });
+            loaded.extend(extra);
+            used += more;
+            if queue.old && !all(round) {
+                // The rest of it waits for a charger.
+                plan.waits.push((round, Wait::Charger));
+            }
+        }
+        let most = (cores / 3).clamp(2, 4);
+        plan.readers = if one_tool { 1 } else { ((budget.saturating_sub(used) / READER) as usize + 1).clamp(1, most) };
+        plan
+    }
+
+    /// Whether `round` runs, for all of its work or new files'.
+    pub fn runs(&self, round: Round) -> Option<Running> {
+        self.runs.iter().copied().find(|running| running.round == round)
+    }
+
+    /// What the work left waits for, when nothing runs: the first round's reason.
+    pub fn waits_for(&self) -> Option<Wait> {
+        self.runs.is_empty().then(|| self.waiting()).flatten()
+    }
+
+    /// What some of the work waits for, besides its turn: the first round's reason.
+    pub fn waiting(&self) -> Option<Wait> {
+        self.waits.iter().map(|(_, wait)| *wait).find(|wait| *wait != Wait::Turn)
     }
 }
+
+impl Wait {
+    /// What it waits for, in words, under these conditions.
+    pub fn describe(self, power: Power) -> &'static str {
+        match (self, power) {
+            (Wait::Charger, Power::LowPowerMode) => "Waiting: Low Power Mode is on",
+            (Wait::Charger, _) => "Waiting for a charger",
+            (Wait::Memory, _) => "Waiting: the Mac is short of memory",
+            (Wait::Model, _) => "Waiting for a model to download",
+            (Wait::Turn, _) => "Waiting for its turn",
+        }
+    }
+}
+
+/// How many segments a search with sketches scores exactly, at least: those whose sketches come closest to the query.
+/// Measured on Rust's books (7,400 vectors, all on one subject, so many come close): the closest 1,024 keep all of the
+/// exact top 20 for 45 queries, the closest 256 keep 99.3%. Four times that is the margin for collections that differ.
+const CANDIDATES: usize = 4096;
 
 /// What a search scans.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -112,36 +351,88 @@ impl SearchPlan {
     }
 }
 
-/// Why indexing should wait now, if it should: in Low Power Mode it always does, and on battery when
-/// `indexing.on_battery` is off.
-pub fn wait(indexing: &config::Indexing) -> Option<String> {
-    if power::low_power_mode() {
-        return Some("Waiting: Low Power Mode is on".into());
-    }
-    if !indexing.on_battery && power::on_battery() {
-        return Some("Waiting for a charger".into());
-    }
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    const MB: u64 = 1 << 20;
+    const CALM: Conditions = Conditions { power: Power::Charger, pressure: Pressure::Normal };
+
+    fn queues(rounds: &[Round]) -> Vec<Queue> {
+        rounds.iter().map(|&round| Queue { round, new: false, old: true }).collect()
+    }
+
+    /// What runs, and the readers, for these rounds with work at `mb` MB on ten cores.
+    fn plan(mb: u64, conditions: Conditions, queues: &[Queue]) -> (Vec<Round>, usize) {
+        let plan = Plan::within(mb * MB, 10, OnBattery::Words, conditions, queues, &[]);
+        (plan.runs.iter().map(|running| running.round).collect(), plan.readers)
+    }
+
+    use Round::*;
+    const EVERYTHING: [Round; 6] = Round::ALL;
+
     #[test]
-    fn memory_decides_the_readers_and_whether_speech_goes_beside_the_reading() {
-        let gb = 1u64 << 30;
-        let plan = |budget, cores| {
-            let plan = IngestPlan::within(budget, cores);
-            (plan.readers, plan.beside)
-        };
-        // 2 GB: the models take turns, and the cores decide the readers.
-        assert_eq!(plan(2 * gb, 8), (2, false));
-        // 6 GB on ten cores: both models, three readers.
-        assert_eq!(plan(6 * gb, 10), (3, true));
-        // Little memory: one reader at a time.
-        assert_eq!(plan(gb + READER, 8), (1, false));
-        assert_eq!(plan(0, 8), (1, false));
+    fn the_budget_decides_what_runs_side_by_side() {
+        // A small budget: one tool at a time (words needs none), the rest waits its turn.
+        assert_eq!(plan(768, CALM, &queues(&EVERYTHING)), (vec![Words, Text], 1));
+        assert_eq!(plan(1024, CALM, &queues(&[Pictures, Sound, Speech])), (vec![Pictures], 1));
+        // More: the GPU with one encoder, and OCR or speech beside it on the Neural Engine.
+        assert_eq!(plan(1536, CALM, &queues(&EVERYTHING)), (vec![Words, Text, Ocr, Pictures], 1));
+        assert_eq!(plan(2048, CALM, &queues(&[Text, Pictures, Sound, Speech])), (vec![Text, Pictures, Speech], 1));
+        // 4 GB: every chip at work. The GPU still takes pictures and sound in turn.
+        assert_eq!(plan(4096, CALM, &queues(&EVERYTHING)), (vec![Words, Text, Ocr, Pictures, Speech], 3));
+        assert_eq!(plan(4096, CALM, &queues(&[Sound, Speech])), (vec![Sound, Speech], 3));
+        // Whatever the budget, the first tool loads.
+        assert_eq!(plan(0, CALM, &queues(&[Speech])), (vec![Speech], 1));
+    }
+
+    #[test]
+    fn new_files_go_first_and_take_their_chip() {
+        let mut work = queues(&[Words, Text, Pictures, Sound, Speech]);
+        work[3].new = true; // a new recording's sound
+        let (runs, _) = plan(2560, CALM, &work);
+        assert_eq!(runs, [Sound, Words, Text, Speech]);
+    }
+
+    #[test]
+    fn memory_pressure_shrinks_the_plan_or_stops_it() {
+        let warning = Conditions { pressure: Pressure::Warning, ..CALM };
+        assert_eq!(plan(8192, warning, &queues(&EVERYTHING)), (vec![Words, Text], 1));
+        // A round that needs no more than what's loaded goes along: text, with a new file's pictures.
+        let mut work = queues(&[Pictures, Text, Speech]);
+        work[0].new = true;
+        assert_eq!(plan(8192, warning, &work), (vec![Pictures, Text], 1));
+        let critical = Conditions { pressure: Pressure::Critical, ..CALM };
+        let stopped = Plan::within(8192 * MB, 10, OnBattery::All, critical, &queues(&EVERYTHING), &[]);
+        assert!(stopped.runs.is_empty());
+        assert_eq!(stopped.waits_for(), Some(Wait::Memory));
+    }
+
+    #[test]
+    fn on_battery_words_and_new_files_go_on() {
+        let battery = Conditions { power: Power::Battery, ..CALM };
+        let mut work = queues(&[Words, Text, Pictures, Speech]);
+        work[2].new = true;
+        let words = Plan::within(4096 * MB, 10, OnBattery::Words, battery, &work, &[]);
+        let runs: Vec<Running> = words.runs.clone();
+        assert_eq!(runs, [Running { round: Pictures, new_only: true }, Running { round: Words, new_only: false }]);
+        assert!(words.waits.contains(&(Text, Wait::Charger)) && words.waits.contains(&(Pictures, Wait::Charger)));
+        let all = Plan::within(4096 * MB, 10, OnBattery::All, battery, &work, &[]);
+        assert_eq!(all.runs.len(), 4);
+        let none = Plan::within(4096 * MB, 10, OnBattery::None, battery, &work, &[]);
+        assert!(none.runs.is_empty());
+        assert_eq!(none.waits_for(), Some(Wait::Charger));
+        // Low Power Mode is `words` at most.
+        let low = Conditions { power: Power::LowPowerMode, ..CALM };
+        let low = Plan::within(4096 * MB, 10, OnBattery::All, low, &work, &[]);
+        assert_eq!(low.runs.iter().map(|running| running.round).collect::<Vec<_>>(), [Pictures, Words]);
+    }
+
+    #[test]
+    fn a_round_without_its_model_waits_for_it() {
+        let plan = Plan::within(4096 * MB, 10, OnBattery::Words, CALM, &queues(&[Words, Speech]), &[Tool::SpeechModel]);
+        assert_eq!(plan.runs, [Running { round: Words, new_only: false }]);
+        assert_eq!(plan.waits, [(Speech, Wait::Model)]);
     }
 
     #[test]

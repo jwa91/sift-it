@@ -130,6 +130,7 @@ impl Found {
             modified: self.modified,
             reading: self.reading(),
             speech: self.speech(),
+            new: false,
         }
     }
 }

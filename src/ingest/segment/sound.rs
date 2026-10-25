@@ -20,6 +20,17 @@ pub struct Windows {
 }
 
 impl Windows {
+    /// Windows of sound that starts `second` seconds into the file, a window's start: where an earlier item of the
+    /// same file stopped (its windows came before).
+    pub fn from(second: f64) -> Self {
+        Self { start: (second * AUDIO_RATE as f64).round() as usize, cut: second > 0.0, ..Default::default() }
+    }
+
+    /// Where the next window starts, in seconds.
+    pub fn next(&self) -> f64 {
+        self.start as f64 / AUDIO_RATE as f64
+    }
+
     /// More sound: the windows it fills.
     pub fn push(&mut self, samples: &[f32], on: &mut dyn FnMut(f64, &[f32]) -> Result<()>) -> Result<()> {
         self.buffer.extend_from_slice(samples);
@@ -86,6 +97,20 @@ mod tests {
         // Five seconds the last window didn't hear are a window of their own.
         assert_eq!(windows(loud, 75)[3], (60.0, 15.0));
         assert_eq!(windows(loud, 5), [(0.0, 5.0)]);
+    }
+
+    #[test]
+    fn windows_go_on_where_an_earlier_stretch_stopped() {
+        let mut windows = Windows::from(40.0);
+        let cut = std::cell::RefCell::new(Vec::new());
+        let mut on = |start: f64, _: &[f32]| {
+            cut.borrow_mut().push(start);
+            Ok(())
+        };
+        windows.push(&vec![0.5; 55 * AUDIO_RATE], &mut on).unwrap();
+        assert_eq!((cut.borrow().clone(), windows.next()), (vec![40.0, 60.0], 80.0));
+        windows.finish(&mut on).unwrap();
+        assert_eq!(*cut.borrow(), [40.0, 60.0, 80.0]);
     }
 
     #[test]

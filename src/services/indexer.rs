@@ -1,26 +1,25 @@
 //! `sift-it daemon`: the background indexer. It keeps the index in step with the chosen folders: a full sync when it
 //! starts (and every `indexing.full_sync_min`, in case an event was missed), then the paths macOS reports as changed
-//! (FSEvents), a moment after they go quiet. It reads what's new, newest and cheapest first, and lets the model go
-//! after `indexing.release_model_s` with nothing to do. A change to config.json counts at once, with a full sync.
-//!
-//! It writes down what's said in recordings and videos (ingest/listen.rs), a chunk at a time: beside the reading when
-//! `indexing.memory_mb` allows both models (resources::IngestPlan), else once everything is read. Anything that changes
-//! in the folders comes first, and the writing down goes on where it stopped.
+//! (FSEvents), a moment after they go quiet. It indexes in rounds (ingest/rounds.rs), words first, as the plan says
+//! (resources::Plan): what runs side by side by `indexing.memory_mb`, what goes on on battery by
+//! `indexing.on_battery`, and less, or nothing, when macOS says memory is short. What changes in the folders goes
+//! first in every round it needs. It lets the model go after `indexing.release_model_s` with nothing to do. A change
+//! to config.json counts at once, with a full sync.
 //!
 //! With nothing left to do, it writes the next generation of a vector partition that's due one (index/vectors.rs).
 //!
-//! It says what it's doing in status.json (for `sift-it status` and front ends), and listens to signals: SIGUSR1  look
-//! for changes now (a full sync) SIGUSR2  pause or resume SIGTERM  stop (what isn't finished stays queued)
+//! It says what it's doing, and how far each round is, in status.json (for `sift-it status` and front ends), and
+//! listens to signals: SIGUSR1  look for changes now (a full sync) SIGUSR2  pause or resume SIGTERM  stop (what isn't
+//! finished stays queued)
 //!
-//! One runs at a time (daemon.lock). With `indexing.on_battery` off it waits for a charger; in Low Power Mode it always
-//! waits. When a reader gets stuck (ingest::Stuck), it exits, and launchd starts a new one.
+//! One runs at a time (daemon.lock). When a reader gets stuck (ingest::Stuck), it exits, and launchd starts a new one.
 
-use crate::adapters::speech::Transcriber;
 use crate::config::{self, Config};
 use crate::index::{self, Writer};
-use crate::ingest::{Event, Indexer, Stuck};
+use crate::ingest::progress::{self, Progress};
+use crate::ingest::{Event, Facts, Indexer, Outcome, Stuck};
 use crate::query::timestamp;
-use crate::resources::{self, IngestPlan};
+use crate::resources::{self, Conditions, Plan, Power, Queue, Tool, Wait};
 use anyhow::{Context, Result, bail};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use protocol::{IndexerState, IndexerStatus};
@@ -33,7 +32,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
 use std::time::{Duration, Instant, SystemTime};
 
-/// While waiting (battery, Low Power Mode), conditions are checked this often.
+/// The power and the models are looked at again this often (memory pressure, at once).
 const WAIT_CHECK: Duration = Duration::from_secs(10);
 /// A speech helper that couldn't start is tried again after this long.
 const SPEECH_RETRY: Duration = Duration::from_secs(300);
@@ -62,6 +61,8 @@ fn install_signal_handlers() {
 struct Reporter {
     status: IndexerStatus,
     last_write: Instant,
+    /// The power when it last looked, for what waiting means.
+    power: Power,
 }
 
 impl Reporter {
@@ -73,59 +74,44 @@ impl Reporter {
         }
     }
 
+    /// What the work left waits for, in words.
+    fn waiting(&self, wait: Option<Wait>) -> Option<String> {
+        wait.map(|wait| wait.describe(self.power).to_string())
+    }
+
     fn event(&mut self, event: &Event) {
         match event {
             Event::Sync { added, changed, removed, .. } if added + changed + removed > 0 => {
                 log(&format!("sync: {added} new, {changed} changed, {removed} gone"));
             }
             Event::Sync { .. } => {}
-            Event::Started { pending } => {
-                self.status.done = 0;
-                self.status.total = *pending;
-                self.set(IndexerState::Indexing, None);
+            Event::Plan { rounds, readers, waiting } => {
+                let rounds: Vec<&str> = rounds.iter().map(|round| round.as_str()).collect();
+                log(&format!("running: {} ({readers} reading at once)", rounds.join(", ")));
+                let detail = self.waiting(*waiting);
+                self.set(IndexerState::Indexing, detail);
             }
-            Event::Queued { count } => self.status.total += count,
-            Event::File { path, .. } => {
-                self.status.done += 1;
-                self.status.current = Some(path.clone());
-            }
-            Event::Failed { path, error } => {
-                self.status.done += 1;
+            Event::File { path, .. } => self.status.current = Some(path.clone()),
+            Event::Failed { round, path, error } => {
                 self.status.last_error = Some(format!("{}: {error}", file_name(path)));
-                log(&format!("can't read {path}: {error}"));
+                log(&format!("{}: can't do {path}: {error}", round.as_str()));
             }
-            Event::Finished { indexed, failed, seconds, stopped } => {
+            Event::Transcribing { path, at, duration } => {
+                self.status.current = Some(path.clone());
+                if *at == 0.0 {
+                    log(&format!("writing down {} ({})", file_name(path), timestamp(*duration)));
+                }
+            }
+            Event::Rounds { rounds } => self.status.rounds = rounds.clone(),
+            Event::Finished { files, failed, seconds, stopped } => {
                 log(&format!(
-                    "indexed {indexed} files ({failed} unreadable) in {seconds:.1} s{}",
+                    "{files} files' rounds done ({failed} failed) in {seconds:.1} s{}",
                     if *stopped { ", stopped early" } else { "" }
                 ));
-            }
-            // Beside the reading, the reading's progress is what's shown.
-            Event::Transcribing { path, at, duration } if self.status.state == IndexerState::Transcribing => {
-                self.status.current = Some(path.clone());
-                self.status.detail = Some(format!("{} of {}", timestamp(*at), timestamp(*duration)));
-            }
-            Event::Transcribing { .. } => {}
-            Event::Transcribed { path, passages, seconds, ms } => {
-                self.status.speech_done += 1;
-                if self.status.state == IndexerState::Transcribing {
-                    self.status.done = self.status.speech_done;
-                }
-                log(&format!(
-                    "wrote down {}: {passages} passages, {seconds:.0} s of sound in {ms} ms",
-                    file_name(path)
-                ));
-            }
-            Event::TranscribeFailed { path, error } => {
-                self.status.speech_done += 1;
-                if self.status.state == IndexerState::Transcribing {
-                    self.status.done = self.status.speech_done;
-                }
-                self.status.last_error = Some(format!("{}: {error}", file_name(path)));
-                log(&format!("can't write down what's said in {path}: {error}"));
+                self.status.current = None;
             }
             Event::SpeechStopped { error } => {
-                log(&format!("writing down speech beside the reading stopped, it goes on after it: {error}"))
+                log(&format!("writing down speech stopped, it's tried again later: {error}"))
             }
         }
         self.write(false);
@@ -286,6 +272,31 @@ impl Changes {
     }
 }
 
+/// What the plan follows that's dear to look at: the power (IOKit) and which models are there, looked at again every
+/// WAIT_CHECK. Memory pressure comes from a dispatch source, and is read each time.
+struct Looked {
+    at: Option<Instant>,
+    power: Power,
+    missing: Vec<Tool>,
+}
+
+impl Looked {
+    fn facts(&mut self, speech_failed_at: Option<Instant>) -> Facts {
+        if self.at.is_none_or(|at| at.elapsed() >= WAIT_CHECK) {
+            self.at = Some(Instant::now());
+            self.power = resources::power();
+            self.missing = resources::missing();
+        }
+        let mut missing = self.missing.clone();
+        // A speech helper that couldn't start, or stopped, is tried again after a while.
+        if speech_failed_at.is_some_and(|at| at.elapsed() < SPEECH_RETRY) && !missing.contains(&Tool::SpeechModel) {
+            missing.push(Tool::SpeechModel);
+        }
+        let conditions = Conditions { power: self.power, pressure: crate::adapters::macos::pressure::level() };
+        Facts { conditions, missing }
+    }
+}
+
 pub fn run() -> Result<()> {
     let _lock = lock()?;
     install_signal_handlers();
@@ -297,6 +308,7 @@ pub fn run() -> Result<()> {
     let mut reporter = Reporter {
         status: IndexerStatus { pid: std::process::id(), ..Default::default() },
         last_write: Instant::now(),
+        power: Power::Charger,
     };
     reporter.write(true);
 
@@ -314,14 +326,15 @@ pub fn run() -> Result<()> {
     let mut last_full = Instant::now();
     let mut idle_since = Instant::now();
     let mut paused = false;
-    let mut waiting_reason: Option<(String, Instant)> = None;
-    // The speech model's helper, while there's speech to write down; why it can't run, when it can't.
-    let mut transcriber: Option<Transcriber> = None;
-    let mut speech_problem: Option<String> = None;
-    // When the helper last failed to start: it's tried again a while later, not on every pass.
-    let mut speech_failed_at: Option<Instant> = None;
-    // When writing a partition's next generation last failed: the same.
+    let mut looked = Looked { at: None, power: Power::Charger, missing: Vec::new() };
+    // How fast each round went while it ran, across runs: for the time each has left.
+    let mut progress = Progress::default();
+    // When the speech helper last couldn't start or stopped.
+    let speech_failed_at: Cell<Option<Instant>> = Cell::new(None);
+    // When writing a partition's next generation last failed: it's tried again a while later, not on every pass.
     let mut compact_failed_at: Option<Instant> = None;
+    // The plan how far each round is was last shown with: it's shown again when that changes, or the index did (None).
+    let mut shown: Option<Plan> = None;
 
     while !SHUTDOWN.load(Ordering::SeqCst) {
         // The config changed: watch the folders it names now, and sync it all (what's read, and how, may differ). A
@@ -332,7 +345,7 @@ pub fn run() -> Result<()> {
                 Ok(new) if same_work(&new, &config) => config = new,
                 Ok(new) => {
                     config = new;
-                    waiting_reason = None;
+                    looked.at = None;
                     changes.roots = config.sources.paths.clone();
                     changes.quiet = Duration::from_millis(config.indexing.quiet_ms);
                     drop(watcher);
@@ -357,6 +370,7 @@ pub fn run() -> Result<()> {
             changes.rescan = false;
             changes.paths.clear();
             reporter.set(IndexerState::Syncing, None);
+            shown = None;
             match indexer.sync(&config) {
                 Ok(event) => reporter.event(&event),
                 Err(error) => log(&format!("sync failed: {error:#}")),
@@ -365,6 +379,7 @@ pub fn run() -> Result<()> {
         } else {
             let paths = changes.take();
             if !paths.is_empty() {
+                shown = None;
                 match indexer.sync_paths(&config, &paths) {
                     Ok(event) => reporter.event(&event),
                     Err(error) => {
@@ -376,120 +391,71 @@ pub fn run() -> Result<()> {
             }
         }
 
-        let pending = indexer.index.pending_count().unwrap_or(0);
-        if pending > 0 && paused {
-            reporter.set(IndexerState::Paused, Some(format!("Paused, {pending} files waiting")));
-        } else if pending > 0 {
-            // Conditions are checked every few seconds, not on every pass.
-            let reason = match &waiting_reason {
-                Some((reason, checked)) if checked.elapsed() < WAIT_CHECK => Some(reason.clone()),
-                _ => {
-                    let reason = resources::wait(&config.indexing);
-                    waiting_reason = reason.clone().map(|reason| (reason, Instant::now()));
-                    reason
+        let facts = looked.facts(speech_failed_at.get());
+        reporter.power = facts.conditions.power;
+        let queues: Vec<Queue> = indexer
+            .index
+            .queues()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(round, new, old)| Queue { round, new, old })
+            .collect();
+        let plan = Plan::of(&config.indexing, facts.conditions, &queues, &facts.missing);
+        let mut report = |reporter: &mut Reporter, indexer: &Indexer| {
+            if shown.as_ref() != Some(&plan)
+                && let Ok(totals) = indexer.index.rounds()
+            {
+                reporter.status.rounds = progress::statuses(&totals, &plan, |_| None);
+                shown = Some(plan.clone());
+            }
+        };
+        if !queues.is_empty() && paused {
+            report(&mut reporter, &indexer);
+            reporter.set(IndexerState::Paused, None);
+            indexer.release_model();
+        } else if !plan.runs.is_empty() {
+            reporter.set(IndexerState::Indexing, reporter.waiting(plan.waiting()));
+            let seen = Cell::new(config_time);
+            let stop = || interrupted(&config_path, &seen, &config);
+            let mut facts = || looked.facts(speech_failed_at.get());
+            let mut events = |event: Event| {
+                if let Event::SpeechStopped { .. } = event {
+                    speech_failed_at.set(Some(Instant::now()));
                 }
+                reporter.event(&event);
             };
-            if let Some(reason) = reason {
-                reporter.set(IndexerState::Waiting, Some(reason));
-                indexer.release_model();
-            } else {
-                waiting_reason = None;
-                let models = crate::models::status();
-                if !(models.text && models.media) {
-                    reporter.set(IndexerState::Waiting, Some("Waiting for the model to download".into()));
-                } else {
-                    let seen = Cell::new(config_time);
-                    let stop = || interrupted(&config_path, &seen, &config);
-                    let mut events = |event: Event| reporter.event(&event);
-                    let mut take = || changes.take();
-                    // Speech beside the reading, when memory allows both models.
-                    let beside = IngestPlan::of(&config.indexing).beside
-                        && crate::adapters::speech::unavailable().is_none()
-                        && speech_failed_at.is_none_or(|at| at.elapsed() > SPEECH_RETRY);
-                    let helper = beside.then_some(&mut transcriber);
-                    if let Err(error) = indexer.index_pending(&config, &mut events, &stop, &mut take, helper) {
-                        log(&format!("indexing stopped: {error:#}"));
-                        reporter.status.last_error = Some(format!("{error:#}"));
-                        if error.is::<Stuck>() {
-                            // The stuck thread can't be stopped, and what it's stuck in stays stuck in this process:
-                            // it ends, and launchd starts a new daemon (KeepAlive), which goes on with the rest.
-                            reporter.set(IndexerState::Stopped, None);
-                            return Err(error);
-                        }
-                        changes.rescan = true;
-                        // Not straight back into the same failure.
-                        sleep_interruptibly(Duration::from_secs(30));
-                    }
-                    idle_since = Instant::now();
-                    continue;
+            let mut take = || changes.take();
+            match indexer.run(&config, &mut facts, &mut progress, &mut events, &stop, &mut take) {
+                Ok(Outcome::Waits(Wait::Memory)) => {
+                    indexer.release_model();
+                    log("the Mac is short of memory: everything lets go, and waits");
                 }
-            }
-        } else {
-            // Everything is read: what's said in recordings and videos is written down meanwhile.
-            let to_write = !paused
-                && indexer.index.next_transcript().is_ok_and(|next| next.is_some())
-                && resources::wait(&config.indexing).is_none();
-            let may_start = speech_failed_at.is_none_or(|at| at.elapsed() > SPEECH_RETRY);
-            if to_write && transcriber.is_none() && may_start {
-                match Transcriber::start() {
-                    Ok(started) => {
-                        transcriber = Some(started);
-                        speech_problem = None;
-                        speech_failed_at = None;
-                    }
-                    Err(error) => {
-                        let error = format!("{error:#}");
-                        if speech_problem.as_deref() != Some(&error) {
-                            log(&format!("can't write down speech: {error}"));
-                        }
-                        speech_problem = Some(error);
-                        speech_failed_at = Some(Instant::now());
-                    }
-                }
-            }
-            // A change that's still settling is synced and read first: the helper waits for it, loaded.
-            let settling = !changes.paths.is_empty();
-            if let (true, Some(running), false) = (to_write, transcriber.as_mut(), settling) {
-                if let Ok(index::Transcripts { done, total, .. }) = indexer.index.transcripts() {
-                    reporter.status.speech_done = done;
-                    reporter.status.speech_total = total;
-                    reporter.status.done = done;
-                    reporter.status.total = total;
-                }
-                reporter.set(IndexerState::Transcribing, reporter.status.detail.clone());
-                // Between chunks it makes way for anything that changes in the folders (synced, and read first).
-                let arrived = std::cell::RefCell::new(Vec::new());
-                let seen = Cell::new(config_time);
-                let stop = || {
-                    if interrupted(&config_path, &seen, &config) {
-                        return true;
-                    }
-                    while let Ok(event) = changes.receiver.try_recv() {
-                        arrived.borrow_mut().push(event);
-                    }
-                    arrived.borrow().iter().any(|event| match event {
-                        Ok(event) => event.need_rescan() || event.paths.iter().any(|path| changes.worth_a_look(path)),
-                        Err(_) => true,
-                    })
-                };
-                let mut events = |event: Event| reporter.event(&event);
-                if let Err(error) = indexer.transcribe_next(running, &mut events, &stop) {
-                    log(&format!("writing down speech stopped: {error:#}"));
+                Ok(_) => {}
+                Err(error) => {
+                    log(&format!("indexing stopped: {error:#}"));
                     reporter.status.last_error = Some(format!("{error:#}"));
-                    // A new helper next time (one that stopped is no use), after a pause.
-                    transcriber = None;
+                    if error.is::<Stuck>() {
+                        // The stuck thread can't be stopped, and what it's stuck in stays stuck in this process:
+                        // it ends, and launchd starts a new daemon (KeepAlive), which goes on with the rest.
+                        reporter.set(IndexerState::Stopped, None);
+                        return Err(error);
+                    }
+                    changes.rescan = true;
+                    // Not straight back into the same failure.
                     sleep_interruptibly(Duration::from_secs(30));
                 }
-                for event in arrived.into_inner() {
-                    changes.add(event);
-                }
-                idle_since = Instant::now();
-                continue;
             }
-            if !(to_write && settling) {
-                // Nothing (more) to write down: the helper goes, and its memory with it.
-                transcriber = None;
-            }
+            idle_since = Instant::now();
+            shown = None;
+            continue;
+        } else if !queues.is_empty() {
+            // All that's left waits: for a charger, memory, or a model.
+            report(&mut reporter, &indexer);
+            let detail = reporter.waiting(plan.waits_for());
+            reporter.set(IndexerState::Waiting, detail);
+            indexer.release_model();
+        } else {
+            report(&mut reporter, &indexer);
             reporter.status.current = None;
             // Partitions with many dead rows, or sketches made against a mean that moved: their next generation.
             if !paused && compact_failed_at.is_none_or(|at| at.elapsed() > COMPACT_RETRY) {
@@ -504,8 +470,7 @@ pub fn run() -> Result<()> {
                     }
                 }
             }
-            let detail = speech_problem.clone().filter(|_| to_write);
-            reporter.set(IndexerState::Idle, detail);
+            reporter.set(IndexerState::Idle, None);
         }
 
         if indexer.model_loaded() && idle_since.elapsed() > Duration::from_secs(config.indexing.release_model_s) {

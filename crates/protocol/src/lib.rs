@@ -274,19 +274,15 @@ pub enum MeaningState {
 pub struct IndexerStatus {
     pub pid: u32,
     pub state: IndexerState,
-    /// What it's waiting for, or how far into a recording it is.
+    /// What the work that's left waits for: a charger, memory, a model to download.
     pub detail: Option<String>,
-    /// Files done of the ones in this run (or recordings written down, while that's what it does).
-    pub done: usize,
-    pub total: usize,
+    /// How far each round is, in their order: the rounds this index has had anything to do in.
+    pub rounds: Vec<RoundStatus>,
     /// The file it did last.
     pub current: Option<String>,
     /// When it said this, in seconds since 1970.
     pub updated: f64,
     pub last_error: Option<String>,
-    /// Recordings and videos with what's said in them written down, and how many there are.
-    pub speech_done: usize,
-    pub speech_total: usize,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -296,16 +292,92 @@ pub enum IndexerState {
     Starting,
     /// Comparing the folders with the index.
     Syncing,
-    /// Reading files.
+    /// At work: its rounds say how far.
     Indexing,
-    /// Writing down what's said in recordings and videos, everything else being read.
-    Transcribing,
-    /// For a charger, for Low Power Mode to end, or for the model to download.
+    /// The work that's left waits (`detail` says for what), and nothing else can be done meanwhile.
     Waiting,
     Paused,
     /// Everything is done.
     Idle,
     Stopped,
+}
+
+/// A round of indexing: a pass over the whole collection with one tool (docs/design.md, "Rounds"). They're in their
+/// order: words first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Round {
+    /// Names, metadata and the text that's simply in files: no model.
+    Words,
+    /// What passages mean: the text model.
+    Text,
+    /// The text on screenshots and scanned pages: Vision's text recognition.
+    Ocr,
+    /// What photos, screenshots, scanned pages and video frames show: the text model with its vision encoder.
+    Pictures,
+    /// What recordings and a video's sound sound like: the text model with its audio encoder.
+    Sound,
+    /// What's said in recordings and videos: the speech model.
+    Speech,
+}
+
+impl Round {
+    pub const ALL: [Round; 6] = [Round::Words, Round::Text, Round::Ocr, Round::Pictures, Round::Sound, Round::Speech];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Round::Words => "words",
+            Round::Text => "text",
+            Round::Ocr => "ocr",
+            Round::Pictures => "pictures",
+            Round::Sound => "sound",
+            Round::Speech => "speech",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<Round> {
+        Round::ALL.into_iter().find(|round| round.as_str() == name)
+    }
+
+    /// What a round's `done` and `total` count: files, passages, pictures (a video's frames looked at, one every
+    /// 2 s, among them), or seconds of sound.
+    pub fn unit(self) -> &'static str {
+        match self {
+            Round::Words => "files",
+            Round::Text => "passages",
+            Round::Ocr | Round::Pictures => "pictures",
+            Round::Sound | Round::Speech => "seconds",
+        }
+    }
+}
+
+/// How far a round is.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RoundStatus {
+    pub round: Round,
+    pub state: RoundState,
+    /// What's done of what's known so far, in the round's unit (Round::unit). The total grows while the rounds
+    /// before find more: the text round's passages, as words, OCR and speech read them.
+    pub done: f64,
+    pub total: f64,
+    /// Files with something left to do in it.
+    pub files: usize,
+    /// About how long the rest takes, at the speed it went while it ran: None until it has run a while.
+    pub seconds_left: Option<f64>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RoundState {
+    /// Nothing is left to do.
+    #[default]
+    Done,
+    /// Its tool is loaded, and it's at work.
+    Running,
+    /// It waits for its turn: another round has its chip, or the budget has no room for its tool yet.
+    Queued,
+    /// It waits for a charger (`indexing.on_battery`), for memory, or for its model (the indexer's `detail` says).
+    Waiting,
 }
 
 /// What's in the index.
@@ -373,10 +445,11 @@ impl Kind {
 }
 
 /// What a segment is, which also says which of the model's inputs made its vector.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Segment {
     /// A stretch of a text file or document.
+    #[default]
     Passage,
     /// A PDF page's text (or, for a scanned page, the text read from it).
     Page,
@@ -516,9 +589,24 @@ mod tests {
     fn events_and_states_are_lowercase_words() {
         let loading = Event::Meaning { state: MeaningState::Loading, error: None };
         assert_eq!(serde_json::to_value(loading).unwrap(), json!({"event": "meaning", "state": "loading"}));
-        let indexer = Event::Indexer(IndexerStatus { state: IndexerState::Transcribing, ..Default::default() });
+        let rounds = vec![RoundStatus {
+            round: Round::Ocr,
+            state: RoundState::Running,
+            done: 3.0,
+            total: 12.0,
+            files: 9,
+            seconds_left: None,
+        }];
+        let indexer = Event::Indexer(IndexerStatus { state: IndexerState::Indexing, rounds, ..Default::default() });
         let value = serde_json::to_value(indexer).unwrap();
-        assert_eq!((value["event"].as_str(), value["state"].as_str()), (Some("indexer"), Some("transcribing")));
+        assert_eq!((value["event"].as_str(), value["state"].as_str()), (Some("indexer"), Some("indexing")));
+        assert_eq!(
+            value["rounds"][0],
+            json!({"round": "ocr", "state": "running", "done": 3.0, "total": 12.0,
+            "files": 9, "seconds_left": null})
+        );
+        assert!(Round::ALL.iter().all(|&round| Round::parse(round.as_str()) == Some(round)));
+        assert!(Round::ALL.is_sorted());
         assert_eq!(serde_json::to_value(Scan::ExactF16).unwrap(), json!("exact-f16"));
         assert!(Segment::ALL.iter().all(|&segment| Segment::parse(segment.as_str()) == Some(segment)));
         assert!(Kind::ALL.iter().all(|&kind| Kind::parse(kind.as_str()) == Some(kind)));

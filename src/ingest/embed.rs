@@ -1,26 +1,18 @@
 //! Embedding: the model's only owner. It loads the text model when something first needs a vector, the vision encoder
-//! when a picture or a video frame does, and the audio encoder when sound does (each memory of its own). The encoders go
-//! when the reading is over, the text model when indexing has been idle a while. Texts are embedded in batches, one
-//! model call for up to BATCH of them.
+//! when a picture or a video frame does, and the audio encoder when sound does (each memory of its own). An encoder
+//! goes when its round leaves the plan, the text model when indexing has been idle a while. Texts are embedded in
+//! batches, one model call for a batch of the text round.
 
 use super::{Payload, Piece};
 use crate::index::NewSegment;
 use crate::models;
 use anyhow::Result;
 use embedder::{Embedder, Encoder, Inputs};
-
-/// Texts embedded in one model call, at most.
-const BATCH: usize = 16;
-
-/// A piece embedded, for its file: as a segment (without a vector when it couldn't have one), and whether embedding
-/// it failed (it stays in the keyword index).
-pub type Embedded = (i64, NewSegment, bool);
+use protocol::Round;
 
 #[derive(Default)]
 pub struct Embed {
     embedder: Option<Embedder>,
-    /// Texts waiting for a model call, with their file.
-    batch: Vec<(i64, Piece)>,
 }
 
 impl Embed {
@@ -40,60 +32,36 @@ impl Embed {
         self.embedder.is_some()
     }
 
-    /// A text to embed with the next batch.
-    pub fn queue(&mut self, file: i64, piece: Piece) {
-        self.batch.push((file, piece));
-    }
-
-    /// Drops the texts waiting: the run they're from is over, and a file not finished is read again from the start.
-    pub fn forget(&mut self) {
-        self.batch.clear();
-    }
-
-    /// The batch is as large as one model call takes.
-    pub fn full(&self) -> bool {
-        self.batch.len() >= BATCH
-    }
-
-    /// Embeds the batched texts of the files `keep` takes, in one model call. When it fails they're segments
-    /// without vectors.
-    pub fn flush(&mut self, keep: impl Fn(i64) -> bool) -> Result<Vec<Embedded>> {
-        self.batch.retain(|(file, _)| keep(*file));
-        if self.batch.is_empty() {
-            return Ok(Vec::new());
+    /// Texts embedded together: their vectors, or None when the call failed. An error when the model can't load.
+    pub fn texts(&mut self, texts: &[&str]) -> Result<Option<Vec<Vec<f32>>>> {
+        if texts.is_empty() {
+            return Ok(Some(Vec::new()));
         }
-        let pieces = std::mem::take(&mut self.batch);
-        let texts: Vec<&str> = pieces
-            .iter()
-            .map(|(_, piece)| match &piece.payload {
-                Payload::Text(text) => text.as_str(),
-                _ => "",
-            })
-            .collect();
-        let vectors = self.model()?.embed_texts(&texts);
-        let failed = vectors.is_err();
-        let mut vectors = vectors.unwrap_or_default().into_iter();
-        Ok(pieces.into_iter().map(|(file, piece)| (file, segment(piece, vectors.next()), failed)).collect())
+        Ok(self.model()?.embed_texts(texts).ok())
     }
 
-    /// A picture or sound embedded now, or a piece without a vector (words alone). True with it when it couldn't be
-    /// embedded.
+    /// A piece as a segment: a picture or sound embedded now; text, or a picture the pictures round embeds, marked as
+    /// waiting for its round; words alone without a vector. True with it when it couldn't be embedded.
     pub fn one(&mut self, piece: Piece) -> Result<(NewSegment, bool)> {
-        let vector = match &piece.payload {
-            Payload::None | Payload::Text(_) => Ok(None),
-            Payload::Image(image) => self.encoder(Encoder::Vision)?.embed_image(image).map(Some),
-            Payload::Audio(samples) => self.encoder(Encoder::Audio)?.embed_audio(samples).map(Some),
+        let Piece { segment, loc, loc_end, text, payload } = piece;
+        let mut new = NewSegment { segment, loc, loc_end, text, ..Default::default() };
+        let vector = match payload {
+            Payload::None => Ok(None),
+            Payload::Text(context) => {
+                new.context = (!context.is_empty()).then_some(context);
+                new.due = Some(Round::Text);
+                Ok(None)
+            }
+            Payload::Later => {
+                new.due = Some(Round::Pictures);
+                Ok(None)
+            }
+            Payload::Image(image) => self.encoder(Encoder::Vision)?.embed_image(&image).map(Some),
+            Payload::Audio(samples) => self.encoder(Encoder::Audio)?.embed_audio(&samples).map(Some),
         };
         let failed = vector.is_err();
-        Ok((segment(piece, vector.ok().flatten()), failed))
-    }
-
-    /// Texts embedded together: their vectors, or none when the call failed.
-    pub fn texts(&mut self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
-        if texts.is_empty() {
-            return Ok(Vec::new());
-        }
-        Ok(self.model()?.embed_texts(texts).unwrap_or_default())
+        new.vector = vector.ok().flatten();
+        Ok((new, failed))
     }
 
     /// The text model, loaded now if it isn't.
@@ -112,8 +80,4 @@ impl Embed {
         }
         Ok(embedder)
     }
-}
-
-fn segment(piece: Piece, vector: Option<Vec<f32>>) -> NewSegment {
-    NewSegment { segment: piece.segment, loc: piece.loc, loc_end: piece.loc_end, text: piece.text, vector }
 }

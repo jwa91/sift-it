@@ -43,10 +43,10 @@ encoder, which is four compiled Core ML models and a vocabulary.
   vision and audio encoders are read into memory of their own: llama.cpp's mtmd copies them. Core ML gives the Neural
   Engine a copy of the speech model (607 MB), which macOS counts to the speech helper but not in its footprint.
 - **Only what a step needs.** A search by meaning loads the text model, with a context made for one query. The
-  indexer loads the text model for text, the vision encoder while it reads pictures and video frames, the audio
-  encoder while it reads sound, and the speech helper while it writes down what's said. Both encoders are in one file,
-  and each loads on its own (a switch sift-it adds to mtmd: `scripts/llama.cpp.patch`). When the reading is over, the
-  encoders go, so on a small budget the speech helper runs beside the text model alone.
+  indexer loads each for its round ([Indexing](#indexing)): the text model for text, with the vision encoder for
+  pictures and with the audio encoder for sound, and the speech helper for speech. Both encoders are in one file, and
+  each loads on its own (a switch sift-it adds to mtmd: `scripts/llama.cpp.patch`). An encoder goes when its round is
+  over, and the speech helper when speech is.
 
 Measured on an M5 with 24 GB, on part of the demo folder, as footprint: the memory a process has of its own. The
 mapped model files come on top, as file pages in memory, counted once however many processes map them.
@@ -82,35 +82,168 @@ mapped model files come on top, as file pages in memory, counted once however ma
 The indexer reads files with the full models: text, image and sound, and speech in the `sift-it-transcribe` helper.
 Every vector it writes is f32, and what it produces never depends on the Mac it runs on.
 
-`indexing.memory_mb`, `auto` by default, decides throughput only:
+### Rounds
 
-- how many workers read files at once, each holding decoded media
-- whether the embedding model and the speech helper run side by side or one after the other
+It goes over the whole collection in rounds, each with one tool, so that what's cheap is searchable soon, and a model
+loads once for everything that needs it rather than once per file:
 
-At `auto` it's a quarter of the Mac's memory. Side by side takes both models, about 1.2 and 0.75 GB (the text model's
-mapped file, and the Neural Engine's copy of the speech model), and two readers. When the budget holds that, embedding
-and transcription run together: a thread hands the speech helper the recordings already read, and the embedding thread
-embeds and stores what comes back between files. With less, the models take turns, and what's said is written down once
-everything else is read, beside the text model alone. Reading takes at most a third of the cores, two to four files at
-once, and a small budget makes that fewer, down to one. The vectors are the same either way.
+| Round | Its tool, on its chip | Reads | So a file is found by |
+|---|---|---|---|
+| words | none: readers, on the CPU | every file | its name, tags and metadata, and the text that's simply in it: plain text, code, records, a PDF's text layer, documents through textutil |
+| text | the text model, on the GPU | passages | what they mean |
+| OCR | Vision's text recognition, on the Neural Engine | screenshots, scanned pages | the text on them |
+| pictures | the text model with its vision encoder, on the GPU | photos, screenshots, scanned pages with little text, video frames | what they show |
+| sound | the text model with its audio encoder, on the GPU | recordings, a video's sound | what they sound like |
+| speech | Parakeet Ultra in the speech helper, on the Neural Engine | recordings, a video's sound | what's said in them |
 
-Measured:
+- **A file's kind decides its rounds.** A note goes through words and text, a photo through words and pictures, a
+  screenshot through words, OCR, pictures and text, a video through words, pictures, sound, speech and text. Its depth
+  leaves out what it doesn't reach: at `words`, a file goes through words and OCR only. What a PDF needs is known once
+  its words are read: OCR for its scanned pages, and pictures for the scanned pages with little text.
+- **Words first, for every file.** They need no model, so an exact search finds everything within minutes of choosing
+  the folders, while meaning comes round by round.
+- **What OCR and speech find is words at once.** It goes into the keyword index as soon as it's read, and its passages
+  join the text round like any others.
+- **Cheapest first.** A round's queue goes from the file with the least to do in it to the one with the most.
+- **An item at a time.** A round works in items: a file, a batch of 16 passages, ten pages of a scan, or five minutes
+  of a video. What an item found is written when it ends, with where the next one goes on. A recording's sound is read
+  in one go, and every five minutes what it found is written with how far it got: it stops there when the plan needs
+  its lane. So a file stopped partway goes on from there, and what runs can change between any two items, or at such a
+  checkpoint, without losing work.
+
+### Tools and the budget
+
+`indexing.memory_mb`, `auto` by default, is a ceiling on what the tools loaded at once hold, with what the readers
+decode: it decides how much runs side by side, never what's written. At `auto` it's a quarter of the Mac's memory.
+
+Each tool says which chip it runs on and what it holds at its peak, as measured (`src/resources.rs`):
+
+| Tool | Chip | Holds |
+|---|---|---|
+| the text model | GPU | 338 MB, and its 296 MB file mapped |
+| the vision encoder | GPU | 289 MB, beside the text model |
+| the audio encoder | GPU | 321 MB, beside the text model |
+| Vision's text recognition | Neural Engine | 256 MB, and 171 MB on the Neural Engine |
+| the speech helper | Neural Engine | 340 MB, 607 MB on the Neural Engine, and 32 MB mapped |
+| a reader | CPU | 128 MB |
+
+What runs is a plan, made again whenever what it depends on changes. Rounds that have work are taken in order (words,
+text, OCR, pictures, sound, speech), and each joins when its tools fit in the budget beside those of the rounds before
+it. The first always runs, whatever the budget: indexing never stops for want of memory, it only goes slower.
+
+- **One chip, one round.** Text, pictures and sound share the text model and the GPU: two of them at once would share
+  its time, so neither would finish sooner, and the earlier one should. So the GPU takes pictures or sound, one at a
+  time, with its encoder loaded, and while passages wait for the text round, their batches go first. The media round
+  gets the GPU between them: passages keep coming as OCR and speech read them.
+- **The Neural Engine takes OCR and speech together.** Measured, they get more done side by side than one after the
+  other (below).
+- **The readers take what's left,** two to four (a third of the cores), down to one.
+
+On a big budget, that's every chip busy at once. On a small one, one tool works through its whole queue before the
+next loads. On a Mac with ten cores:
+
+| `memory_mb` | What runs side by side | With screenshots and scans to read too |
+|---|---|---|
+| 1024 | words and text, then one tool at a time | the same |
+| 2048 | words, text, pictures and speech, then sound; one file read at once | speech waits for OCR; three read at once |
+| 4096, and `auto` from 16 GB | the same, three files read at once | everything |
+
+### New files first
+
+Files that appear or change while the indexer runs (FSEvents tells) take a fast lane: they go first in every round
+they need, so a new screenshot is found by its words and by what it shows within seconds, even while a long video is
+read. A chip on another round lets it in between two of that round's items, and since an item is at most five
+minutes of sound or video, that's seconds. On the GPU, the other encoder goes and theirs loads (51 to 69 ms).
+
+### Memory pressure
+
+The budget is a ceiling, and macOS says when memory runs short (a memory-pressure dispatch source):
+
+- **Warning:** the plan shrinks to one tool, as on the smallest budget, with one reader.
+- **Critical:** everything stops at once, and lets its memory go: the models, the encoders, the speech helper. The
+  items in hand are read again later. Indexing goes on once the pressure is back to a warning or less.
+
+### Power
+
+On battery, `indexing.on_battery` decides what goes on:
+
+- `words`, the default: words and new files, while the other rounds wait for a charger. Meaning costs energy: on the
+  M5, above idle, a thousand passages take 408 J, a photo 1.9 J, a video frame 0.8 J, 30 s of sound 2.6 J, and an
+  hour of speech 116 J. The text of a large collection can take more than a MacBook Air's whole battery (190 kJ).
+- `all`: everything goes on.
+- `none`: nothing does, until there's a charger.
+
+Low Power Mode lets only words and new files go, or nothing at `none`. `sift-it index` doesn't wait: it was asked to
+index now.
+
+### How far it is
+
+Each round knows how far it is: what's done of what's known, in its own unit (files, passages, pictures, seconds of
+sound), and how fast it went while it ran, for the time it has left. There are no fixed rates: a fanless Mac slows as
+it warms, and the rounds measure that as they go. So status can say "words: done, text: 60%, pictures: 10%, speech:
+waiting", and the time left once a round has run a while. A round's total grows while the rounds before it find more:
+the text round's passages, as words, OCR and speech read them.
+
+Measured on an M5 with 24 GB:
+
+- **The demo folder:** 628 files (428 photos, 91 videos, 71 recordings, 38 documents and texts, 28 hours of sound),
+  read with `sift-it index` while the engine searched by meaning every 5 s, file by file before and in rounds after.
+  The peaks are each process's footprint, and the Neural Engine's memory after the plus.
+
+  | `memory_mb` | | Every file found by its words | Text by meaning | All done | Indexer | Speech helper | Engine | All at once |
+  |---|---|---|---|---|---|---|---|---|
+  | 2048 | before | 2,171 s | 2,179 s | 2,844 s | 1,018 MB | 149 + 607 MB | 290 MB | |
+  | | after | 10 s | 100 s | 2,075 s | 715 MB | 262 + 607 MB | 342 MB | 1,724 MB |
+  | 4096 | before | 2,130 s | 2,140 s | 2,164 s | 1,107 MB | 116 + 607 MB | 316 MB | 2,123 MB |
+  | | after | 5 s | 104 s | 2,131 s | 822 MB | 336 + 607 MB | 309 MB | 1,934 MB |
+  | `auto` (6 GB) | before | 2,117 s | 2,127 s | 2,151 s | 1,072 MB | 104 + 607 MB | 309 MB | 2,041 MB |
+  | | after | 6 s | 107 s | 2,135 s | 739 MB | 324 + 607 MB | 337 MB | 1,801 MB |
+
+  Read file by file, a file was found only once all of it was read, and the cheapest went first: a book and the long
+  podcasts came last, so nearly everything was found only at the end. All done is the GPU's work, which is the same
+  either way; at 2048 MB speech was written down after the reading before, and beside it now. The indexer holds less
+  because it never has both encoders loaded.
+
+- **The same index.** The testbed indexed in rounds has the segments it had read file by file, all 578, with the same
+  places and text, and its 115 vectors are the same (cosine 1.0). `make eval` and `make selftest` give what they did.
+  On the demo, all segments but 36 passages of speech are the same, and those differ in a word or two: two runs file
+  by file differ in 39, since the speech model doesn't write the same twice to the letter. Of the 21,931 vectors,
+  the frames and pictures are the same to the bit, and the rest at a cosine of 0.99997 or more.
+- **New files first.** In the daemon at 2048 MB, a screenshot saved while the GPU read a podcast's sound was found by
+  its words 1.8 s after it landed (1.5 s of that is `indexing.quiet_ms`), by the text on it at 2.7 s, by that text's
+  meaning at 3.3 s, and by what it shows at 6.3 s: the sound round went on to its next checkpoint, and the vision
+  encoder took over.
+- **An item at a time.** A podcast whose sound round was stopped at 600 s went on from there, and its 105 windows
+  are those of one read, to the bit (cosine 1.0): a read that starts partway warms the decoder up first
+  (docs/audio-decoding.md). A video's frames go on after the frame kept last, which the item before wrote down, and
+  are the same too. Reading sound in five-minute items that each started partway wasn't: in one of the demo's VBR MP3s
+  (music), AVFoundation's seek lands a fraction of a second off, and every window after the first seek was shifted
+  (cosine 0.977). So a recording is read in one go, and only one that was stopped is read from partway.
+- **OCR and speech on the Neural Engine.** The 362 pages of the demo's PDFs as screenshots, and ten of its podcasts
+  (6.4 hours), at `auto`:
+
+  | | side by side | one after the other |
+  |---|---|---|
+  | The Neural Engine alone (the GPU's rounds waiting) | 242 s | 286 s |
+  | With the GPU's rounds as well (the podcasts' sound, the text round) | 347 s | 385 s |
+
+  Alone, OCR takes 0.53 s a screenshot and speech goes 269 times as fast as the sound plays; side by side, 0.94 s
+  and 249 times. OCR hardly minds the GPU being busy (0.57 s a screenshot beside `sift-it bench-embed`, 0.61 s beside
+  another process reading sound, 0.64 s beside three busy cores).
+- **One thread for the GPU, and the writer.** It embeds a sound window in about 200 ms, and the lanes that need no GPU
+  can't wait that long for each message: the words, OCR and speech lanes are answered between any two of the media
+  lane's pieces, and may run far ahead. When they were answered once a pass, OCR took 3 s a screenshot beside the
+  sound round in the same process, speech went at half its speed, and the demo's words took 107 s instead of 9.
 
 - The embedding model's batch size changes nothing: 17.7 passages a second one at a time, and 17.7, 18.1 and 18.0 in
   batches of 2,048, 4,096 and 8,192 tokens, with the same footprint. So it isn't part of the budget, and stays at
   2,048 tokens (an image takes 1,120). Whether a bigger GPU gains from bigger batches,
   `SIFT_IT_BATCH_TOKENS=4096 sift-it bench-embed` shows.
-- The speech helper holds 100 to 120 MB of its own while it writes down a three-minute stretch, which takes it under a
-  second ([Speech](#speech)).
-- Side by side is the faster: three podcasts and four videos (124 minutes of sound) are indexed in 138 s, against 154 s
-  with the models taking turns. The reading beside speech takes 128 s, against 120 s alone, since speech has the
-  Neural Engine and only its passages wait for the GPU. Beside transcribe.cpp, which shared the GPU, the reading took
-  158 s, and the whole 224 s, against 240 s taking turns.
 - Two readers index the testbed in 20 s, one in 29 s, at the same peak: what a reader decodes is small next to the
   model. The budget reckons with 128 MB a reader.
 
-The indexer follows the folders with FSEvents and makes a full sync now and then. It waits for a charger (when
-`indexing.on_battery` is off) and out of Low Power Mode, and lets the model go when there's nothing to do.
+The indexer follows the folders with FSEvents and makes a full sync now and then, and lets the model go when there's
+nothing to do.
 
 ### Speech
 
@@ -125,10 +258,13 @@ Measured on an M5 with 24 GB, against transcribe.cpp 0.4.1 on the GPU with the s
 - **Speed:** in the indexer, its passages embedded, about 220 times as fast as the sound plays: three podcasts and
   four videos (124 minutes) in 34 s, against 118 s (63 times). On its own, 235 to 286 times, against 83 to 93.
 - **Energy:** 116 J an hour of sound, on battery, against 553 J.
-- **Memory:** 100 to 120 MB of its own, plus the Neural Engine's copy of the model, 607 MB, and the 32 MB it maps of
-  what Core ML compiled for the Neural Engine. That copy doesn't show in its footprint: `footprint` lists it apart, as
-  "owned physical footprint (neural)", and proc_pid_rusage as `ri_neural_footprint`. The first time a Mac loads the
-  model, the Neural Engine compiles it (about 8 s), and Core ML keeps that in `~/Library/Caches/sift-it-transcribe`.
+- **Memory:** 100 to 120 MB of its own on long recordings, plus the Neural Engine's copy of the model, 607 MB, and the
+  32 MB it maps of what Core ML compiled for the Neural Engine. That copy doesn't show in its footprint: `footprint`
+  lists it apart, as "owned physical footprint (neural)", and proc_pid_rusage as `ri_neural_footprint`. The first time
+  a Mac loads the model, the Neural Engine compiles it (about 8 s), and Core ML keeps that in
+  `~/Library/Caches/sift-it-transcribe`. A run of short recordings, each a chunk of a length of its own, takes more:
+  FluidAudio keeps a buffer of each for a while (`footprint`: large allocations of a chunk's size), and the demo's
+  videos, cheapest first, took the helper to 245 to 336 MB before it let them go.
 - **Accuracy:** on FLEURS Dutch (read sentences, with human transcripts) 5.65 to 5.67% WER, against 5.49% (5.46%
   published). On Dutch conversation (two NOS "De Dag" episodes), about 0.2 points of WER behind: 12 clear errors in 60
   judged spans, against 10, and 19 without the mel prefix. On the demo's English podcasts and videos, the two differ
@@ -299,9 +435,9 @@ be `words`, a folder of music `meaning`.
 There are no size or length limits. A four-hour podcast has to be found as well as a short memo, so every file is
 read in full at its depth. What a limit would guard is handled where it arises:
 
-- **Waiting.** The queue goes from the cheapest file to the dearest, by an estimate of each file's work made when it's
-  queued. Most files are searchable soonest, and the podcast comes last, but whole. A file that just changed goes
-  first.
+- **Waiting.** Each round goes from the cheapest file to the dearest, and words come first for every file
+  ([Rounds](#rounds)). Most files are searchable soonest, and the podcast comes last, but whole. A file that just
+  changed goes first.
 - **Memory.** Readers stream: text in pieces, PDFs by page, sound and video by window. A big file's segments are
   written in batches as they come, like transcripts, so memory doesn't grow with the file. A search can meanwhile find
   the part that's in.
@@ -366,7 +502,7 @@ asked for by meaning comes first this way, and second in passages of 600. Lock f
     "rules": [{"path": "~/Movies/Lectures/**", "keep_every_s": 10}, {"path": "~/Movies/Raw/**", "depth": "words"}]
   },
   "ranking": {"shown_lift": 0.09, "strong_lift": 0.13},
-  "indexing": {"memory_mb": "auto", "on_battery": true, "quiet_ms": 1500, "full_sync_min": 30, "release_model_s": 60},
+  "indexing": {"memory_mb": "auto", "on_battery": "words", "quiet_ms": 1500, "full_sync_min": 30, "release_model_s": 60},
   "search": {"mode": "meaning", "vectors": "auto", "memory_mb": "auto"},
   "log": {"max_mb": 4}
 }

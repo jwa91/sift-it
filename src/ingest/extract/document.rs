@@ -2,12 +2,12 @@
 //! text.
 
 use super::text::{Lines, feed};
-use crate::ingest::Content;
+use crate::ingest::read::{Content, Ended};
 use anyhow::{Context, Result, bail};
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-pub fn read(path: &Path, content: &mut Content) -> Result<serde_json::Value> {
+pub fn read(path: &Path, content: &mut Content) -> Result<Ended> {
     let mut child = Command::new("/usr/bin/textutil")
         .args(["-convert", "txt", "-stdout", "-encoding", "UTF-8"])
         .arg(path)

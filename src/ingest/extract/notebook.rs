@@ -1,7 +1,7 @@
 //! Jupyter notebooks: their cells' source, each at its cell number (from 1), code cut as code and Markdown as Markdown.
 //! Their outputs (pictures, tables) are passed over as they stream by.
 
-use crate::ingest::Content;
+use crate::ingest::read::{Content, Ended};
 use crate::ingest::segment::passages::Form;
 use anyhow::{Context, Result};
 use protocol::Segment;
@@ -31,7 +31,7 @@ enum Source {
     None,
 }
 
-pub fn read(path: &Path, content: &mut Content) -> Result<serde_json::Value> {
+pub fn read(path: &Path, content: &mut Content) -> Result<Ended> {
     let file = std::io::BufReader::new(std::fs::File::open(path)?);
     let notebook: Notebook = serde_json::from_reader(file).context("not a notebook")?;
     for (index, cell) in notebook.cells.iter().enumerate() {
@@ -50,5 +50,5 @@ pub fn read(path: &Path, content: &mut Content) -> Result<serde_json::Value> {
         };
         content.text(Segment::Passage, Some((index + 1) as f64), &source, form)?;
     }
-    Ok(serde_json::json!({ "cells": notebook.cells.len(), "passages": content.passages }))
+    Ok(Ended::whole(serde_json::json!({ "cells": notebook.cells.len(), "passages": content.passages }), 1.0))
 }

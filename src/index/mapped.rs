@@ -8,6 +8,7 @@ use super::vectors::{self, Form, Map, SketchQuery};
 use anyhow::Result;
 use embedder::DIM;
 use protocol::Kind;
+use rusqlite::params;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -15,7 +16,9 @@ use std::path::PathBuf;
 const SAMPLE: usize = 8192;
 
 /// The index's vectors, for searches by meaning: each partition's rows in every form, mapped, which segment each live
-/// row is, in the order the segments were made, and the sample a query's median comes from.
+/// row is, in the order the rows were written, and the sample a query's median comes from. A segment can get its
+/// vector long after it was written (a passage, in the text round), so what's new is what's past the rows mapped
+/// before, not what's past the segments seen.
 #[derive(Default)]
 pub struct Vectors {
     folder: PathBuf,
@@ -27,7 +30,6 @@ pub struct Vectors {
     places: Vec<(usize, usize)>,
     /// Each segment's place in `ids`, `files`, `kinds` and `places`.
     index: HashMap<i64, usize>,
-    max_id: i64,
     sample: Sample,
 }
 
@@ -110,9 +112,20 @@ impl Vectors {
         loop {
             match self.try_catch_up(reader) {
                 Err(error) if tries < 3 && is_gone(&error) => tries += 1,
+                Err(error) => {
+                    // What's mapped may be caught up halfway: all of it is read again next time.
+                    self.reset();
+                    return Err(error);
+                }
                 outcome => return outcome,
             }
         }
+    }
+
+    /// Lets go of what's mapped, to read it all again (but for the sample: a vector doesn't change).
+    fn reset(&mut self) {
+        let (folder, sample) = (std::mem::take(&mut self.folder), std::mem::take(&mut self.sample));
+        *self = Self { folder, sample, ..Default::default() };
     }
 
     fn try_catch_up(&mut self, reader: &Reader) -> Result<()> {
@@ -124,10 +137,11 @@ impl Vectors {
             partitions.iter().any(|partition| partition.id == mapped.id && partition.generation != mapped.generation)
         });
         if moved {
-            let (folder, sample) = (std::mem::take(&mut self.folder), std::mem::take(&mut self.sample));
-            *self = Self { folder, sample, ..Default::default() };
+            self.reset();
         }
-        let before = (self.ids.len(), self.max_id);
+        let before = self.ids.len();
+        // How far each partition was mapped: its rows past that are new.
+        let mapped_rows: HashMap<i64, usize> = self.partitions.iter().map(|mapped| (mapped.id, mapped.rows)).collect();
         // The partitions with new rows are mapped again, as far as their rows go now: all or none.
         let mut maps = Vec::new();
         for partition in &partitions {
@@ -156,42 +170,53 @@ impl Vectors {
                 None => self.partitions.push(mapped),
             }
         }
-        // Segment ids are never reused, so what's here is still right unless some of it was deleted.
-        let kept: i64 = snapshot.query_row(
-            "SELECT COUNT(*) FROM segments WHERE row IS NOT NULL AND id <= ?1",
-            [self.max_id],
-            |row| row.get(0),
-        )?;
-        if kept as usize != self.ids.len() {
-            self.drop_deleted(&snapshot)?;
+        // Rows are only appended, so what's here is still right unless some of it was deleted.
+        let mut kept = 0;
+        let mut counting =
+            snapshot.prepare("SELECT COUNT(*) FROM segments WHERE partition = ?1 AND row IS NOT NULL AND row < ?2")?;
+        for (&partition, &rows) in &mapped_rows {
+            kept += counting.query_row(params![partition, rows as i64], |row| row.get::<_, i64>(0))? as usize;
+        }
+        if kept != self.ids.len() {
+            self.drop_deleted(&snapshot, &mapped_rows)?;
         }
         let mut statement = snapshot.prepare(
-            "SELECT s.id, s.file_id, f.kind, s.partition, s.row FROM segments s JOIN files f ON f.id = s.file_id
-             WHERE s.row IS NOT NULL AND s.id > ?1 ORDER BY s.id",
+            "SELECT s.id, s.file_id, f.kind, s.row FROM segments s JOIN files f ON f.id = s.file_id
+             WHERE s.partition = ?1 AND s.row IS NOT NULL AND s.row >= ?2 ORDER BY s.row",
         )?;
-        let mut rows = statement.query([self.max_id])?;
-        while let Some(row) = rows.next()? {
-            let (id, file, kind, partition, place): (i64, i64, String, i64, i64) =
-                (row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?);
-            let Some(partition) = self.partitions.iter().position(|mapped| mapped.id == partition) else { continue };
-            self.index.insert(id, self.ids.len());
-            self.ids.push(id);
-            self.files.push(file);
-            self.kinds.push(Kind::parse(&kind).unwrap_or(Kind::Plaintext));
-            self.places.push((partition, place as usize));
-            self.max_id = self.max_id.max(id);
+        for (at, mapped) in self.partitions.iter().enumerate() {
+            let from = mapped_rows.get(&mapped.id).copied().unwrap_or(0);
+            if from == mapped.rows {
+                continue;
+            }
+            let mut rows = statement.query(params![mapped.id, from as i64])?;
+            while let Some(row) = rows.next()? {
+                let (id, file, kind, place): (i64, i64, String, i64) =
+                    (row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?);
+                self.index.insert(id, self.ids.len());
+                self.ids.push(id);
+                self.files.push(file);
+                self.kinds.push(Kind::parse(&kind).unwrap_or(Kind::Plaintext));
+                self.places.push((at, place as usize));
+            }
         }
-        if (self.ids.len(), self.max_id) != before {
+        if self.ids.len() != before || kept != before {
             self.resample();
         }
         Ok(())
     }
 
-    /// Drops the vectors whose segments are gone (a file changed or left), keeping the rest in place.
-    fn drop_deleted(&mut self, conn: &rusqlite::Connection) -> Result<()> {
-        let mut statement = conn.prepare("SELECT id FROM segments WHERE row IS NOT NULL AND id <= ?1")?;
-        let present: std::collections::HashSet<i64> =
-            statement.query_map([self.max_id], |row| row.get(0))?.collect::<std::result::Result<_, _>>()?;
+    /// Drops the vectors whose segments are gone (a file changed or left), keeping the rest in place: of the rows
+    /// mapped before (`mapped_rows`), those that still have a segment.
+    fn drop_deleted(&mut self, conn: &rusqlite::Connection, mapped_rows: &HashMap<i64, usize>) -> Result<()> {
+        let mut present = std::collections::HashSet::new();
+        let mut statement =
+            conn.prepare("SELECT id FROM segments WHERE partition = ?1 AND row IS NOT NULL AND row < ?2")?;
+        for (&partition, &rows) in mapped_rows {
+            for id in statement.query_map(params![partition, rows as i64], |row| row.get::<_, i64>(0))? {
+                present.insert(id?);
+            }
+        }
         let mut kept = 0;
         for at in 0..self.ids.len() {
             if present.contains(&self.ids[at]) {
