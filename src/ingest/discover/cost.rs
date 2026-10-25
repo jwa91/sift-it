@@ -7,6 +7,7 @@ use super::crawl::Found;
 use crate::adapters::macos::{self, av};
 use crate::config::{Settings, is_pdf};
 use crate::ingest::rounds;
+use crate::ingest::segment::sound::SPOKEN_EVERY;
 use protocol::{Kind, Round};
 
 /// The words round: text cut into passages.
@@ -48,9 +49,14 @@ const SAMPLED_PAGES: usize = 4;
 const PICTURE: f64 = 0.15;
 const FRAMES_PER_SECOND: f64 = 0.039;
 
-/// The sound round: a 30 s window every 20 s, at 0.23 s each, decoding included: the demo folder's 30.6 hours of sound
-/// in 1,277 s (0.2 s each for the three podcasts, 197 ms of it embedding).
-const SOUND_PER_SECOND: f64 = 0.23 / 20.0;
+/// The sound round: all of the sound decoded, about 600 times as fast as it plays, and a window embedded every 20 s
+/// in 0.2 s (`sift-it bench-embed`: 197 ms), or where speech was heard every 120 s (segment/sound.rs). Before it's
+/// read, a recording whose speech is written down is taken for talk when it's 10 minutes long or more: on the demo
+/// folder, all 34 such recordings were, and 33 of the 37 shorter ones were music or other sound. The full grid comes
+/// to the demo folder's 30.6 hours of sound in 1,286 s (it took 1,277).
+const SOUND_DECODE: f64 = 1.0 / 600.0;
+const SOUND_WINDOW: f64 = 0.2;
+const TALK_LONGER: f64 = 600.0;
 
 /// The speech round: the demo's three podcasts (1.8 hours) written down in 24.2 s, 270 times as fast as they play.
 /// Beside the GPU's rounds it went 140 to 160 times as fast on the demo folder, which the GPU's rounds outlast.
@@ -115,7 +121,13 @@ pub fn shares(file: &Found) -> Vec<Share> {
             Round::Ocr => total * OCR,
             Round::Pictures if file.kind == Kind::Video => found.duration * FRAMES_PER_SECOND,
             Round::Pictures => total * PICTURE,
-            Round::Sound => total * SOUND_PER_SECOND,
+            Round::Sound => {
+                let talk = file.kind == Kind::Audio
+                    && found.duration >= TALK_LONGER
+                    && rounds::transcribes(file.kind, settings);
+                let hop = if talk { SPOKEN_EVERY } else { 20.0 };
+                total * (SOUND_DECODE + SOUND_WINDOW / hop)
+            }
             Round::Speech => total * SPEECH_PER_SECOND,
             Round::Words | Round::Text => 0.0,
         };

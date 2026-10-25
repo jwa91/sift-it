@@ -29,9 +29,9 @@ impl std::fmt::Display for Stopped {
 impl std::error::Error for Stopped {}
 
 /// The sound round: the windows that start from where it got to (`from.done` seconds) on, with a checkpoint every
-/// SLICE seconds of them.
+/// SLICE seconds of them. Where speech was heard (`from.spoken`), fewer of them.
 pub fn sound(path: &Path, from: &From, content: &mut Content) -> Result<Ended> {
-    content.sound = crate::ingest::segment::sound::Windows::from(from.done);
+    content.sound = crate::ingest::segment::sound::Windows::from(from.done, from.spoken.clone());
     let mut until = from.done + SLICE;
     let read = av::read_samples(path, from.done, &mut |samples| {
         content.sound(samples)?;

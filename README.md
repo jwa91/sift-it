@@ -175,7 +175,7 @@ sift-it reads only the folders you select. It does not change, move, or upload y
 | PDFs | Individual pages, including text recognition for scanned pages |
 | Pictures | Image content in formats macOS can read, including HEIC and RAW |
 | Screenshots | Image content and recognized text |
-| Recordings | Overlapping 30-second windows, and what's said in them, with results at the matching time |
+| Recordings | Overlapping 30-second windows (fewer where speech is heard), and what's said in them, with results at the matching time |
 | Videos | Frames from individual shots and long shots, plus audio windows and what's said |
 | Tags | The title, artist and album of recordings and videos, found by their words |
 | Records | Rows of csv and tsv files, records of json and jsonl files, keys of yaml and toml files |

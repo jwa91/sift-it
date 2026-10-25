@@ -19,6 +19,11 @@ const SCHEMA_VERSION: i64 = 7;
 const TEXT_SEGMENTS: &str = "('passage', 'page', 'ocr', 'speech')";
 
 /// The columns a FileRow is made of (file_row), of `files f`.
+/// A file's sound round waits while its speech round has work: the sound round listens closely only where little is
+/// said (segment/sound.rs), so it needs to know where speech is.
+const SOUND_WAITS: &str = "(w.round <> 'sound' OR NOT EXISTS (SELECT 1 FROM work s
+    WHERE s.file_id = w.file_id AND s.round = 'speech' AND s.state = 'pending'))";
+
 const FILE_COLUMNS: &str = "f.id, f.path, f.kind, f.size, f.modified, f.reading, f.speech";
 
 fn file_row(row: &Row) -> rusqlite::Result<FileRow> {
@@ -120,11 +125,11 @@ impl Reader {
     }
 
     /// The next of a round's work, at most `limit`: new files' first, then the cheapest, then the newest. With
-    /// `new_only`, new files' alone.
+    /// `new_only`, new files' alone. A file's sound waits for its speech (SOUND_WAITS).
     pub fn next(&self, round: Round, new_only: bool, limit: usize) -> Result<Vec<Work>> {
         let mut statement = self.conn.prepare_cached(&format!(
             "SELECT {FILE_COLUMNS}, w.amount, w.done, w.resume, w.fast FROM work w JOIN files f ON f.id = w.file_id
-             WHERE w.round = ?1 AND w.state = 'pending' AND (?2 = 0 OR w.fast)
+             WHERE w.round = ?1 AND w.state = 'pending' AND (?2 = 0 OR w.fast) AND {SOUND_WAITS}
              ORDER BY w.fast DESC, w.cost, f.modified DESC LIMIT ?3"
         ))?;
         let rows = statement.query_map(params![round.as_str(), new_only, limit as i64], |row| {
@@ -140,11 +145,12 @@ impl Reader {
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 
-    /// Which rounds have work waiting, and whether some of it is new files' and some isn't: (round, new, old).
+    /// Which rounds have work that can go on, and whether some of it is new files' and some isn't: (round, new, old).
     pub fn queues(&self) -> Result<Vec<(Round, bool, bool)>> {
-        let mut statement = self.conn.prepare_cached(
-            "SELECT EXISTS (SELECT 1 FROM work WHERE round = ?1 AND state = 'pending' AND fast = ?2)",
-        )?;
+        let mut statement = self.conn.prepare_cached(&format!(
+            "SELECT EXISTS (SELECT 1 FROM work w WHERE w.round = ?1 AND w.state = 'pending' AND w.fast = ?2
+             AND {SOUND_WAITS})"
+        ))?;
         let mut queues = Vec::new();
         for round in Round::ALL {
             let mut any = |fast: bool| statement.query_row(params![round.as_str(), fast], |row| row.get::<_, bool>(0));
@@ -202,6 +208,19 @@ impl Reader {
     }
 
     /// The pages of a document whose pictures wait for the pictures round: scanned pages with little text on them.
+    /// What was written down of what's said in a file: each passage's stretch, (start, end) in seconds, and its
+    /// words, in order.
+    pub fn spoken(&self, file_id: i64) -> Result<Vec<(f64, f64, usize)>> {
+        let mut statement = self.conn.prepare_cached(
+            "SELECT loc, loc_end, text FROM segments WHERE file_id = ?1 AND segment = 'speech' AND loc_end IS NOT NULL
+             ORDER BY loc",
+        )?;
+        let passages = statement.query_map([file_id], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get::<_, String>(2)?.split_whitespace().count()))
+        })?;
+        Ok(passages.collect::<std::result::Result<_, _>>()?)
+    }
+
     pub fn due_pictures(&self, file_id: i64) -> Result<Vec<usize>> {
         let mut statement = self.conn.prepare_cached(
             "SELECT loc FROM segments WHERE file_id = ?1 AND segment = 'picture' AND due = 'pictures' ORDER BY loc",
@@ -1227,6 +1246,43 @@ mod tests {
     }
 
     #[test]
+    fn a_files_sound_waits_for_its_speech() {
+        let index = TempIndex::new("sound-after-speech");
+        let mut store = Writer::open(&index.path).unwrap();
+        store.queue(&NewFile { speech: true, ..file("/a/talk.mp3", Kind::Audio) }, None, 1.0).unwrap();
+        store.queue(&file("/a/song.mp3", Kind::Audio), None, 1.0).unwrap();
+        for path in ["/a/talk.mp3", "/a/song.mp3"] {
+            let words = next(&store, Round::Words, path);
+            let rounds: &[(Round, f64)] = if path.contains("talk") {
+                &[(Round::Sound, 60.0), (Round::Speech, 60.0)]
+            } else {
+                &[(Round::Sound, 60.0)]
+            };
+            assert!(store.write_words(&words, &[], &serde_json::json!({}), rounds, false).unwrap());
+        }
+        let sound = |store: &Writer| -> Vec<String> {
+            let work = store.next(Round::Sound, false, 10).unwrap();
+            work.iter().map(|work| work.file.path.display().to_string()).collect()
+        };
+        assert_eq!(sound(&store), ["/a/song.mp3"]);
+        // Its speech written down, the sound round takes it, with where speech was heard.
+        let speech = next(&store, Round::Speech, "/a/talk.mp3");
+        let said = NewSegment {
+            segment: Segment::Speech,
+            loc: Some(2.0),
+            loc_end: Some(30.0),
+            text: Some("hello".into()),
+            ..Default::default()
+        };
+        assert!(
+            store.write_item(&speech, &[said], &Done { done: 60.0, finished: true, ..Default::default() }).unwrap()
+        );
+        assert_eq!(sound(&store).len(), 2);
+        assert_eq!(store.spoken(speech.file.id).unwrap(), [(2.0, 30.0, 1)]);
+        assert!(store.queues().unwrap().iter().any(|(round, ..)| *round == Round::Sound));
+    }
+
+    #[test]
     fn a_long_files_round_goes_on_from_the_item_it_was_on() {
         let index = TempIndex::new("items");
         let mut store = Writer::open(&index.path).unwrap();
@@ -1282,9 +1338,7 @@ mod tests {
         let words = next(&store, Round::Words, "/a/memo.m4a");
         let rounds = [(Round::Sound, 4.0), (Round::Speech, 4.0)];
         assert!(store.write_words(&words, &[], &serde_json::json!({"duration": 4.0}), &rounds, false).unwrap());
-        let sound = NewSegment { segment: Segment::Sound, loc: Some(0.0), vector: Some(unit(1)), ..Default::default() };
         let end = Done { done: 4.0, finished: true, ..Default::default() };
-        assert!(store.write_item(&next(&store, Round::Sound, "/a/memo.m4a"), &[sound], &end).unwrap());
         let said = NewSegment {
             segment: Segment::Speech,
             loc: Some(1.0),
@@ -1293,10 +1347,13 @@ mod tests {
             due: Some(Round::Text),
             ..Default::default()
         };
+        // What's said first: the sound round waits for it.
         assert!(store.write_item(&next(&store, Round::Speech, "/a/memo.m4a"), &[said], &end).unwrap());
+        let sound = NewSegment { segment: Segment::Sound, loc: Some(0.0), vector: Some(unit(1)), ..Default::default() };
+        assert!(store.write_item(&next(&store, Round::Sound, "/a/memo.m4a"), &[sound], &end).unwrap());
         let waiting = store.due_text(false, 10).unwrap();
         store.write_text(&[(&waiting[0], unit(2))]).unwrap();
-        assert_eq!(stored(&store, id), [unit(1), unit(2)]);
+        assert_eq!(stored(&store, id), [unit(2), unit(1)]);
 
         // Another model: every file is read again, and what's said keeps its words, waiting for a vector.
         store.requeue_vectors().unwrap();

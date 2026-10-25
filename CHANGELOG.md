@@ -9,6 +9,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com); versions follow
 
 ### Changed
 
+- Where speech is heard in a recording or a video, the sound round embeds a window every two minutes instead of every
+  20 s: what's said is found by its passages. A file's speech comes before its sound for that. Music, nature and the
+  stretches between what's said keep every window, and sung lyrics written down don't count as speech (they have
+  fewer words a second). Three podcasts index in 33 s, with 56 sound windows instead of 327. Recordings and videos
+  are read again once.
 - `sift-it estimate` says what each round will have to do in a folder and about how long, at the depth its files are
   read: `rounds` in its JSON (`round`, `total` in the round's unit, `unit`, `seconds`), in place of `speech_seconds`.
   Its `seconds` is how long all of it takes with the rounds side by side, as the plan at `indexing.memory_mb` has

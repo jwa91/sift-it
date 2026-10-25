@@ -100,6 +100,13 @@ loads once for everything that needs it rather than once per file:
   screenshot through words, OCR, pictures and text, a video through words, pictures, sound, speech and text. Its depth
   leaves out what it doesn't reach: at `words`, a file goes through words and OCR only. What a PDF needs is known once
   its words are read: OCR for its scanned pages, and pictures for the scanned pages with little text.
+- **Speech before sound, for each file.** A file's sound round waits for its speech. Where speech was heard, the sound
+  round embeds a window only every two minutes, since the passages say what's in it, and its sound adds little to
+  them; music, nature and the stretches between what's said keep a window every 20 s. Speech is told from singing by
+  its passages' words a second: half of them at least 1.8, where three podcasts and two narrated videos had 2.25 to
+  3.39, and an aria whose singing was written down as garbled French and Italian 1.29. On three podcasts, 327 windows
+  became 56. On a part of the demo folder (three podcasts, three pieces of music, five videos), indexing took 62 s
+  instead of 113, and each query for the music found what it did before.
 - **Words first, for every file.** They need no model, so an exact search finds everything within minutes of choosing
   the folders, while meaning comes round by round.
 - **What OCR and speech find is words at once.** It goes into the keyword index as soon as it's read, and its passages

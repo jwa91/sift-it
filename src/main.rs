@@ -371,7 +371,7 @@ fn run(cli: Cli) -> Result<()> {
                     if ended.finished {
                         break;
                     }
-                    from = ingest::read::From { done: ended.done, resume: ended.resume, pages: Vec::new() };
+                    from = ingest::read::From { done: ended.done, resume: ended.resume, ..Default::default() };
                 }
             }
             println!(
