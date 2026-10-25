@@ -9,6 +9,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com); versions follow
 
 ### Changed
 
+- `sift-it estimate` says what each round will have to do in a folder and about how long, at the depth its files are
+  read: `rounds` in its JSON (`round`, `total` in the round's unit, `unit`, `seconds`), in place of `speech_seconds`.
+  Its `seconds` is how long all of it takes with the rounds side by side, as the plan at `indexing.memory_mb` has
+  them. On the demo folder it says 2,027 s, and indexing took 2,037 to 2,109 s.
 - Indexing goes in rounds over the whole collection, each with one tool: words first (names, tags, a PDF's text
   layer, documents through textutil: no model), then what text means, the text on screenshots and scans, what
   pictures show, what sound sounds like, and what's said. Every file is found by its exact words within minutes of

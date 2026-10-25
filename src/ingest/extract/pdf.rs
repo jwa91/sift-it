@@ -42,6 +42,21 @@ fn scanned(text: &str) -> bool {
     text.trim().chars().count() < SCANNED_BELOW
 }
 
+/// How many pages a PDF has, and about what share of them are scans, from `sample` pages spread over it: for an
+/// estimate, before its words are read.
+pub fn scans(path: &Path, sample: usize) -> Result<(usize, f64)> {
+    autoreleasepool(|_| {
+        let document = open(path)?;
+        let pages = unsafe { document.pageCount() };
+        let looked = sample.min(pages);
+        if looked == 0 {
+            return Ok((pages, 0.0));
+        }
+        let scans = (0..looked).filter(|n| scanned(&page_text(&document, n * pages / looked))).count();
+        Ok((pages, scans as f64 / looked as f64))
+    })
+}
+
 /// The words round: each page's text layer. The scans are counted, for the OCR round.
 pub fn words(path: &Path, content: &mut Content) -> Result<Ended> {
     let document = open(path)?;

@@ -213,17 +213,19 @@ fn run(cli: Cli) -> Result<()> {
             } else {
                 for e in &estimates {
                     let kinds = e.by_kind.iter().map(|(k, n)| format!("{n} {k}")).collect::<Vec<_>>().join(", ");
-                    let speech = if e.speech_seconds > 0.0 {
-                        format!(", {} of it writing down what's said", tools::estimate::describe(e.speech_seconds))
-                    } else {
-                        String::new()
-                    };
-                    println!(
-                        "{}: {} files ({kinds}), {}{speech}",
-                        e.folder.display(),
-                        e.files,
-                        tools::estimate::describe(e.seconds)
-                    );
+                    let all = tools::estimate::describe(e.seconds as f64);
+                    println!("{}: {} files ({kinds}), {all}", e.folder.display(), e.files);
+                    for round in &e.rounds {
+                        let amount = match round.unit {
+                            "seconds" => format!(
+                                "{} of sound",
+                                tools::estimate::describe(round.total as f64).replacen("about ", "", 1)
+                            ),
+                            unit => format!("{} {unit}", round.total),
+                        };
+                        let time = tools::estimate::describe(round.seconds as f64);
+                        println!("  {:<9} {amount}, {time}", format!("{}:", round.round.as_str()));
+                    }
                 }
             }
             Ok(())

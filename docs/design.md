@@ -196,6 +196,13 @@ it warms, and the rounds measure that as they go. So status can say "words: done
 waiting", and the time left once a round has run a while. A round's total grows while the rounds before it find more:
 the text round's passages, as words, OCR and speech read them.
 
+Before a folder is indexed, `sift-it estimate` says what each round will have to do in it and about how long that
+takes, at the depth each file is read, from rates measured on an M5 (`src/ingest/discover/cost.rs`). It looks into a
+file as little as it can: a recording's or a video's length and whether it has sound, and four of a PDF's pages for
+whether it's scanned. Then it runs the plan at `indexing.memory_mb` over that work, for how long all of it takes with
+the rounds on different chips side by side. On the demo folder it says 2,027 s, and indexing took 2,037 s at 2048 MB
+and 2,109 s at `auto`; for three of its podcasts it says 101 s, which took 94.
+
 Measured on an M5 with 24 GB:
 
 - **The demo folder:** 628 files (428 photos, 91 videos, 71 recordings, 38 documents and texts, 28 hours of sound),
