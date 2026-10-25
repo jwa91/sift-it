@@ -186,14 +186,14 @@ The embedding model can miss or confuse sounds and pictures. See [the documented
 
 ### What's said in recordings
 
-Once everything is indexed, the indexer writes down what's said in recordings and videos with
+The indexer writes down what's said in recordings and videos with
 [Parakeet Ultra](https://huggingface.co/moondream/parakeet-ultra), which understands 25 European languages, Dutch and
 English among them. It runs on the Neural Engine, through [FluidAudio](https://github.com/FluidInference/FluidAudio)
 in a helper process, `sift-it-transcribe`, at a lower priority than everything else, and gives its memory back when
 it's done. It writes a recording down a few minutes at a time: any change in your folders comes first, and it goes on
-where it stopped. On an Apple M5 it writes down a 35-minute podcast in under ten seconds. Beside the reading, which has
-the GPU, it goes on at about three quarters of that speed, and the reading hardly slows: only its passages wait for the
-GPU, to be embedded.
+where it stopped. On an Apple M5 it writes down a 35-minute podcast in under ten seconds. It has the Neural Engine to
+itself, so it goes on beside the rounds that have the GPU when memory allows; what it writes down is found by its
+words at once, and by its meaning once the text round has embedded it.
 
 Each passage is a sentence or a few, with its time: a search for a word said in a podcast opens it at that moment.
 `sift-it status` shows how far it is; `sift-it config reading.depth meaning` turns it off.
@@ -208,15 +208,21 @@ Each passage is a sentence or a few, with its time: a search for a word said in 
 | `meaning` | also what it means: passages, pictures, video frames and sound |
 | `speech` | also what's said in it, written down (the default) |
 
-There are no size or length limits: a four-hour podcast is read as fully as a short memo. The indexer reads the
-cheapest files first, so most of a folder is searchable soon, and writes a big file in parts as it reads it.
-`sift-it status` shows what's still waiting and the files that take longest. Leave those out with `sources.ignore`,
-give them a lower depth, or let them run.
+The indexer goes over your folders in rounds, each with one tool: first the words of every file (no model), so an
+exact search finds everything within minutes; then what text means, the text on screenshots and scans, what pictures
+show and sound sounds like, and what's said. A file goes through the rounds its kind needs, cheapest first, and a
+file you just saved goes first in every round, so it's searchable in seconds. `sift-it status` shows how far each
+round is.
+
+There are no size or length limits: a four-hour podcast is read as fully as a short memo, a few minutes at a time.
+`sift-it status` shows the recordings that take longest. Leave those out with `sources.ignore`, give them a lower
+depth, or let them run.
 
 sift-it skips hidden folders, nested `~/Library` folders, app bundles, packages, dependency folders, and build folders.
 It also skips recognized secret files and iCloud files that exist only in the cloud.
 Inside code projects, it reads pictures, PDFs, and recordings unless you enable code indexing.
-The indexer pauses in Low Power Mode. You can configure it to wait for a charger.
+On battery, the words of new and changed files go on, and the rounds that need a model wait for a charger
+(`indexing.on_battery`: `words`, `all` or `none`). In Low Power Mode it's `words` at most.
 
 ## Manage the index
 
@@ -252,7 +258,7 @@ other apps may use.
 sift-it config sources.ignore '["*.psd", "~/Documents/Old"]'
 sift-it config reading.video.keep_every_s 10
 sift-it config reading.rules '[{"path": "~/Movies/Footage/**", "depth": "words"}]'
-sift-it config indexing.on_battery false
+sift-it config indexing.on_battery none
 sift-it config indexing.memory_mb 4096
 ```
 
@@ -265,12 +271,14 @@ sift-it config indexing.memory_mb 4096
 | `indexing` | the memory, battery and timing of the background indexer | at once |
 | `log` | the size of the indexer's log | at once |
 
-`indexing.memory_mb` decides only how fast indexing goes, never what it writes. At `auto` it's a quarter of the
-Mac's memory. With room for the embedding model and the speech model together (about 1.2 and 0.75 GB, the text model's
-mapped file and the Neural Engine's copy of the speech model included, plus 256 MB for two readers), what's said in
-recordings is written down beside the reading; with
-less, the models take turns: the vision and audio encoders go before the speech model starts. Reading takes up to a
-third of the cores, two to four files at once, and a small budget makes that fewer. `sift-it status` shows the plan.
+`indexing.memory_mb` is a ceiling on what indexing holds, and decides only how fast it goes, never what it writes. At
+`auto` it's a quarter of the Mac's memory. Each round's tool says what it holds: the text model about 630 MB (its mapped
+file included), with 290 MB more for the vision encoder or 320 MB for the audio encoder, Vision's text recognition about
+430 MB (171 MB of it on the Neural Engine), and the speech model about 980 MB (the Neural Engine's copy of it included).
+The rounds that fit run side by side, one per chip (the GPU, the Neural Engine), and on a small budget one at a time.
+Reading takes up to a third of the cores, two to four files at once, and what's left of the budget can make that fewer.
+When macOS says memory is short, indexing shrinks to one tool, or stops and lets everything go until it isn't.
+`sift-it status` shows the plan.
 
 A reading value resolves in four steps, and the last one that sets it wins: the top of `reading`, the kind
 (`reading.video`), the file type (`reading.types.mov`), then each rule in `reading.rules` whose path matches.

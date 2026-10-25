@@ -43,6 +43,17 @@ waiting or polling would hide the fault, not fix it.
   samples), says end of stream, and drains the converter; then it reads the reader to its end, so the reader can say
   whether it completed.
 
+- **From partway, as from the start.** The sound round reads a long recording five minutes at a time, and speech goes
+  on from where it stopped. A read that starts partway starts decoding up to three seconds earlier, at a whole second
+  (a whole number of samples at every rate, so the converter's output falls on the same instants), and drops what
+  comes before where it starts: the decoder and the converter warm up on it. Without that, the first second after
+  the start came out differently, and a sound window there lost up to 1.2% of its cosine with the one read from the
+  start (0.988); with it, the samples are the same to the bit.
+- **But not every seek is exact.** In a VBR MP3 (one of the demo's music tracks, 44.1 kHz stereo), AVFoundation's seek
+  lands a fraction of a second off: read in five-minute items that each started partway, its windows after the first
+  seek were shifted by about 0.2 s (cosine 0.977). So the sound round reads a recording in one go, saying how far it
+  got every five minutes, and reads from partway only to go on after it was stopped.
+
 Memory stays bounded: two buffers of 8192 frames and the reader's current buffer. A file AVFoundation gives up on
 partway is still read on a second past where it stopped, with that second as silence.
 
@@ -54,7 +65,8 @@ samples differ a little from any of the old ones, so recordings and videos have 
 
 `adapters::macos::av::tests` decodes two small files in `tests/audio` 20 times each, alternately consuming the samples
 at once and with a delay, and compares every sample's bits, the lengths, a read resumed at one second, and that an error
-from the consumer stops decoding. No model runs.
+from the consumer stops decoding; and that reads resumed partway give the same bits as a read from the start. No model
+runs.
 
 Before it was merged: the same PCM hash on 200 runs of a Swift prototype and 30 of `sift-it read` per recording; one
 length per format, on every run, for WAV (8 kHz, and 44.1 kHz stereo), AIFF (48 kHz, 24-bit), ALAC, FLAC, ADTS AAC, VBR

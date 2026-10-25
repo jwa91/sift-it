@@ -14,6 +14,17 @@ impl Shots {
         Self { shot_change, keep_every, last: None }
     }
 
+    /// Goes on after the frame kept last (its time and thumbnail): where an earlier stretch of the video stopped.
+    pub fn after(mut self, last: Option<(f64, Vec<u8>)>) -> Self {
+        self.last = last;
+        self
+    }
+
+    /// The frame kept last: its time and thumbnail.
+    pub fn last(&self) -> Option<&(f64, Vec<u8>)> {
+        self.last.as_ref()
+    }
+
     /// Whether the frame at `at` seconds, with this thumbnail, is kept.
     pub fn keep(&mut self, at: f64, thumbnail: &[u8]) -> bool {
         let keep = match &self.last {

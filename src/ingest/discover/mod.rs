@@ -1,6 +1,7 @@
 //! Discovering: which files are new or changed, or are to be read another way (their fingerprint, ingest::fingerprint),
-//! each queued with an estimate of what reading it costs (cost.rs); files that are gone leave the index. `sync`
-//! crawls the chosen folders; `sync_paths` looks at just the paths a file-system event named.
+//! each queued for its words with an estimate of what reading them costs (cost.rs); files that are gone leave the
+//! index. `sync` crawls the chosen folders; `sync_paths` looks at just the paths a file-system event named, and what it
+//! queues is new: it goes first in every round it needs.
 
 mod cost;
 pub mod crawl;
@@ -9,7 +10,7 @@ pub use cost::{cost, speech};
 
 use super::Event;
 use crate::config::Config;
-use crate::index::{FileRow, Writer};
+use crate::index::{FileRow, NewFile, Writer};
 use anyhow::Result;
 use crawl::{Found, Rescan};
 use std::collections::{HashMap, HashSet};
@@ -23,7 +24,7 @@ pub fn sync(index: &Writer, config: &Config) -> Result<Event> {
     let (added, changed, removed) = index.batch(|| {
         // What's in a folder that can't be read now stays.
         let unavailable = |path: &Path| crawl.unavailable.iter().any(|root| path.starts_with(root));
-        let (added, changed, removed) = reconcile(index, &crawl.found, index.files()?, unavailable)?;
+        let (added, changed, removed) = reconcile(index, &crawl.found, index.files()?, unavailable, false)?;
         // Files where some piece couldn't be embedded, or reading got stuck: once in a while, try them again.
         Ok((added, changed + index.requeue_passing(6.0)?, removed))
     })?;
@@ -33,7 +34,6 @@ pub fn sync(index: &Writer, config: &Config) -> Result<Event> {
         changed,
         removed,
         unavailable: crawl.unavailable.iter().map(|p| p.display().to_string()).collect(),
-        pending: index.pending_count()?,
         ms: started.elapsed().as_millis() as u64,
     })
 }
@@ -49,7 +49,7 @@ pub fn sync_paths(index: &Writer, config: &Config, paths: &[PathBuf]) -> Result<
                 Rescan::Skipped => Vec::new(),
                 Rescan::Found(found) => found,
             };
-            let (a, c, r) = reconcile(index, &found, index.files_under(path)?, |_| false)?;
+            let (a, c, r) = reconcile(index, &found, index.files_under(path)?, |_| false, true)?;
             files += found.len();
             added += a;
             changed += c;
@@ -63,29 +63,30 @@ pub fn sync_paths(index: &Writer, config: &Config, paths: &[PathBuf]) -> Result<
         changed,
         removed,
         unavailable: Vec::new(),
-        pending: index.pending_count()?,
         ms: started.elapsed().as_millis() as u64,
     })
 }
 
-/// Brings the index in step with what was `found` where `existing` was: new and changed files are queued, and those not
-/// found leave, unless `kept`. Returns how many were added, changed and removed.
+/// Brings the index in step with what was `found` where `existing` was: new and changed files are queued (as `new`
+/// files, first in every round, when FSEvents said they changed), and those not found leave, unless `kept`. Returns
+/// how many were added, changed and removed.
 fn reconcile(
     index: &Writer,
     found: &[Found],
     existing: Vec<FileRow>,
     kept: impl Fn(&Path) -> bool,
+    new: bool,
 ) -> Result<(usize, usize, usize)> {
     let existing: HashMap<PathBuf, FileRow> = existing.into_iter().map(|row| (row.path.clone(), row)).collect();
     let (mut added, mut changed, mut removed) = (0, 0, 0);
     for file in found {
         match existing.get(&file.path) {
             None => {
-                index.queue(&file.new_file(), None, cost(file))?;
+                index.queue(&NewFile { new, ..file.new_file() }, None, cost(file))?;
                 added += 1;
             }
             Some(row) if is_changed(row, file) => {
-                index.queue(&file.new_file(), Some(row.id), cost(file))?;
+                index.queue(&NewFile { new, ..file.new_file() }, Some(row.id), cost(file))?;
                 changed += 1;
             }
             Some(row) if row.speech != file.speech() => index.set_speech(row.id, file.speech())?,

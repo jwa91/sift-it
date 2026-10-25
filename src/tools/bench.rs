@@ -118,12 +118,12 @@ pub fn search(count: usize) -> Result<()> {
                 .map(|n| index::NewSegment {
                     segment: protocol::Segment::Passage,
                     loc: Some(n as f64),
-                    loc_end: None,
                     text: Some(format!("passage {n} of file {file} about topic{}", file % 97)),
                     vector: Some(near(&topics[(file * per_file + n) % TOPICS])),
+                    ..Default::default()
                 })
                 .collect();
-            let row = index::FileRow {
+            let file = index::FileRow {
                 id,
                 path: found.path.clone(),
                 kind: Kind::Plaintext,
@@ -132,7 +132,9 @@ pub fn search(count: usize) -> Result<()> {
                 reading: found.reading(),
                 speech: false,
             };
-            index.finish_file(&row, &segments, &serde_json::json!({}), false)?;
+            let words =
+                index::Work { file, round: protocol::Round::Words, amount: 1.0, done: 0.0, resume: None, new: false };
+            index.write_words(&words, &segments, &serde_json::json!({}), &[], false)?;
         }
     }
     println!("built an index of {count} vectors around {TOPICS} topics in {:.1} s", started.elapsed().as_secs_f64());

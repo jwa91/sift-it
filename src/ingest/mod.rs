@@ -1,16 +1,18 @@
-//! The ingest path: keeping the index in step with the chosen folders. Its stages, each owning what it works on:
+//! The ingest path: keeping the index in step with the chosen folders, in rounds over the whole collection, each
+//! with one tool (rounds.rs; docs/design.md, "Rounds"). Its stages, each owning what it works on:
 //!
-//! - discover (discover/): which files are new or changed, queued with what reading each costs, and which are gone.
-//! - read (read.rs): a file extracted (extract/), cut into segments (segment/) and prepared for the model (prepare.rs),
-//!   as a stream of pieces.
-//! - embed (embed.rs): the model's only owner. It batches texts and hands back vectors.
-//! - write (write.rs): files put together from their segments and written, whole or in parts. The index's writer
-//!   (index::Writer) is the Indexer's, and only it writes.
-//! - schedule (schedule.rs): what's read first, how many files at once (resources::IngestPlan), and the run that joins
-//!   the stages.
-//! - listen (listen.rs): what's said in recordings and videos, written down on a lane of its own, beside the reading
-//!   when memory allows, else after it. Speech is an extractor too (extract/speech.rs): sound in, words with their
-//!   times out, cut into passages and embedded like any text.
+//! - discover (discover/): which files are new or changed, queued for their words with what reading them costs, and
+//!   which are gone.
+//! - read (read.rs): an item of a round, extracted (extract/), cut into segments (segment/) and prepared for the model
+//!   (prepare.rs), as a stream of pieces.
+//! - embed (embed.rs): the model's only owner. It embeds the text round's batches, and pictures and sound as they come.
+//! - write (write.rs): what an item found, put together and written. The index's writer (index::Writer) is the
+//!   Indexer's, and only it writes.
+//! - schedule (schedule.rs): the run. The plan says which rounds run side by side (resources::Plan); it hands their
+//!   items to the lanes, new files first, and keeps how far each round is (progress.rs).
+//! - listen (listen.rs): the speech lane, which writes down what's said in recordings and videos through the speech
+//!   helper. Speech is an extractor too (extract/speech.rs): sound in, words with their times out, cut into passages
+//!   for the text round like any text.
 //!
 //! The Indexer holds the index's writer and the model, for the daemon and `sift-it index`.
 
@@ -19,19 +21,22 @@ mod embed;
 mod extract;
 mod listen;
 mod prepare;
-mod read;
+pub mod progress;
+pub mod read;
+pub mod rounds;
 mod schedule;
 mod segment;
 mod write;
 
-pub use read::{Content, Payload, Piece, fingerprint, read, transcribes};
-pub use schedule::Stuck;
+pub use read::{Payload, Piece, fingerprint};
+pub use rounds::transcribes;
+pub use schedule::{Facts, Outcome, Stuck};
 
 use crate::config::Config;
 use crate::index::Writer;
 use anyhow::Result;
 use embed::Embed;
-use protocol::Kind;
+use protocol::{Kind, Round, RoundStatus};
 use serde::Serialize;
 use std::path::PathBuf;
 
@@ -45,17 +50,17 @@ pub enum Event {
         changed: usize,
         removed: usize,
         unavailable: Vec<String>,
-        pending: usize,
         ms: u64,
     },
-    Started {
-        pending: usize,
+    /// What runs side by side changed (resources::Plan), and what some of the rest waits for besides its turn.
+    Plan {
+        rounds: Vec<Round>,
+        readers: usize,
+        waiting: Option<crate::resources::Wait>,
     },
-    /// Files that appeared while indexing joined the queue.
-    Queued {
-        count: usize,
-    },
+    /// A round is done with a file: what its last item wrote.
     File {
+        round: Round,
         path: String,
         kind: Kind,
         segments: usize,
@@ -63,14 +68,9 @@ pub enum Event {
         ms: u64,
     },
     Failed {
+        round: Round,
         path: String,
         error: String,
-    },
-    Finished {
-        indexed: usize,
-        failed: usize,
-        seconds: f64,
-        stopped: bool,
     },
     /// A stretch of a recording or video was written down: what's said up to `at` seconds of `duration`.
     Transcribing {
@@ -78,19 +78,17 @@ pub enum Event {
         at: f64,
         duration: f64,
     },
-    /// A recording or video was written down to its end.
-    Transcribed {
-        path: String,
-        passages: usize,
+    /// How far each round is (at most once a second while it runs).
+    Rounds {
+        rounds: Vec<RoundStatus>,
+    },
+    Finished {
+        files: usize,
+        failed: usize,
         seconds: f64,
-        ms: u64,
+        stopped: bool,
     },
-    TranscribeFailed {
-        path: String,
-        error: String,
-    },
-    /// Writing down speech beside the reading stopped: the speech helper couldn't start, or it stopped. It goes on
-    /// once everything is read.
+    /// Writing down speech stopped: the speech helper couldn't start, or it stopped. It's tried again later.
     SpeechStopped {
         error: String,
     },
@@ -130,7 +128,8 @@ impl Indexer {
         discover::sync(&self.index, config)
     }
 
-    /// A sync of just these paths (files, or folders with everything in them).
+    /// A sync of just these paths (files, or folders with everything in them): what FSEvents said changed, so what
+    /// it queues goes first in every round it needs.
     pub fn sync_paths(&mut self, config: &Config, paths: &[PathBuf]) -> Result<Event> {
         discover::sync_paths(&self.index, config, paths)
     }

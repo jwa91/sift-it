@@ -395,7 +395,7 @@ fn reply(reply: impl Serialize) -> Result<Value> {
 }
 
 /// The indexer's progress as it last wrote it, if it ever ran for this data folder.
-fn indexer_status() -> Option<IndexerStatus> {
+pub fn indexer_status() -> Option<IndexerStatus> {
     serde_json::from_slice(&std::fs::read(config::status_path()).ok()?).ok()
 }
 

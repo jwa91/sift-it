@@ -1,122 +1,154 @@
-//! Writing: files put together from their segments as they come, and written to the index. A file is written once all
-//! of it is in, or, for a big one, in parts of PART segments as they come: memory doesn't grow with a file, and a
-//! search finds what's in. A file that changed (or left) while it was read isn't written: it's been queued again.
+//! Writing: what an item of a round found in a file, put together from its pieces as they come, and written to the
+//! index when the item ends: a file's words, or an item of its OCR, pictures or sound. A file's words are written in
+//! parts of PART segments as they come, so memory doesn't grow with a long text, and a search finds what's in. A file
+//! that changed (or left) while it was read isn't written: it's been queued again.
 
 use super::Event;
-use super::embed::Embedded;
-use crate::index::{FileRow, NewSegment, Writer};
+use super::read::Ended;
+use crate::index::{Done, NewSegment, Work, Writer};
 use anyhow::Result;
+use protocol::Round;
 use std::collections::HashMap;
 use std::time::Instant;
 
-/// Segments a file keeps before they're written as a part (Writer::write_part): about 1.2 MB of vectors, in their three forms.
+/// Segments of a file's words kept before they're written as a part (Writer::write_words_part).
 const PART: usize = 256;
 
-/// A file being put together from its segments.
+/// An item: a round's work for a file, and where in it.
+pub type Key = (i64, Round);
+
+/// An item being put together from its pieces.
 struct Assembly {
-    row: FileRow,
+    work: Work,
     started: Instant,
     /// The segments not written yet.
     segments: Vec<NewSegment>,
     /// Segments written as parts, and how many of them have a vector.
     written: usize,
     vectors: usize,
-    /// Pieces whose vector failed: they stay in the keyword index.
+    /// Pieces whose vector couldn't be made.
     failures: usize,
     /// The file changed (or left) while it was read: what's left of it isn't embedded or written.
     stale: bool,
 }
 
-impl Assembly {
-    fn new(row: &FileRow, started: Instant) -> Self {
-        Self { row: row.clone(), started, segments: Vec::new(), written: 0, vectors: 0, failures: 0, stale: false }
-    }
-}
-
-/// The files of a run being put together, and how many were written, failed or ended.
+/// The items of a run being put together, and how many files' rounds were written or failed.
 #[derive(Default)]
-pub struct Files {
-    assemblies: HashMap<i64, Assembly>,
-    pub indexed: usize,
+pub struct Items {
+    assemblies: HashMap<Key, Assembly>,
+    pub files: usize,
     pub failed: usize,
-    pub completed: usize,
 }
 
-impl Files {
-    /// Reading a file started.
-    pub fn start(&mut self, row: &FileRow, started: Instant) {
-        self.assemblies.insert(row.id, Assembly::new(row, started));
+impl Items {
+    /// Reading an item started.
+    pub fn start(&mut self, work: Work, started: Instant) {
+        let key = (work.file.id, work.round);
+        let assembly =
+            Assembly { work, started, segments: Vec::new(), written: 0, vectors: 0, failures: 0, stale: false };
+        self.assemblies.insert(key, assembly);
     }
 
-    /// Whether a file is being put together, and still wanted: not once it changed.
-    pub fn keeps(&self, file: i64) -> bool {
-        self.assemblies.get(&file).is_some_and(|assembly| !assembly.stale)
+    /// Whether an item is being put together, and still wanted: not once its file changed.
+    pub fn keeps(&self, key: Key) -> bool {
+        self.assemblies.get(&key).is_some_and(|assembly| !assembly.stale)
     }
 
-    /// A segment of a file.
-    pub fn add(&mut self, (file, segment, failed): Embedded) {
-        let Some(assembly) = self.assemblies.get_mut(&file) else { return };
+    /// A segment of an item, and whether its vector couldn't be made.
+    pub fn add(&mut self, key: Key, segment: NewSegment, failed: bool) {
+        let Some(assembly) = self.assemblies.get_mut(&key) else { return };
         assembly.failures += failed as usize;
         assembly.segments.push(segment);
     }
 
-    /// Writes the segments of files that have PART of them waiting, as a part.
-    pub fn write_parts(&mut self, index: &mut Writer) -> Result<()> {
-        for assembly in self.assemblies.values_mut().filter(|a| !a.stale && a.segments.len() >= PART) {
-            let first = assembly.written == 0;
-            if index.write_part(&assembly.row, &assembly.segments, first)? {
-                assembly.written += assembly.segments.len();
-                assembly.vectors += assembly.segments.iter().filter(|s| s.vector.is_some()).count();
-            } else {
-                // It changed while it was read: it's queued again, and read again from the start.
-                assembly.stale = true;
-            }
-            assembly.segments.clear();
+    /// A long item's checkpoint (`at`): what it found so far is written, with how far it has got, and it goes on.
+    /// Returns how much more of it is done, in the round's unit, when it was written.
+    pub fn checkpoint(&mut self, key: Key, at: &Ended, index: &mut Writer) -> Result<Option<f64>> {
+        let Some(assembly) = self.assemblies.get_mut(&key).filter(|a| !a.stale) else { return Ok(None) };
+        if assembly.failures > 0 {
+            // What it found so far has a gap: its end says so, and it's read again later.
+            return Ok(None);
         }
+        let before = assembly.work.done;
+        let done = Done { done: at.done, resume: at.resume.clone(), ..Default::default() };
+        let written = index.write_item(&assembly.work, &assembly.segments, &done)?;
+        if written {
+            assembly.written += assembly.segments.len();
+            assembly.vectors += assembly.segments.iter().filter(|s| s.vector.is_some()).count();
+            assembly.work.done = at.done;
+            assembly.work.resume = at.resume.clone();
+        } else {
+            // It changed while it was read: it's queued again.
+            assembly.stale = true;
+        }
+        assembly.segments.clear();
+        Ok(written.then_some(at.done - before))
+    }
+
+    /// Writes a file's words as a part when PART of them are waiting.
+    pub fn write_part(&mut self, key: Key, index: &mut Writer) -> Result<()> {
+        let Some(assembly) = self.assemblies.get_mut(&key).filter(|a| !a.stale && a.segments.len() >= PART) else {
+            return Ok(());
+        };
+        if index.write_words_part(&assembly.work, &assembly.segments, assembly.written == 0)? {
+            assembly.written += assembly.segments.len();
+            assembly.vectors += assembly.segments.iter().filter(|s| s.vector.is_some()).count();
+        } else {
+            // It changed while it was read: it's queued again, and read again from the start.
+            assembly.stale = true;
+        }
+        assembly.segments.clear();
         Ok(())
     }
 
-    /// Reading a file ended: what's left of it is written, with what reading it learned (`info`), or it failed.
+    /// Reading an item ended: what it found is written, with how far the file's work in its round is now, or its
+    /// round failed. Returns how much of it was done, in the round's unit, when it was written.
     pub fn end(
         &mut self,
-        file: i64,
-        result: Result<serde_json::Value>,
+        key: Key,
+        result: Result<Ended>,
         index: &mut Writer,
         on_event: &mut dyn FnMut(Event),
-    ) -> Result<()> {
-        // A worker hands over a file's start, pieces and end in that order.
-        let assembly = self.assemblies.remove(&file).expect("started");
-        self.completed += 1;
+    ) -> Result<Option<f64>> {
+        // A lane hands over an item's start, pieces and end in that order.
+        let assembly = self.assemblies.remove(&key).expect("started");
         if assembly.stale {
-            return Ok(());
+            return Ok(None);
         }
-        let path = assembly.row.path.display().to_string();
-        match result {
-            Ok(mut info) => {
-                if assembly.failures > 0 {
-                    info["unembedded"] = serde_json::json!(assembly.failures);
-                }
-                let parts = assembly.written > 0;
-                // Not written when the file changed (or left) while it was read: it's queued again.
-                if index.finish_file(&assembly.row, &assembly.segments, &info, parts)? {
-                    self.indexed += 1;
-                    on_event(Event::File {
-                        path,
-                        kind: assembly.row.kind,
-                        segments: assembly.written + assembly.segments.len(),
-                        vectors: assembly.vectors + assembly.segments.iter().filter(|s| s.vector.is_some()).count(),
-                        ms: assembly.started.elapsed().as_millis() as u64,
-                    });
-                }
-            }
+        let Assembly { work, started, segments, written, vectors, failures, .. } = assembly;
+        let path = work.file.path.display().to_string();
+        let result = match result {
+            // A vector that couldn't be made may well be made later: the item is read again then.
+            Ok(_) if failures > 0 => Err(anyhow::anyhow!("{failures} of its pieces couldn't be embedded")),
+            result => result,
+        };
+        let ended = match result {
+            Ok(ended) => ended,
             Err(error) => {
                 let error = format!("{error:#}");
-                if index.fail_file(&assembly.row, &error)? {
+                if index.fail(&work, &error, failures > 0)? {
                     self.failed += 1;
-                    on_event(Event::Failed { path, error });
+                    on_event(Event::Failed { round: work.round, path, error });
                 }
+                return Ok(None);
             }
+        };
+        let count = written + segments.len();
+        let vectors = vectors + segments.iter().filter(|s| s.vector.is_some()).count();
+        let stored = if work.round == Round::Words {
+            index.write_words(&work, &segments, &ended.info, &ended.rounds, written > 0)?
+        } else {
+            let done = Done { done: ended.done, resume: ended.resume, finished: ended.finished, info: ended.info };
+            index.write_item(&work, &segments, &done)?
+        };
+        if !stored {
+            return Ok(None);
         }
-        Ok(())
+        if ended.finished {
+            self.files += 1;
+            let ms = started.elapsed().as_millis() as u64;
+            on_event(Event::File { round: work.round, path, kind: work.file.kind, segments: count, vectors, ms });
+        }
+        Ok(Some(ended.done - work.done))
     }
 }

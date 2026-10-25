@@ -25,30 +25,58 @@ clients     CLI · TUI · serve · other front ends
 services    engine: search and control · indexer: ingest
                      │
 domain      query path:   understand → retrieve → rank → present
-            ingest path:  discover → extract → segment → prepare → embed → write
-            policy:       ranking · segmenting · resources · config
+            ingest path:  discover → rounds: words · text · OCR · pictures · sound · speech
+                          each: extract → segment → prepare → embed → write
+            policy:       ranking · segmenting · rounds · resources · config
                      │  interfaces
 adapters    index (SQLite and vector files) · embedder (llama.cpp) · transcriber (helper process)
-            extractors (PDFKit, ImageIO, Vision, AVFoundation, textutil) · platform (FSEvents, launchd, power)
+            extractors (PDFKit, ImageIO, Vision, AVFoundation, textutil)
+            platform (FSEvents, launchd, power, memory pressure)
 ```
 
 ## Parts
 
 ### The ingest path
 
-- **Discover:** which files are new or changed (by their reading fingerprint), and what reading each will cost.
-- **Extract:** a file becomes a stream of content: lines of text, pages, pictures, sound. Extracting decodes; it decides
+- **Discover:** which files are new or changed (by their reading fingerprint), queued for the words round.
+- **Rounds:** the policy of what indexing does, and in what order: the six rounds, the unit each counts in, which a
+  file of each kind passes through, and their order. Pure, and tested on its own.
+- **Extract:** a file becomes a stream of content, for one round at a time: its text and metadata (words), the text on
+  its pictures (OCR), its pictures and frames, its sound, what's said in it (speech). Extracting decodes; it decides
   nothing about cutting.
 - **Segment:** content becomes segments, each with its place in the file. One strategy per content type: prose and
   Markdown, code, records (CSV, JSON, YAML, TOML), pages, frames, sound windows, speech. Pure, and tested on its own.
 - **Prepare:** a segment becomes the model's input: the prompt with the file's title, a picture fitted to its token
   budget, a window of sound.
-- **Embed:** the model's only owner. It batches inputs and hands back vectors. It holds the text model, the vision
-  encoder only while pictures or video frames are read, and the audio encoder only while sound is.
-- **Write:** the index's only writer. It keeps the rule that a segment's vectors are appended before the segment is
-  committed.
-- **Schedule:** what goes first (changes, then the cheapest), how many files are read at once, and whether speech is
-  written down beside the reading or after it.
+- **Embed:** the model's only owner. It batches texts and hands back vectors. It holds the text model while any of
+  the GPU's rounds has work, and one encoder: the vision encoder for pictures, the audio encoder for sound.
+- **Write:** the index's only writer. Each round writes only its own segments (words its passages and pages, OCR its
+  passages and the words on pictures, pictures its pictures and frames, sound its windows, speech its passages), and
+  the text round the vectors of the passages waiting for one. It keeps the rule that a vector is appended before the
+  segment that points at it is committed.
+- **Schedule:** the run. It asks resources for a plan (which rounds run side by side), hands their items to the lanes,
+  lets new files in first, and keeps each round's progress.
+
+The queues are the index's: a row per file and round it needs (`work`), with its state, how much there is to do, how
+much is done, and where the next item goes on; a passage waiting for its vector says so (`segments.due`). The
+scheduler only holds the few items it hands out next, so a stop or a crash loses at most the items in hand.
+
+A run has a thread for each lane, and items go between them on bounded channels:
+
+- **The run's own thread:** the plan, the GPU (embed), the writer, and what the other lanes hand back.
+- **The words lane:** a few readers, reading files' words.
+- **The media lane:** as many, decoding for the GPU's round: pictures and frames, or sound.
+- **The OCR lane:** one thread, since Vision reads text in one picture at a time per process anyway.
+- **The speech lane:** one thread, which talks to the speech helper.
+
+The run's thread embeds a picture in about 120 ms and a sound window in 200 ms, and a batch of the text round's
+passages in a few hundred. What the other lanes hand back needs no GPU, and comes in many small messages (a passage, a
+page's text, a stretch of what's said), so it's taken between any two of the media lane's pieces, and those lanes may
+run far ahead: taken once a pass, each message waited for a picture's embedding, and OCR went six times slower beside
+the sound round, speech half as fast, and words crawled. The speech lane doesn't wait for a stretch to be stored at
+all: it goes on with the next, with the next file waiting beside it, and the run stops a file by naming it. On the
+GPU, the text round's batches go first while passages wait (unless the media round's work is new files'), and the
+media lane's pieces wait meanwhile.
 
 ### The query path
 
@@ -61,11 +89,13 @@ adapters    index (SQLite and vector files) · embedder (llama.cpp) · transcrib
 
 ### Shared
 
-- **Index:** one facade over the catalog (SQLite: files, segments, full-text, transcripts, the queue) and the vector
+- **Index:** one facade over the catalog (SQLite: files, segments, full-text, the rounds' queues) and the vector
   store (partitions, generations, forms). It has a writer (one) and readers (many). Snapshots, generations and mapped
   files stay behind it.
-- **Resources:** the Mac's facts (memory, cores, power) go in, plans come out: the form a search scans and its
-  candidates, the readers and speech of ingest. Pure functions, in one place.
+- **Resources:** the Mac's facts (memory, cores, power, memory pressure) go in, plans come out: the form a search
+  scans and its candidates, and for ingest which rounds run side by side and how many readers. Each tool declares its
+  chip and what it holds, so a tool that isn't built yet (a Core ML text model on the Neural Engine, say) slots in by
+  saying so. Pure functions, in one place.
 - **Config:** the schema and the cascade. Each part gets its own typed section, not the whole config.
 - **Protocol:** the requests, responses and events every client uses (`crates/protocol`, `docs/protocol.md`). Its
   first event carries the engine's build, so a client of another build notices; nothing is negotiated. The engine is
@@ -87,8 +117,8 @@ text and page images, a screenshot a picture and its text. So extracting is per 
 preparing are per content type; an extractor combines them. The picture logic exists once, also when a video uses it.
 
 Speech is an extractor too: sound in, words with times out, which the speech segmenter cuts into passages. A slow one,
-so the scheduler runs it on its own lane. What it yields is segmented and embedded like everything else, and "beside the
-reading or after it" is the scheduler's choice rather than code of its own.
+on the Neural Engine, so it's a round of its own. What it yields is cut and embedded like everything else, and whether
+it runs beside other rounds is the plan's choice rather than code of its own.
 
 ## Concrete parts
 
@@ -119,16 +149,18 @@ src/
   models.rs              the model files in the Hugging Face cache: found by their hash, and downloaded
   index/                 the facade: catalog (SQLite), vector files, the vectors as searches read them
   ingest/
+    rounds.rs            the rounds: their order and units, and which a file passes through
     discover/            what's new or changed (mod.rs), crawling (crawl.rs), what reading costs (cost.rs)
-    read.rs              extract, segment and prepare, joined
+    read.rs              extract, segment and prepare, joined, for one round
     extract/             per container: text, document, notebook, pdf, image, audio, video, speech
     segment/             per content type: text by its form (passages; prose, code, records), pictures, frames,
                          sound, speech
     prepare.rs           prompts, fitting pictures, sound
-    embed.rs             the embedding stage, the model's owner: the text model, and the encoders while needed
-    write.rs             files put together and written
-    schedule.rs          order, readers, the run
-    listen.rs            speech's lane, beside the reading or after it
+    embed.rs             the embedding stage, the model's owner: the text model, and an encoder while needed
+    write.rs             what a round found, put together and written
+    schedule.rs          the run: the plan, the lanes, new files first, progress
+    progress.rs          how far each round is, and how fast it went
+    listen.rs            the speech lane
   query/
     understand.rs        words, phrases, code, kinds
     retrieve.rs          full-text and vector candidates
@@ -139,7 +171,8 @@ src/
     indexer.rs           the ingest service: watching the folders (FSEvents), waiting, status
     launchd.rs           installing the LaunchAgents
   adapters/
-    macos/               the frameworks: ImageIO, CoreGraphics and Vision (mod.rs), AVFoundation (av.rs), power
+    macos/               the frameworks: ImageIO, CoreGraphics and Vision (mod.rs), AVFoundation (av.rs), power,
+                         memory pressure (pressure.rs)
     speech.rs            the helper process
   clients/               the engine's client, the TUI, results in a terminal, previews, opening results, serve
   tools/                 eval, the benches, selftest, estimate

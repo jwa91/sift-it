@@ -23,9 +23,6 @@ use std::path::Path;
 
 mod resample;
 
-/// Video is sampled this often, in seconds, however long it is.
-const FRAME_STEP: f64 = 2.0;
-
 fn asset(path: &Path) -> Retained<AVURLAsset> {
     let url = NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy()));
     unsafe { AVURLAsset::URLAssetWithURL_options(&url, None) }
@@ -127,8 +124,13 @@ fn read_pass(
     Ok(Pass::Finished)
 }
 
-/// Decodes the sound from `from` seconds on, handing it over as it comes (16 kHz mono). Returns the seconds of sound
-/// read, counted from 0.
+/// A read that starts partway starts decoding this many seconds earlier, at a whole second, and drops what comes
+/// before where it starts: the decoder and the converter warm up on it, so the sound comes out as it does in a read
+/// from the start (docs/audio-decoding.md). A whole second is a whole number of samples at every rate.
+const PREROLL: f64 = 3.0;
+
+/// Decodes the sound from `from` seconds on, handing it over as it comes (16 kHz mono), as a read from the start
+/// would have it there. Returns the seconds of sound read, counted from 0.
 ///
 /// When AVFoundation gives up partway, reading starts again a second past where it stopped, and that second is
 /// silence: the timeline stays true. Only a file it can't get past fails.
@@ -141,13 +143,21 @@ pub fn read_samples(path: &Path, from: f64, on_samples: &mut dyn FnMut(&[f32]) -
     if tracks.count() == 0 {
         bail!("no sound in it");
     }
-    let first = (from.max(0.0) * AUDIO_RATE as f64) as usize;
-    let mut total = first; // samples read (and silence put in for skipped stretches)
+    let first = (from.max(0.0) * AUDIO_RATE as f64).round() as usize;
+    let start = (from - PREROLL).floor().max(0.0) as usize * AUDIO_RATE;
+    let mut total = start; // samples read (and silence put in for skipped stretches)
+    // The samples before `first` warm the decoder up, and go.
+    let mut warming = first - start;
+    let mut deliver = |samples: &[f32]| -> Result<()> {
+        let dropped = warming.min(samples.len());
+        warming -= dropped;
+        if dropped < samples.len() { on_samples(&samples[dropped..]) } else { Ok(()) }
+    };
     let mut resumes = 0;
     loop {
         let pass = read_pass(&asset, &tracks, total as f64 / AUDIO_RATE as f64, &mut |samples| {
             total += samples.len();
-            on_samples(samples)
+            deliver(samples)
         })?;
         match pass {
             Pass::Finished => break,
@@ -158,7 +168,7 @@ pub fn read_samples(path: &Path, from: f64, on_samples: &mut dyn FnMut(&[f32]) -
                 }
                 // Past the spot it stumbled on, keeping the timeline: a second of silence stands in for it.
                 total += SKIP;
-                on_samples(&vec![0.0f32; SKIP])?;
+                deliver(&vec![0.0f32; SKIP])?;
             }
         }
     }
@@ -250,10 +260,13 @@ pub fn frame_at(path: &Path, seconds: f64, max_side: u32) -> Result<Retained<CGI
         .map_err(|error| anyhow!("AVFoundation: {}", error.localizedDescription()))
 }
 
-/// Walks the video and hands over a frame every FRAME_STEP seconds: (time in seconds, frame).
+/// Walks the video from `from` seconds until `until` (or its end), and hands over a frame every `step` seconds: (time
+/// in seconds, frame).
 pub fn read_video(
     path: &Path,
     max_side: u32,
+    step: f64,
+    (from, until): (f64, f64),
     on_frame: &mut dyn FnMut(f64, &CGImage) -> Result<()>,
 ) -> Result<VideoInfo> {
     let asset = asset(path);
@@ -265,9 +278,9 @@ pub fn read_video(
     if !duration.is_finite() || duration <= 0.0 {
         bail!("it has no length");
     }
-    let generator = generator(&asset, max_side, FRAME_STEP / 2.0);
-    let mut time = 0.0f64;
-    while time < duration {
+    let generator = generator(&asset, max_side, step / 2.0);
+    let mut time = from;
+    while time < duration.min(until) {
         autoreleasepool(|_| -> Result<()> {
             let mut actual = unsafe { CMTime::with_seconds(time, 600) };
             let requested = actual;
@@ -278,7 +291,7 @@ pub fn read_video(
             let at = if at.is_finite() { at } else { time };
             on_frame(at, &frame)
         })?;
-        time += FRAME_STEP;
+        time += step;
     }
     Ok(VideoInfo { duration, width: size.width.abs() as u32, height: size.height.abs() as u32 })
 }
@@ -317,6 +330,23 @@ mod tests {
             let (end, tail) = decode(&path, 1.0, false);
             assert_eq!(end, expected.0, "{name}, resumed duration");
             assert_eq!(tail.len() + AUDIO_RATE, frames, "{name}, resumed length");
+        }
+    }
+
+    /// A read that starts partway gives the samples a read from the start gives there: an item of a long recording
+    /// that goes on where the last one stopped hears what a read of all of it would. (partial.m4a is too short to start
+    /// partway: its reads start at 0.)
+    #[test]
+    fn a_read_resumed_partway_is_the_same_sound() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/audio/priming.mp3");
+        let (_, whole) = decode(&path, 0.0, false);
+        for run in 0..20 {
+            let at = [4.0, 5.4375][run % 2];
+            let (_, tail) = decode(&path, at, run % 4 < 2);
+            let first = (at * AUDIO_RATE as f64) as usize;
+            assert_eq!(tail.len(), whole.len() - first, "from {at}, run {run}: length");
+            let difference = tail.iter().zip(&whole[first..]).position(|(a, b)| a != b);
+            assert_eq!(difference, None, "from {at}, run {run}: first different sample");
         }
     }
 

@@ -143,7 +143,7 @@ Ends `sift-it serve` once the requests before it are answered: `{"id": 10, "ok":
 {"event": "meaning", "state": "loading"}
 {"event": "meaning", "state": "unavailable", "error": "embeddinggemma-2-Q8_0.gguf isn't downloaded (run `sift-it model download`)"}
 {"event": "config", "error": "can't read config.json: …"}
-{"event": "indexer", "state": "indexing", "done": 12, "total": 40, …}
+{"event": "indexer", "state": "indexing", "rounds": [{"round": "words", "state": "done", …}, …], …}
 ```
 
 - `ready`: the first line on connecting.
@@ -176,8 +176,20 @@ Ends `sift-it serve` once the requests before it are answered: `{"id": 10, "ok":
 **Stats:** `files`, `done`, `pending`, `failed`, `segments`, `vectors`, `by_kind` (counts by kind), `bytes` (the
 index on disk).
 
-**IndexerStatus:** `pid`, `state`, `detail` (what it waits for, or how far into a recording it is), `done` and
-`total` (files in this run, or recordings while it writes down speech), `current` (the file it did last), `updated`
-(seconds since 1970), `last_error`, `speech_done` and `speech_total`. `state` is `starting`, `syncing`, `indexing`,
-`transcribing`, `waiting`, `paused`, `idle` or `stopped`. The indexer also writes it to `status.json` in the data
-folder.
+**IndexerStatus:** `pid`, `state`, `detail` (what the work that's left waits for: a charger, memory, a model),
+`rounds` (a RoundStatus for each round this index has had work in, in their order), `current` (the file it did last),
+`updated` (seconds since 1970) and `last_error`. `state` is `starting`, `syncing`, `indexing` (its rounds say how
+far), `waiting` (nothing can run: `detail` says why), `paused`, `idle` or `stopped`. The indexer also writes it to
+`status.json` in the data folder.
+
+**RoundStatus:** how far a round of indexing is (docs/design.md, "Rounds").
+
+| Field | |
+|---|---|
+| `round` | `words`, `text`, `ocr`, `pictures`, `sound` or `speech`: the order they come in |
+| `state` | `done`, `running`, `queued` (it waits for its turn: another round has its chip, or the memory budget has no room for its tool yet) or `waiting` (for what the indexer's `detail` says) |
+| `done`, `total` | in the round's unit: files (words), passages (text), pictures (OCR and pictures; a video counts a frame every 2 s), seconds of sound (sound and speech). The total grows while the rounds before it find more: the text round's passages, as words, OCR and speech read them |
+| `files` | the files with something left to do in it |
+| `seconds_left` | about how long the rest takes, at the speed it went while it ran; `null` until it has run a while |
+
+So "words: done, text: 60%, pictures: 10%, speech: waiting" is `done / total` of each, with its `state`.

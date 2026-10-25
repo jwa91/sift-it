@@ -246,12 +246,11 @@ impl Default for Ranking {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Indexing {
-    /// How much memory indexing may take, in MB: how many files are read at once, and whether what's said in recordings
-    /// is written down beside the reading or after it (resources::IngestPlan). What's written is the same either way.
-    /// At `auto`, a quarter of the Mac's memory.
+    /// How much memory indexing may take, in MB, at most: which rounds run side by side, and how many files are read
+    /// at once (resources::plan). What's written is the same either way. At `auto`, a quarter of the Mac's memory.
     pub memory_mb: Budget,
-    /// Index while on battery power. In Low Power Mode it always waits.
-    pub on_battery: bool,
+    /// What goes on while the Mac is on battery.
+    pub on_battery: OnBattery,
     /// A changed path is handled once it has been quiet this long: a download, a copy, an export settling.
     pub quiet_ms: u64,
     /// A full sync this often, in minutes, in case a file-system event went missing.
@@ -262,8 +261,27 @@ pub struct Indexing {
 
 impl Default for Indexing {
     fn default() -> Self {
-        Self { memory_mb: Budget::Auto, on_battery: true, quiet_ms: 1500, full_sync_min: 30, release_model_s: 60 }
+        Self {
+            memory_mb: Budget::Auto,
+            on_battery: OnBattery::Words,
+            quiet_ms: 1500,
+            full_sync_min: 30,
+            release_model_s: 60,
+        }
     }
+}
+
+/// What indexing does on battery. In Low Power Mode, it's `words` at most.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OnBattery {
+    /// Everything goes on.
+    All,
+    /// The words round, and new files through all their rounds; the rest waits for a charger.
+    #[default]
+    Words,
+    /// Nothing goes on until there's a charger.
+    None,
 }
 
 /// How the engine searches (services/engine.rs).

@@ -1,7 +1,7 @@
 //! Preparing: a segment as the model's input. Text is read with its file's title in the document prompt; code with its
 //! path inside its project as the title, since the model reads "src/net/retry.rs" as much as the code. Text that's
 //! mostly numbers isn't embedded: a vector of it means nothing. A picture is fitted to its token budget, and sound
-//! goes as it is.
+//! goes as it is. Text waits for the text round, which frames it in its prompt then.
 
 use super::Payload;
 use super::discover::crawl::is_project;
@@ -36,22 +36,21 @@ fn project_path(path: &Path) -> String {
     path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()
 }
 
-/// A text, after its context (what it was cut from: a heading, a signature, a header row), in its document prompt, at
-/// a depth that embeds; else it goes into the keyword index only.
-pub fn text(title: &str, context: &str, text: &str, settings: &Settings) -> Payload {
+/// A text, with its context (what it was cut from: a heading, a signature, a header row), for the text round at a
+/// depth that embeds; else it goes into the keyword index only.
+pub fn text(context: String, text: &str, settings: &Settings) -> Payload {
     if !settings.embeds() || mostly_numbers(text) {
         return Payload::None;
     }
-    if context.is_empty() {
-        Payload::Text(embedder::prompts::document(Some(title), text))
-    } else {
-        Payload::Text(embedder::prompts::document(Some(title), &format!("{context}\n{text}")))
-    }
+    Payload::Text(context)
 }
 
-/// A passage of what's said, in its document prompt (it's only written down at a depth that embeds).
-pub fn spoken(title: &str, text: &str) -> String {
-    embedder::prompts::document(Some(title), text)
+/// A text in its document prompt, after its context when it has one: what the text round embeds.
+pub fn prompt(title: &str, context: Option<&str>, text: &str) -> String {
+    match context.filter(|context| !context.is_empty()) {
+        None => embedder::prompts::document(Some(title), text),
+        Some(context) => embedder::prompts::document(Some(title), &format!("{context}\n{text}")),
+    }
 }
 
 /// A picture, fitted to `budget` tokens.
