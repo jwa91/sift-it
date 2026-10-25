@@ -1,154 +1,99 @@
 # sift-it
 
-Local file search for macOS, written in Rust.
+**A fast local search engine for the Mac, written in Rust.**
 
-Search selected folders by meaning or exact words. Use the interactive terminal interface, run commands from scripts,
-or search from another program through `sift-it serve`.
-Search and indexing run on your Mac with [EmbeddingGemma 2](https://huggingface.co/google/embeddinggemma-2) and
-[llama.cpp](https://github.com/ggml-org/llama.cpp).
+Find any file by its words, by what it means, or by what's said in it: the page of a PDF, the photo, the minute of a
+podcast, the scene in a video. Everything runs on your Mac, and nothing you index or search leaves it.
 
-sift-it builds on the design of [DigUp](https://github.com/ARahim3/DigUp), created by Abdur Rahim.
-Its reference test data also comes from DigUp. Both projects support local search across documents, pictures,
-recordings, videos, and code. DigUp also includes a CLI.
-
-## How sift-it differs
-
-- **Rust implementation:** the search engine, file readers, and background indexer use Rust.
-- **Terminal interface:** search interactively, preview results, and open files at the matching page, time, or line.
-- **Script integration:** use JSON output or pass search result paths to other commands.
-- **One engine for every search:** a resident process answers the terminal, scripts, and other programs alike. It
-  loads the model and maps the vectors for the first search by meaning and keeps them, and a search by words loads
-  nothing.
-- **A protocol for front ends:** other programs search, preview results, manage folders and follow indexing through
-  `sift-it serve`, with JSON lines.
-- **Ranking changes:** account for file length and give ordinary words less weight than numbers, code searches,
-  and quoted phrases.
-- **Text cut by its form:** Markdown at its headings, code at its definitions, and records (CSV, JSON, YAML, TOML)
-  one by one, so a passage is about one thing, and a piece of a long one is read with its heading or signature.
-- **Speech, written down:** what's said in recordings and videos is transcribed in the background, so a word or a name
-  spoken in a podcast is found at its moment. With enough memory this runs beside the reading; otherwise only after
-  everything else is searchable.
-
-### Ranking for mixed files
-
-A long document has more chances to contain an accidental match than a picture or short recording.
-sift-it lowers its score according to the number of stored vectors. Files with up to four vectors receive no penalty.
-
-Ordinary word matches receive a smaller bonus than searches containing numbers, code searches, and quoted phrases.
-This reduces cases where incidental text matches outrank relevant pictures or recordings.
-Ordinary word matches do not automatically qualify as strong results.
-
-sift-it also limits each file to 10 matching segments before it applies overall candidate limits.
-It filters file types before these limits. This prevents one long file from excluding other results.
-
-The recorded evaluation used a mixed collection with eight books:
-
-| Measure | Before ranking changes | After ranking changes |
-|---|---:|---:|
-| Correct file first | 70/107 | 82/107 |
-| Book first for queries about other files | 21/95 | 1/95 |
-| False alarms for queries without answers | 1/5 | 0/5 |
-| Correct book first for book queries | 12/12 | 12/12 |
-
-These results compare sift-it before and after its ranking changes. They do not compare sift-it against DigUp.
-See [the ranking notes](docs/ranking.md) for the formulas, evaluation method, and remaining limitations.
+This is the engine: the indexer, the search, and the `sift-it` command. [Sift It](https://github.com/jwa91/sift-it-mac),
+the Mac app, is its front end, and other programs talk to it through [a documented protocol](docs/protocol.md).
 
 ## Install
-
-Requirements: Apple Silicon and macOS 14 or later. The model download is 1.5 GB: 865 MB to search, and 632 MB to write
-down what's said in recordings. The files go into the Hugging Face cache (`~/.cache/huggingface/hub`, or
-`$HF_HUB_CACHE`, or `$HF_HOME/hub`), which other apps share: a file one of them has already isn't downloaded again.
-[Handy](https://handy.computer)'s copy of the speech model no longer counts: sift-it now runs a Core ML conversion
-of it.
 
 ```sh
 brew install jwa91/tap/sift-it
 ```
 
-That installs [Sift It](https://github.com/jwa91/sift-it-mac), the Mac app, with sift-it inside it and the `sift-it`
-command on your path. Open Sift It: its welcome window downloads the model, asks which folders to search, and starts
-indexing in the background. In a terminal, the same is:
+That installs Sift It, the Mac app, with the engine inside it and the `sift-it` command on your path. Open Sift It: it
+downloads the models, asks which folders to search, and starts indexing. Or, in a terminal:
 
 ```sh
 sift-it model download
-sift-it folders add ~/Documents ~/Desktop ~/Downloads
+sift-it folders add ~/Documents
 sift-it service install
 sift-it search "the warranty for the washing machine"
 ```
 
-The background indexer and the search engine start at login. The indexer updates the index when files change.
-macOS can request access to Documents, Desktop, or Downloads. Allow access when macOS requests it.
-You can also grant Full Disk Access in System Settings → Privacy & Security.
+Apple silicon and macOS 14 or later. The models are 1.5 GB, downloaded once.
+
+## Three phases
+
+Indexing comes in three phases. Each makes more of your files findable, and you can search all along.
+
+| Phase | Finds | With |
+|---|---|---|
+| **Exact** | files by their name and exact words, text in screenshots and scans included | sift-it's own readers, and macOS's text recognition |
+| **Embeddings** | documents, photos, sounds and video scenes by what they mean | [EmbeddingGemma 2](https://huggingface.co/google/embeddinggemma-2), on [llama.cpp](https://github.com/ggml-org/llama.cpp) with Metal |
+| **Transcribed** | what's said in audio and video | [Parakeet Ultra](https://huggingface.co/moondream/parakeet-ultra), on the Neural Engine through [FluidAudio](https://github.com/FluidInference/FluidAudio), in `sift-it-transcribe` |
+
+Exact needs no model, so every file in a folder is found by its words within seconds of adding it. A file you just
+saved goes first in every phase. Each phase is made of rounds, one tool each, which run side by side on the CPU, the
+GPU and the Neural Engine as memory allows; `sift-it status` shows how far each one is.
+
+Parakeet Ultra understands 25 European languages, English and Dutch among them. On an Apple M5 it writes down a
+35-minute podcast in under ten seconds, and each passage it writes keeps its time, so a word said in a podcast opens
+the podcast at that moment.
+
+## How it runs
+
+- **One engine.** Every search goes to one resident process, over a socket in the data folder: the terminal, scripts,
+  the Mac app and other front ends alike. It holds nothing until it's needed. A search by words loads nothing; the
+  first search by meaning loads the text model and maps the vectors, which stay until `sift-it engine unload`.
+- **A background indexer.** It starts at login, follows your folders as they change, and lets its models go when
+  there's nothing to do.
+- **On battery,** Exact goes on and the rest waits for a charger, except for new files, which go through every phase.
+  `indexing.on_battery` sets this: `words` (Exact only, the default), `all`, or `none`. In Low Power Mode it's Exact
+  at most.
+- **Within a memory budget.** `indexing.memory_mb`, a quarter of the Mac's memory unless you set it, decides how much
+  runs side by side, never what's written. When macOS runs short of memory, indexing slows down or stops until it
+  isn't.
+- **Models shared with other apps.** They live in the Hugging Face cache (`~/.cache/huggingface/hub`, or
+  `$HF_HUB_CACHE`, or `$HF_HOME/hub`). A file another app already downloaded isn't downloaded again, and sift-it never
+  removes anything from the cache.
 
 ## Search
 
-### Interactive terminal
-
-Run `sift-it` without arguments to search as you type. The interface shows results beside a preview of the selected file.
-Supported terminals show pictures, PDF pages, and video frames inline. These terminals include Ghostty, kitty, iTerm2,
-and WezTerm. Recordings show a waveform with the matching time range highlighted.
+Run `sift-it` without arguments to search as you type, beside a preview of the selected result. Ghostty, kitty,
+iTerm2 and WezTerm show pictures, PDF pages and video frames inline; audio shows a waveform with the matching time
+highlighted.
 
 | Key | Action |
 |---|---|
-| Enter | Open the selected result at its matching page, time, or line |
-| Ctrl+R | Show the selected file in Finder |
-| Ctrl+Y | Copy the selected file path |
-| Tab | Filter results by file type |
+| Enter | Open the result where it matched: its page, time, or line |
+| Ctrl+R | Show it in Finder |
+| Ctrl+Y | Copy its path |
+| Tab | Filter by file type |
 | Esc | Exit |
 
-### Commands and scripts
+From scripts:
 
 ```sh
 sift-it search "the diagram of the heating system"
 sift-it open 1
 sift-it search "annual maintenance" --kind document -n 10
 sift-it search '"SERVICE-2026-042" maintenance'
+sift-it search "INV-2024-0113" --by words
 sift-it search "the railway bridge at sunset" --json
 sift-it search "annual maintenance" | while IFS= read -r result_path; do open "$result_path"; done
 ```
 
-Quoted phrases require matching words together and in order. Matching ignores case and accents.
-Piped searches print one path per line. JSON output includes scores and matching locations.
+A search is by meaning unless it says `--by words` (`search.mode` sets the default). Words still count in a search by
+meaning, so names and numbers are found. Quoted phrases must match together and in order, and matching ignores case
+and accents. Piped searches print one path per line; `--json` adds scores and places. `sift-it open <n>` opens a
+result of the last search: a PDF in Preview at its page, audio or video in QuickTime at its time, text and code in an
+editor at its line, and a conversation resumed in its folder.
 
-### The engine
-
-Every search goes to one resident process, the engine. It starts at login, or with the first search when it isn't
-running, and holds nothing until it's needed. A search is by `meaning` or by `words`:
-
-- **By meaning**, the default, uses the model and the vectors. The first such search loads the model and maps the
-  vectors, which takes a few seconds, and they stay for every search after it.
-- **By words** uses only the full-text index. It needs no model and holds almost nothing in memory.
-
-```sh
-sift-it search "INV-2024-0113" --by words
-sift-it config search.mode words
-sift-it engine unload
-```
-
-`sift-it config search.mode` sets the default, and `--by` overrides it for one search. `sift-it engine unload` lets the
-model and the vectors go until the next search by meaning, and `sift-it status` shows what the engine holds. A new
-version of sift-it replaces a running engine of an older one at its first search.
-
-The vectors are in files beside the index, and the engine maps them rather than copying them into memory: macOS can
-drop their pages when it needs the memory, and reads them again for the next search. `search.vectors` sets which form a
-search scans:
-
-- `exact-f32` reads every vector as it was made, for exact scores.
-- `exact-f16` reads every vector at half precision: half as much, with scores within a thousandth.
-- `sketch` compares the query with a 96-byte sketch of every vector, a 32nd of its size, then scores the closest
-  exactly: 4,096 of them, or a 32nd of the vectors in a larger index. On Rust's books (7,400 vectors) it keeps all of
-  the exact top 20 for 45 queries.
-- `auto`, the default, scans the most precise form whose rows fit in `search.memory_mb`. That's a tenth of the Mac's
-  memory unless you set it. 800 MB holds exact scores for some 260,000 vectors.
-
-Every form is always written, so a change takes effect at the next search. A result's lift is measured from the
-query's median over a fixed sample of 8,192 vectors, which the engine keeps in memory (24 MB), so it's the same
-whichever form a search scans.
-`sift-it open <n>` opens a result from the last search.
-PDF results open in Preview at their page. Recordings and videos open in QuickTime at their matching time.
-Text and code results open at their matching line in a supported editor.
-
-Enable code indexing before a code search:
+Code is left out until you turn it on. Then `code:` searches and the code filter find it:
 
 ```sh
 sift-it config sources.code true
@@ -156,76 +101,44 @@ sift-it index
 sift-it search "code: validate a configuration file"
 ```
 
-Code appears in `code:` searches or when you select the code filter.
-`NO_COLOR` disables colour. `SIFT_IT_IMAGES=0` disables inline pictures.
-
-### Other programs
-
-Other programs can use `sift-it serve`. It accepts JSON requests through stdin and returns JSON replies through stdout,
-relayed to the engine over its socket, and it renders previews itself.
-See [docs/protocol.md](docs/protocol.md) for the requests, replies and events.
+`NO_COLOR` turns off colour, and `SIFT_IT_IMAGES=0` inline pictures.
 
 ## Supported files
 
-sift-it reads only the folders you select. It does not change, move, or upload your source files.
+sift-it reads only the folders you choose, and never changes, moves or uploads a file.
 
-| File type | Search content |
+| Files | Found by |
 |---|---|
-| Documents | Text from txt, md, rtf, doc, docx, odt, and html files, Markdown cut at its headings |
-| PDFs | Individual pages, including text recognition for scanned pages |
-| Pictures | Image content in formats macOS can read, including HEIC and RAW |
-| Screenshots | Image content and recognized text |
-| Recordings | Overlapping 30-second windows (fewer where speech is heard), and what's said in them, with results at the matching time |
-| Videos | Frames from individual shots and long shots, plus audio windows and what's said |
-| Tags | The title, artist and album of recordings and videos, found by their words |
-| Records | Rows of csv and tsv files, records of json and jsonl files, keys of yaml and toml files |
-| Code and notebooks | Definitions and notebook cells, with code indexing enabled |
+| Documents | the text of txt, md, rtf, doc, docx, odt, html and webarchive files, Markdown cut at its headings |
+| PDFs | each page, scanned pages read by text recognition |
+| Pictures | what they show, in any format macOS reads, HEIC and RAW included |
+| Screenshots | what they show, and the text on them |
+| Audio | what it sounds like, in 30-second windows, and what's said in it, at its time |
+| Videos | their scenes, their sound, and what's said in them |
+| Tags | the title, artist and album of audio and video files |
+| Records | the rows of csv and tsv files, the records of json and jsonl files, the keys of yaml and toml files |
+| Code and notebooks | definitions and cells, once code is turned on |
+| Conversations | what you and Claude Code or Codex said in a session, which a result resumes |
 
-Text that contains mostly numbers uses word search only. Silent audio windows do not enter the index.
-The embedding model can miss or confuse sounds and pictures. See [the documented limitations](docs/ranking.md#results).
+Text that's mostly numbers is found by its words only, and silence isn't indexed. The model can miss or confuse sounds
+and pictures: [docs/ranking.md](docs/ranking.md#limits) says where.
 
-### What's said in recordings
+Conversations come from the session logs Claude Code keeps in `~/.claude/projects` and Codex in `~/.codex/sessions`.
+Add those folders, and a session is found by what you and the agent said in it; tool calls, their output and the
+agent's thinking aren't read. `sift-it open` resumes the session in its folder. The Mac app offers both folders with a
+click.
 
-The indexer writes down what's said in recordings and videos with
-[Parakeet Ultra](https://huggingface.co/moondream/parakeet-ultra), which understands 25 European languages, Dutch and
-English among them. It runs on the Neural Engine, through [FluidAudio](https://github.com/FluidInference/FluidAudio)
-in a helper process, `sift-it-transcribe`, at a lower priority than everything else, and gives its memory back when
-it's done. It writes a recording down a few minutes at a time: any change in your folders comes first, and it goes on
-where it stopped. On an Apple M5 it writes down a 35-minute podcast in under ten seconds. It has the Neural Engine to
-itself, so it goes on beside the rounds that have the GPU when memory allows; what it writes down is found by its
-words at once, and by its meaning once the text round has embedded it.
+```sh
+sift-it folders add ~/.claude/projects ~/.codex/sessions
+```
 
-Each passage is a sentence or a few, with its time: a search for a word said in a podcast opens it at that moment.
-`sift-it status` shows how far it is; `sift-it config reading.depth meaning` turns it off.
+Files kept only in iCloud are found by name and read once they're downloaded, and stay found when macOS removes the
+download; sift-it never downloads them.
 
-### How deep files are read
-
-`reading.depth` decides how deep a file is read, in three stages that build on each other:
-
-| Depth | A file is found by |
-|---|---|
-| `words` | its name, its tags and the words in it, including text on screenshots and scanned pages. No model needed |
-| `meaning` | also what it means: passages, pictures, video frames and sound |
-| `speech` | also what's said in it, written down (the default) |
-
-The indexer goes over your folders in rounds, each with one tool: first the words of every file (no model), so an
-exact search finds everything within minutes; then what text means, the text on screenshots and scans, what pictures
-show and sound sounds like, and what's said. A file goes through the rounds its kind needs, cheapest first, and a
-file you just saved goes first in every round, so it's searchable in seconds. `sift-it status` shows how far each
-round is.
-
-There are no size or length limits: a four-hour podcast is read as fully as a short memo, a few minutes at a time.
-`sift-it status` shows the recordings that take longest. Leave those out with `sources.ignore`, give them a lower
-depth, or let them run.
-
-sift-it skips hidden folders, nested `~/Library` folders, app bundles, packages, dependency folders, and build folders.
-It also skips recognized secret files. An iCloud file that exists only in the cloud is found by its name and read once
-it's downloaded: sift-it never downloads one, and one that was read keeps its place in the index when macOS removes its
-download.
-Inside code projects, it reads pictures, PDFs, and recordings unless you enable code indexing.
-On battery, every file's words and the text on screenshots and scans go on, new and changed files go through every
-round, and the rounds that need a model wait for a charger (`indexing.on_battery`: `words`, `all` or `none`). In Low
-Power Mode it's `words` at most.
+sift-it skips hidden folders, `~/Library` folders inside the ones you chose, app bundles and packages, dependency and
+build folders, and recognized secret files. Inside a code project it reads pictures, PDFs and audio, and the rest once
+code is turned on. There are no size limits: a four-hour podcast is read as fully as a short memo, and
+`sift-it status` names the files that take longest, should you want to leave them out.
 
 ## Manage the index
 
@@ -233,68 +146,59 @@ Power Mode it's `words` at most.
 sift-it folders add ~/Documents
 sift-it folders exclude ~/Documents/Private
 sift-it estimate ~/Documents
-sift-it status --json
+sift-it status
 sift-it service status
 sift-it index
 sift-it model status
 sift-it selftest
 ```
 
-Run `sift-it --help` for all commands and options.
+`sift-it estimate` says what each round will have to do in a folder and about how long it takes, before it's indexed.
+`sift-it --help` lists every command.
 
-Data lives in `~/Library/Application Support/Sift It`, or the folder specified by `SIFT_IT_HOME`.
-This folder contains `config.json`, `index.sqlite`, `vectors/`, `status.json`, `indexer.log`, `engine.log`,
-`engine.sock`, and `previews/`.
-When the folder's path is too long for a socket's name (104 bytes on macOS), the engine's socket is reached through a
-link to the folder in your temporary folder, `sift-it-<hash>`.
-The model files are in the Hugging Face cache, and `sift-it model status` says which one. sift-it only adds what's
-missing to that cache, and never removes anything from it.
-`brew uninstall --zap sift-it` removes the installation and its data, and leaves the model files in the cache, which
-other apps may use.
+The data lives in `~/Library/Application Support/Sift It`, or the folder `SIFT_IT_HOME` names: `config.json`, the
+index (`index.sqlite` and `vectors/`), `status.json`, the logs, previews, and the engine's socket, `engine.sock`.
+`brew uninstall --zap sift-it` removes the app and its data, and leaves the models in the Hugging Face cache for the
+other apps that may use them.
 
 ### Configuration
 
-`config.json` holds every setting, each with its value written out. `sift-it config` shows it, and
-`sift-it config <key> <value>` sets a value by its dotted name. `null` puts a value back to its default. When the file
-can't be read (a value from another version, a typo made by hand), the error names the key and what it takes, the
-indexer waits for it (`sift-it status` says why), and `sift-it config <key> <value>` sets it right.
+`config.json` holds every setting, with its value written out. `sift-it config` shows it, and
+`sift-it config <key> <value>` sets one by its dotted name; `null` puts it back to its default. When the file can't be
+read, the error names the key and what it takes, and the indexer waits until it's set right.
 
 ```sh
-sift-it config sources.ignore '["*.psd", "~/Documents/Old"]'
-sift-it config reading.video.keep_every_s 10
 sift-it config reading.rules '[{"path": "~/Movies/Footage/**", "depth": "words"}]'
+sift-it config sources.ignore '["*.psd", "~/Documents/Old"]'
 sift-it config indexing.on_battery none
-sift-it config indexing.memory_mb 4096
 ```
 
 | Section | Holds | A change counts |
 |---|---|---|
-| `sources` | folders, ignore patterns, the file types of each kind, whether code is read | at the next sync |
-| `reading` | how deep and how files are read, per kind, file type, and folder | the files it affects are read again |
+| `sources` | the folders, ignore patterns, the file types of each kind, whether code is read | at the next sync |
+| `reading` | how far and how files are read, per kind, file type and folder | the files it affects are read again |
 | `ranking` | the constants search ranks by | at the next search |
-| `search` | whether a search is by meaning or by words, unless it says, which form of the vectors it scans, and the memory that may take | at the next search |
-| `indexing` | the memory, battery and timing of the background indexer | at once |
+| `search` | by meaning or by words, which form of the vectors a search scans, and the memory it may take | at the next search |
+| `indexing` | the memory budget, battery, and timing of the background indexer | at once |
 | `log` | the size of the indexer's log | at once |
 
-`indexing.memory_mb` is a ceiling on what indexing holds, and decides only how fast it goes, never what it writes. At
-`auto` it's a quarter of the Mac's memory. Each round's tool says what it holds: the text model about 630 MB (its mapped
-file included), with 290 MB more for the vision encoder or 320 MB for the audio encoder, Vision's text recognition about
-430 MB (171 MB of it on the Neural Engine), and the speech model about 980 MB (the Neural Engine's copy of it included).
-The rounds that fit run side by side, one per chip (the GPU, the Neural Engine), and on a small budget one at a time,
-each through its whole queue. The text model stays loaded while it fits, counted, and goes when it doesn't. Reading
-takes up to a third of the cores, two to four files at once in all, and what's left of the budget can make that fewer.
-When macOS says memory is short, indexing shrinks to one tool, or stops and lets everything go until it isn't.
-`sift-it status` shows the plan.
+`reading.depth` sets how far a file goes: `words` (Exact), `meaning` (Embeddings), or `speech` (Transcribed, the
+default). A reading value can be set for everything, per kind (`reading.video`), per file type (`reading.types.mov`),
+and per folder (`reading.rules`), and the most specific wins. Ignore patterns and rule paths match a name anywhere
+(`*.psd`), or a path when they hold a slash (`~/Documents/Old`, `**/Exports/**`).
 
-A reading value resolves in four steps, and the last one that sets it wins: the top of `reading`, the kind
-(`reading.video`), the file type (`reading.types.mov`), then each rule in `reading.rules` whose path matches.
-Ignore patterns and rule paths match a file or folder name anywhere (`*.psd`), or a path when they contain a slash
-(`~/Documents/Old`, `**/Exports/**`). A folder that matches counts for everything in it.
-See [docs/design.md](docs/design.md) for where the configuration is going.
+`search.vectors` sets which form of the vectors a search scans. Each is always written, so a change counts at the next
+search:
+
+- `exact-f32`: every vector as it was made, 3 KB each.
+- `exact-f16`: half as much to read, with scores within a thousandth.
+- `sketch`: a 96-byte sketch of every vector, then exact scores for the closest.
+- `auto`, the default: the most precise that fits in `search.memory_mb`, a tenth of the Mac's memory unless you set
+  it. 800 MB holds exact scores for some 270,000 vectors.
 
 ## Build from source
 
-Install Xcode's command line tools, Rust, and CMake before you build.
+You need Xcode 26 (for Swift 6.2), Rust, and CMake.
 
 ```sh
 brew install cmake
@@ -305,34 +209,37 @@ make check
 make install
 ```
 
-`make build` builds the pinned llama.cpp release and the sift-it binary.
-`make check` runs formatting checks, Clippy, and tests. `make install` installs sift-it into `~/.local/bin`.
+`make build` builds the pinned llama.cpp release, the speech helper and sift-it; `make check` runs the format checks,
+Clippy and the tests; `make install` puts `sift-it` and `sift-it-transcribe` in `~/.local/bin`. With the models
+downloaded, `make selftest` checks the vectors against the reference ones in `tests/reference`, and `make eval` measures
+search quality on a small testbed.
 
-[docs/design.md](docs/design.md) says what sift-it does and the order it's built in.
-[docs/architecture.md](docs/architecture.md) says how the code is structured: its parts, their boundaries, and which
-way dependencies point. [docs/protocol.md](docs/protocol.md) is what front ends say to the engine.
+- [docs/design.md](docs/design.md): what sift-it does and why, with measurements.
+- [docs/architecture.md](docs/architecture.md): how the code is structured.
+- [docs/protocol.md](docs/protocol.md): what front ends say to the engine.
+- [docs/ranking.md](docs/ranking.md): how results are ranked, and how well.
+- [docs/audio-decoding.md](docs/audio-decoding.md): how sound is decoded the same every time.
 
-After you download the model, `make selftest` checks output against the reference vectors from DigUp.
-`make eval` builds `testbed/` inside this repository and measures search quality on it.
-The mixed-file evaluation needs a larger demo collection, which isn't part of the repository;
-[docs/ranking.md](docs/ranking.md) says how to make it.
+## Acknowledgements
 
-## Credits and license
+Sift It started from [DigUp](https://github.com/ARahim3/DigUp), by Abdur Rahim: the original design and the reference
+test data come from it.
 
-- [DigUp](https://github.com/ARahim3/DigUp), by Abdur Rahim, provides the original project design and reference test data.
-  See [tests/reference/README.md](tests/reference/README.md) for the copied test files and their source.
-- [EmbeddingGemma 2](https://huggingface.co/google/embeddinggemma-2), by Google DeepMind, provides the embedding model
-  under Apache 2.0.
-- [ggml-org's GGUF conversion](https://huggingface.co/ggml-org/embeddinggemma-2-GGUF) provides the model files used here.
-- [llama.cpp](https://github.com/ggml-org/llama.cpp) provides model execution under the MIT License.
-- [Parakeet Ultra](https://huggingface.co/moondream/parakeet-ultra), by Moondream (post-trained from NVIDIA's
-  Parakeet TDT 0.6B v3), writes down speech under CC-BY-4.0, in
+## Credits
+
+- [EmbeddingGemma 2](https://huggingface.co/google/embeddinggemma-2), by Google DeepMind, finds files by meaning, under
+  the Apache License 2.0, in [ggml-org's GGUF conversion](https://huggingface.co/ggml-org/embeddinggemma-2-GGUF).
+- [llama.cpp](https://github.com/ggml-org/llama.cpp), by the ggml authors, runs it, under the MIT License.
+- [Parakeet Ultra](https://huggingface.co/moondream/parakeet-ultra), by Moondream, post-trained from NVIDIA's Parakeet
+  TDT 0.6B v3, writes down speech, under CC BY 4.0, in
   [FluidInference's Core ML conversion](https://huggingface.co/FluidInference/parakeet-ultra-coreml).
-- [FluidAudio](https://github.com/FluidInference/FluidAudio), by FluidInference, runs it on the Neural Engine under the
+- [FluidAudio](https://github.com/FluidInference/FluidAudio), by FluidInference, runs it on the Neural Engine, under the
   Apache License 2.0.
 
-sift-it uses the [MIT License](LICENSE). The license preserves DigUp's copyright notice alongside the sift-it copyright notice.
-Each release's archive carries THIRD_PARTY_NOTICES: everything built into `sift-it` and `sift-it-transcribe`
-(llama.cpp, FluidAudio and the Rust crates), with its license text. `scripts/notices.py` writes it after a build.
-The copied reference files also include [DigUp's original MIT notice](tests/reference/LICENSE).
+Each release carries THIRD_PARTY_NOTICES, with the license of everything built into `sift-it` and
+`sift-it-transcribe`: llama.cpp, FluidAudio and the Rust crates (`scripts/notices.py` writes it).
 Gemma is a trademark of Google LLC.
+
+## License
+
+[MIT](LICENSE).
