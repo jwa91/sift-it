@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com); versions follow
 [SemVer](https://semver.org).
 
+## [Unreleased]
+
+### Changed
+
+- On battery at `indexing.on_battery: words` (the default), and in Low Power Mode, the OCR round goes on with the words
+  round: neither needs a model, and together they make every file findable by its exact words, the text on screenshots
+  and scans included. The rounds that need a model still wait for a charger.
+
 ## [0.4.0] — 2026-10-25
 
 Indexing in rounds: every file is found by its words within seconds of choosing the folders, and its meaning follows a

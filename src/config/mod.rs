@@ -272,7 +272,8 @@ impl Default for Indexing {
 pub enum OnBattery {
     /// Everything goes on.
     All,
-    /// The words round, and new files through all their rounds; the rest waits for a charger.
+    /// Every file's exact words (the words and OCR rounds, no model), and new files through all their rounds; the rest
+    /// waits for a charger.
     #[default]
     Words,
     /// Nothing goes on until there's a charger.

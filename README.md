@@ -221,8 +221,9 @@ depth, or let them run.
 sift-it skips hidden folders, nested `~/Library` folders, app bundles, packages, dependency folders, and build folders.
 It also skips recognized secret files and iCloud files that exist only in the cloud.
 Inside code projects, it reads pictures, PDFs, and recordings unless you enable code indexing.
-On battery, the words of new and changed files go on, and the rounds that need a model wait for a charger
-(`indexing.on_battery`: `words`, `all` or `none`). In Low Power Mode it's `words` at most.
+On battery, every file's words and the text on screenshots and scans go on, new and changed files go through every
+round, and the rounds that need a model wait for a charger (`indexing.on_battery`: `words`, `all` or `none`). In Low
+Power Mode it's `words` at most.
 
 ## Manage the index
 
