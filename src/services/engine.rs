@@ -177,7 +177,9 @@ impl Core {
             meaning: Mutex::new(Loaded { meaning: Meaning::Unloaded, generation: 0 }),
             loaded: Condvar::new(),
             cache: Mutex::new(HashMap::new()),
-            config: Mutex::new((config_modified(), Config::load()?)),
+            // One that can't be read doesn't keep the engine from starting: it searches as by default until `config`
+            // sets it right, and the indexer's status says what's wrong with it.
+            config: Mutex::new((config_modified(), Config::load().unwrap_or_default())),
             events,
         }))
     }

@@ -530,7 +530,7 @@ fn status(json: bool) -> Result<()> {
         index.queues()?.into_iter().map(|(round, new, old)| resources::Queue { round, new, old }).collect();
     let missing = resources::missing();
     let conditions = resources::Conditions { power: resources::power(), pressure: adapters::macos::pressure::level() };
-    let plan = resources::Plan::of(&config.indexing, conditions, &queues, &missing);
+    let plan = resources::Plan::of(&config.indexing, conditions, &queues, &missing, &[]);
     let rounds = match &indexer {
         Some(indexer) => indexer.rounds.clone(),
         None => ingest::progress::statuses(&index.rounds()?, &plan, |_| None),

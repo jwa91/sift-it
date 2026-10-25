@@ -370,13 +370,19 @@ impl Indexer {
                     }
                     let queues: Vec<Queue> =
                         self.index.queues()?.into_iter().map(|(round, new, old)| Queue { round, new, old }).collect();
-                    let plan = Plan::of(&config.indexing, facts.conditions, &queues, &run.missing);
+                    // What's loaded: what the plan loaded, and the text model if it's still there from before.
+                    let mut held = run.plan.tools.clone();
+                    if self.embed.loaded() && !held.contains(&Tool::TextModel) {
+                        held.push(Tool::TextModel);
+                    }
+                    let plan = Plan::of(&config.indexing, facts.conditions, &queues, &run.missing, &held);
                     if shape(&plan) != shape(&run.plan) && !plan.runs.is_empty() {
                         let rounds = plan.runs.iter().map(|running| running.round).collect();
                         on_event(Event::Plan { rounds, readers: plan.readers, waiting: plan.waiting() });
                     }
-                    lanes[WORDS].allow(plan.readers);
-                    lanes[MEDIA].allow(plan.readers);
+                    let [words, media] = plan.lanes();
+                    lanes[WORDS].allow(words);
+                    lanes[MEDIA].allow(media);
                     progress.follow(&plan, Instant::now());
                     run.plan = plan;
                     run.planned = Some(Instant::now());
@@ -394,6 +400,7 @@ impl Indexer {
                     return Err(Stuck(work.file.path).into());
                 }
                 self.switch_gpu(&mut run, &lanes[MEDIA]);
+                self.release_text_model(&run);
                 let handed = self.hand_out(&mut run, &lanes)?;
                 let listened = self.speech_lane(&mut run, &doorbell, progress, on_event)?;
                 // What the media lane handed over, a piece from each of its threads in turn, for as long as there's
@@ -451,9 +458,12 @@ impl Indexer {
             }
         })();
         drop(lanes);
-        // The pictures and sound in hand are dropped: their items are read again later. The encoders go, and so do
-        // the rounds' clocks, until they run again.
+        // The pictures and sound in hand are dropped: their items are read again later. The encoders go, the text
+        // model too when the plan had no room for it, and so do the rounds' clocks, until they run again.
         self.embed.release_encoders();
+        if !run.plan.tools.contains(&Tool::TextModel) {
+            self.embed.release();
+        }
         progress.follow(&Plan::default(), Instant::now());
         let outcome = match run.speech.take() {
             // The speech lane stops after the stretch it's on, which is stored: the file goes on from there.
@@ -485,7 +495,7 @@ impl Indexer {
                 run.in_hand.remove(&key);
             }
             // What it has in hand stops at its next checkpoint.
-            run.stop(|round| round == gpu);
+            run.stop(|work| work.round == gpu);
             if run.in_hand.keys().any(|(_, round)| *round == gpu) {
                 return;
             }
@@ -494,19 +504,27 @@ impl Indexer {
         run.gpu = wanted;
     }
 
+    /// The text model goes when the plan has no room for it, once the GPU's round has nothing in hand that needs it.
+    fn release_text_model(&mut self, run: &Run) {
+        if run.gpu.is_none() && !run.plan.tools.contains(&Tool::TextModel) && self.embed.loaded() {
+            self.embed.release();
+        }
+    }
+
     /// Hands the lanes the next items of the rounds the plan runs on them, new files' first. True when it handed out
     /// any.
     fn hand_out(&mut self, run: &mut Run, lanes: &[Lane; 3]) -> Result<bool> {
         let mut handed = false;
-        // Items of rounds that left the plan come back, or stop at their next checkpoint.
+        // Items the plan no longer lets go on come back, or stop at their next checkpoint: their round left it, or
+        // runs for new files' work only (on battery).
         for lane in lanes {
             let plan = &run.plan;
-            for key in lane.take_back(|item| plan.runs(item.work.round).is_none()) {
+            for key in lane.take_back(|item| !plan.lets(item.work.round, item.work.new)) {
                 run.in_hand.remove(&key);
             }
         }
         let plan = run.plan.clone();
-        run.stop(|round| plan.runs(round).is_none());
+        run.stop(|work| !plan.lets(work.round, work.new));
         let runs: Vec<_> = run.plan.runs.clone();
         for running in runs {
             let Some(at) = lane_of(running.round) else { continue };
@@ -538,7 +556,8 @@ impl Indexer {
     }
 
     /// The speech lane, as the plan says: started for its first file, and stopped (its helper with it) when speech
-    /// leaves the plan or its helper does. True when anything happened.
+    /// leaves the plan, the plan no longer lets a file it has go on (on battery), or its helper stops. True when
+    /// anything happened.
     fn speech_lane(
         &mut self,
         run: &mut Run,
@@ -546,7 +565,9 @@ impl Indexer {
         progress: &mut Progress,
         on_event: &mut dyn FnMut(Event),
     ) -> Result<bool> {
-        if run.plan.runs(Round::Speech).is_none() {
+        let plan = &run.plan;
+        let lets = |lane: &Speech| lane.files().all(|work| plan.lets(Round::Speech, work.new));
+        if plan.runs(Round::Speech).is_none() || run.speech.as_ref().is_some_and(|lane| !lets(lane)) {
             if let Some(lane) = run.speech.take() {
                 self.finish_listening(lane, on_event)?;
                 return Ok(true);
@@ -701,10 +722,10 @@ fn shape(plan: &Plan) -> (Vec<Round>, usize, Option<Wait>) {
 }
 
 impl Run {
-    /// Stops the items in hand of the rounds `which` says at their next checkpoint.
-    fn stop(&self, which: impl Fn(Round) -> bool) {
-        for ((_, round), (_, stop)) in &self.in_hand {
-            if which(*round) {
+    /// Stops the items in hand that `which` says at their next checkpoint.
+    fn stop(&self, which: impl Fn(&Work) -> bool) {
+        for (work, stop) in self.in_hand.values() {
+            if which(work) {
                 stop.store(true, Ordering::Relaxed);
             }
         }

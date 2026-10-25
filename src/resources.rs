@@ -191,32 +191,50 @@ pub struct Running {
     pub new_only: bool,
 }
 
-/// What runs side by side now.
+/// What runs side by side now, and what's loaded for it.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Plan {
     /// The budget, in bytes.
     pub memory: u64,
-    /// The rounds that run, new files' first, then in order.
+    /// The rounds that run: new files' first, then those whose tools are loaded, then in order.
     pub runs: Vec<Running>,
     /// The rounds with work that waits, and for what.
     pub waits: Vec<(Round, Wait)>,
-    /// Files read at once.
+    /// The tools loaded: the runs', and the text model while there's room for it.
+    pub tools: Vec<Tool>,
+    /// Files read at once, by the words lane and the media lane together.
     pub readers: usize,
 }
 
+/// Whether a round reads files on a lane of its own (schedule.rs): words', and the GPU's pictures or sound. Each such
+/// lane that runs has a reader at least.
+fn reads(round: Round) -> bool {
+    matches!(round, Round::Words | Round::Pictures | Round::Sound)
+}
+
 impl Plan {
-    /// The plan for `queues` (the rounds with work), under `conditions`, with the tools in `missing` not there.
-    pub fn of(indexing: &config::Indexing, conditions: Conditions, queues: &[Queue], missing: &[Tool]) -> Self {
+    /// The plan for `queues` (the rounds with work), under `conditions`, with the tools in `missing` not there and
+    /// those in `held` loaded now.
+    pub fn of(
+        indexing: &config::Indexing,
+        conditions: Conditions,
+        queues: &[Queue],
+        missing: &[Tool],
+        held: &[Tool],
+    ) -> Self {
         let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
         let budget = bytes(indexing.memory_mb, INGEST_SHARE);
-        Self::within(budget, cores, indexing.on_battery, conditions, queues, missing)
+        Self::within(budget, cores, indexing.on_battery, conditions, queues, missing, held)
     }
 
-    /// The rounds with work are taken new files' first, then in their order, and each joins when it can run beside
-    /// those before it, and its tools fit in `budget` beside theirs: the first that needs a tool always runs, whatever
-    /// the budget, since indexing never stops for want of memory. On a memory-pressure warning, only one tool is
-    /// loaded at a time; when it's critical, nothing runs. On battery, `on_battery` says what goes on. Reading takes
-    /// what's left of the budget, at most a third of the cores (two to four), down to one.
+    /// The rounds with work are taken new files' first, then those whose tools are loaded (`held`), so a round works
+    /// through its queue once its tools are loaded, then the rest in their order. Each joins when it can run beside
+    /// those before it, and its tools fit in `budget` beside theirs: words always run, and the first that needs a tool
+    /// too, whatever the budget, since indexing never stops for want of memory. The text model stays loaded while it
+    /// fits beside them (the other rounds bring it passages), and goes when it doesn't. On a memory-pressure warning,
+    /// only one tool is loaded at a time; when it's critical, nothing runs. On battery, `on_battery` says what goes on.
+    /// Each lane that reads has a reader; more read at once with what's left of the budget, up to a third of the cores
+    /// (two to four) in all.
     fn within(
         budget: u64,
         cores: usize,
@@ -224,10 +242,15 @@ impl Plan {
         conditions: Conditions,
         queues: &[Queue],
         missing: &[Tool],
+        held: &[Tool],
     ) -> Self {
-        let mut plan = Plan { memory: budget, readers: 1, ..Default::default() };
+        let mut plan = Plan { memory: budget, ..Default::default() };
+        let loaded = |round: Round| {
+            let tools = Tool::of(round);
+            !tools.is_empty() && tools.iter().all(|tool| held.contains(tool))
+        };
         let mut queues: Vec<Queue> = queues.to_vec();
-        queues.sort_by_key(|queue| (!queue.new, queue.round));
+        queues.sort_by_key(|queue| (!queue.new, !loaded(queue.round), queue.round));
         // What power lets go on: all of a round's work, or only new files'.
         let all = |round: Round| match (conditions.power, on_battery) {
             (Power::Charger, _) | (Power::Battery, OnBattery::All) => true,
@@ -236,8 +259,9 @@ impl Plan {
         };
         let new_only = on_battery != OnBattery::None;
         let one_tool = conditions.pressure == Pressure::Warning;
-        let mut loaded: Vec<Tool> = Vec::new();
+        // The first reader is always counted: it reads for OCR and speech, too.
         let mut used = READER;
+        let mut reading = 0;
         for queue in queues {
             let round = queue.round;
             let runs = all(round) || (queue.new && new_only);
@@ -254,25 +278,51 @@ impl Plan {
                 plan.waits.push((round, wait));
                 continue;
             }
-            let extra: Vec<Tool> = Tool::of(round).iter().copied().filter(|tool| !loaded.contains(tool)).collect();
-            let more: u64 = extra.iter().map(|tool| tool.memory()).sum();
+            let extra: Vec<Tool> = Tool::of(round).iter().copied().filter(|tool| !plan.tools.contains(tool)).collect();
+            let reader = if reads(round) && reading > 0 { READER } else { 0 };
+            let more = extra.iter().map(|tool| tool.memory()).sum::<u64>() + reader;
             let beside = plan.runs.iter().all(|running| together(running.round, round));
-            let fits = extra.is_empty() || loaded.is_empty() || (!one_tool && used + more <= budget);
+            let fits = extra.is_empty() || plan.tools.is_empty() || (!one_tool && used + more <= budget);
             if !(beside && fits) {
                 plan.waits.push((round, Wait::Turn));
                 continue;
             }
             plan.runs.push(Running { round, new_only: !all(round) });
-            loaded.extend(extra);
+            plan.tools.extend(extra);
             used += more;
+            reading += usize::from(reads(round));
             if queue.old && !all(round) {
                 // The rest of it waits for a charger.
                 plan.waits.push((round, Wait::Charger));
             }
         }
-        let most = (cores / 3).clamp(2, 4);
-        plan.readers = if one_tool { 1 } else { ((budget.saturating_sub(used) / READER) as usize + 1).clamp(1, most) };
+        let text = Tool::TextModel;
+        if held.contains(&text) && !plan.tools.contains(&text) && !one_tool && used + text.memory() <= budget {
+            plan.tools.push(text);
+            used += text.memory();
+        }
+        let (least, most) = (reading.max(1), (cores / 3).clamp(2, 4));
+        let more = if one_tool { 0 } else { (budget.saturating_sub(used) / READER) as usize };
+        plan.readers = (least + more).min(most).max(least);
         plan
+    }
+
+    /// The readers of the words lane and of the media lane: all of them for the one that runs, and when both do, half
+    /// each (the words lane's rounded up).
+    pub fn lanes(&self) -> [usize; 2] {
+        let words = self.runs(Round::Words).is_some();
+        let media = self.runs.iter().any(|running| matches!(running.round, Round::Pictures | Round::Sound));
+        match (words, media) {
+            (true, true) => [self.readers - self.readers / 2, (self.readers / 2).max(1)],
+            (true, false) => [self.readers, 0],
+            (false, true) => [0, self.readers],
+            (false, false) => [0, 0],
+        }
+    }
+
+    /// Whether the plan lets this round's work of a file go on: the round runs, for all its work or new files'.
+    pub fn lets(&self, round: Round, new: bool) -> bool {
+        self.runs(round).is_some_and(|running| new || !running.new_only)
     }
 
     /// Whether `round` runs, for all of its work or new files'.
@@ -362,10 +412,19 @@ mod tests {
         rounds.iter().map(|&round| Queue { round, new: false, old: true }).collect()
     }
 
-    /// What runs, and the readers, for these rounds with work at `mb` MB on ten cores.
+    /// The plan for these rounds with work at `mb` MB on ten cores, with the tools in `held` loaded.
+    fn with(mb: u64, conditions: Conditions, queues: &[Queue], held: &[Tool]) -> Plan {
+        Plan::within(mb * MB, 10, OnBattery::Words, conditions, queues, &[], held)
+    }
+
+    /// What runs, and the readers, for these rounds with work at `mb` MB on ten cores, with nothing loaded yet.
     fn plan(mb: u64, conditions: Conditions, queues: &[Queue]) -> (Vec<Round>, usize) {
-        let plan = Plan::within(mb * MB, 10, OnBattery::Words, conditions, queues, &[]);
-        (plan.runs.iter().map(|running| running.round).collect(), plan.readers)
+        let plan = with(mb, conditions, queues, &[]);
+        (rounds(&plan), plan.readers)
+    }
+
+    fn rounds(plan: &Plan) -> Vec<Round> {
+        plan.runs.iter().map(|running| running.round).collect()
     }
 
     use Round::*;
@@ -377,7 +436,7 @@ mod tests {
         assert_eq!(plan(768, CALM, &queues(&EVERYTHING)), (vec![Words, Text], 1));
         assert_eq!(plan(1024, CALM, &queues(&[Pictures, Sound, Speech])), (vec![Pictures], 1));
         // More: the GPU with one encoder, and OCR or speech beside it on the Neural Engine.
-        assert_eq!(plan(1536, CALM, &queues(&EVERYTHING)), (vec![Words, Text, Ocr, Pictures], 1));
+        assert_eq!(plan(1536, CALM, &queues(&[Text, Ocr, Pictures, Sound, Speech])), (vec![Text, Ocr, Pictures], 1));
         assert_eq!(plan(2048, CALM, &queues(&[Text, Pictures, Sound, Speech])), (vec![Text, Pictures, Speech], 1));
         // 4 GB: every chip at work. The GPU still takes pictures and sound in turn.
         assert_eq!(plan(4096, CALM, &queues(&EVERYTHING)), (vec![Words, Text, Ocr, Pictures, Speech], 3));
@@ -403,7 +462,7 @@ mod tests {
         work[0].new = true;
         assert_eq!(plan(8192, warning, &work), (vec![Pictures, Text], 1));
         let critical = Conditions { pressure: Pressure::Critical, ..CALM };
-        let stopped = Plan::within(8192 * MB, 10, OnBattery::All, critical, &queues(&EVERYTHING), &[]);
+        let stopped = Plan::within(8192 * MB, 10, OnBattery::All, critical, &queues(&EVERYTHING), &[], &[]);
         assert!(stopped.runs.is_empty());
         assert_eq!(stopped.waits_for(), Some(Wait::Memory));
     }
@@ -413,24 +472,81 @@ mod tests {
         let battery = Conditions { power: Power::Battery, ..CALM };
         let mut work = queues(&[Words, Text, Pictures, Speech]);
         work[2].new = true;
-        let words = Plan::within(4096 * MB, 10, OnBattery::Words, battery, &work, &[]);
+        let words = Plan::within(4096 * MB, 10, OnBattery::Words, battery, &work, &[], &[]);
         let runs: Vec<Running> = words.runs.clone();
         assert_eq!(runs, [Running { round: Pictures, new_only: true }, Running { round: Words, new_only: false }]);
         assert!(words.waits.contains(&(Text, Wait::Charger)) && words.waits.contains(&(Pictures, Wait::Charger)));
-        let all = Plan::within(4096 * MB, 10, OnBattery::All, battery, &work, &[]);
+        let all = Plan::within(4096 * MB, 10, OnBattery::All, battery, &work, &[], &[]);
         assert_eq!(all.runs.len(), 4);
-        let none = Plan::within(4096 * MB, 10, OnBattery::None, battery, &work, &[]);
+        let none = Plan::within(4096 * MB, 10, OnBattery::None, battery, &work, &[], &[]);
         assert!(none.runs.is_empty());
         assert_eq!(none.waits_for(), Some(Wait::Charger));
         // Low Power Mode is `words` at most.
         let low = Conditions { power: Power::LowPowerMode, ..CALM };
-        let low = Plan::within(4096 * MB, 10, OnBattery::All, low, &work, &[]);
-        assert_eq!(low.runs.iter().map(|running| running.round).collect::<Vec<_>>(), [Pictures, Words]);
+        let low = Plan::within(4096 * MB, 10, OnBattery::All, low, &work, &[], &[]);
+        assert_eq!(rounds(&low), [Pictures, Words]);
+        // What it lets go on: words, and the new file's pictures.
+        assert!(words.lets(Words, false) && words.lets(Pictures, true));
+        assert!(!words.lets(Pictures, false) && !words.lets(Speech, true));
+    }
+
+    #[test]
+    fn a_loaded_round_works_through_its_queue() {
+        use Tool::*;
+        // At 1 GB speech and the text model don't fit side by side. Before either is loaded, text goes first, as the
+        // rounds go; once speech is loaded, it goes on through its queue, and the passages it brings wait their turn.
+        let work = queues(&[Text, Speech]);
+        assert_eq!(rounds(&with(1024, CALM, &work, &[])), [Text]);
+        let speaking = with(1024, CALM, &work, &[SpeechModel]);
+        assert_eq!(
+            (rounds(&speaking), speaking.waits, speaking.tools),
+            (vec![Speech], vec![(Text, Wait::Turn)], vec![SpeechModel])
+        );
+        assert_eq!(rounds(&with(1024, CALM, &queues(&[Text]), &[SpeechModel])), [Text]);
+        // At 2 GB (an 8 GB Mac at auto), OCR and speech share the Neural Engine, and the text model doesn't fit beside
+        // them: it waits for one of them to be done.
+        let both = with(2048, CALM, &queues(&[Text, Ocr, Speech]), &[TextRecognition, SpeechModel]);
+        assert_eq!((rounds(&both), both.tools), (vec![Ocr, Speech], vec![TextRecognition, SpeechModel]));
+        assert_eq!(rounds(&with(2048, CALM, &queues(&[Text, Speech]), &[SpeechModel])), [Speech, Text]);
+        // On the GPU, sound keeps it until its queue is done, and pictures wait.
+        let sound = with(4096, CALM, &queues(&[Pictures, Sound]), &[TextModel, AudioEncoder]);
+        assert_eq!(rounds(&sound), [Sound]);
+        // A new file's work goes first all the same.
+        let mut work = queues(&[Text, Speech]);
+        work[0].new = true;
+        assert_eq!(rounds(&with(1024, CALM, &work, &[SpeechModel])), [Text]);
+    }
+
+    #[test]
+    fn the_text_model_counts_while_it_is_loaded() {
+        use Tool::*;
+        // It stays while it fits beside what runs (the rounds bring it passages)...
+        let roomy = with(4096, CALM, &queues(&[Speech]), &[TextModel, SpeechModel]);
+        assert_eq!(roomy.tools, [SpeechModel, TextModel]);
+        // ...and goes when it doesn't, or on a memory-pressure warning.
+        assert_eq!(with(1200, CALM, &queues(&[Speech]), &[TextModel, SpeechModel]).tools, [SpeechModel]);
+        let warning = Conditions { pressure: Pressure::Warning, ..CALM };
+        assert_eq!(with(8192, warning, &queues(&[Speech]), &[TextModel, SpeechModel]).tools, [SpeechModel]);
+        // Nothing else that's loaded stays without its round.
+        assert_eq!(with(8192, CALM, &queues(&[Text]), &[TextModel, AudioEncoder, SpeechModel]).tools, [TextModel]);
+    }
+
+    #[test]
+    fn each_lane_that_reads_counts_its_readers() {
+        // Words and pictures read on lanes of their own: the second lane's reader counts in the budget.
+        let tight = with(1100, CALM, &queues(&[Words, Text, Pictures]), &[]);
+        assert_eq!((rounds(&tight), tight.lanes()), (vec![Words, Text], [3, 0]));
+        let roomy = with(4096, CALM, &queues(&[Words, Text, Pictures]), &[]);
+        assert_eq!((rounds(&roomy), roomy.readers, roomy.lanes()), (vec![Words, Text, Pictures], 3, [2, 1]));
+        // Whatever the budget, each has one.
+        let least = with(0, CALM, &queues(&[Words, Pictures]), &[]);
+        assert_eq!((rounds(&least), least.lanes()), (vec![Words, Pictures], [1, 1]));
     }
 
     #[test]
     fn a_round_without_its_model_waits_for_it() {
-        let plan = Plan::within(4096 * MB, 10, OnBattery::Words, CALM, &queues(&[Words, Speech]), &[Tool::SpeechModel]);
+        let missing = [Tool::SpeechModel];
+        let plan = Plan::within(4096 * MB, 10, OnBattery::Words, CALM, &queues(&[Words, Speech]), &missing, &[]);
         assert_eq!(plan.runs, [Running { round: Words, new_only: false }]);
         assert_eq!(plan.waits, [(Speech, Wait::Model)]);
     }

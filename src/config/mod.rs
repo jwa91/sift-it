@@ -72,18 +72,28 @@ pub struct Config {
 }
 
 impl Config {
+    /// config.json, or the defaults when there's none. An error names the key whose value doesn't do, and says what
+    /// would.
     pub fn load() -> Result<Self> {
-        let path = config_path();
-        match std::fs::read(&path) {
-            Ok(bytes) => {
-                let mut config: Config =
-                    serde_json::from_slice(&bytes).with_context(|| format!("can't read {}", path.display()))?;
-                config.check().with_context(|| format!("can't read {}", path.display()))?;
-                Ok(config)
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(error) => Err(error).with_context(|| format!("can't read {}", path.display())),
+        Self::read(&config_path())
+    }
+
+    fn read(path: &Path) -> Result<Self> {
+        match read_tree(path)? {
+            Some(tree) => Self::from_tree(tree).with_context(|| format!("can't read {}", path.display())),
+            None => Ok(Self::default()),
         }
+    }
+
+    /// A config from its JSON. An error names the key whose value doesn't do (the section, for a key it doesn't have).
+    fn from_tree(tree: Value) -> Result<Self> {
+        let mut config: Config =
+            serde_path_to_error::deserialize(tree).map_err(|error| match error.path().iter().next() {
+                Some(_) => anyhow!("{}: {}", error.path(), error.inner()),
+                None => anyhow!("{}", error.inner()),
+            })?;
+        config.check()?;
+        Ok(config)
     }
 
     pub fn save(&self) -> Result<()> {
@@ -105,23 +115,8 @@ impl Config {
     /// back to its default.
     pub fn set(&mut self, key: &str, value: &str) -> Result<()> {
         let mut tree = serde_json::to_value(&*self)?;
-        let parsed: Value = serde_json::from_str(value).unwrap_or_else(|_| Value::String(value.to_string()));
-        let parts: Vec<&str> = key.split('.').collect();
-        let (last, sections) = parts.split_last().ok_or_else(|| anyhow!("which key?"))?;
-        let mut node = &mut tree;
-        for part in sections {
-            let object = node.as_object_mut().ok_or_else(|| anyhow!("{key}: {part} isn't a section"))?;
-            node = object.entry(part.to_string()).or_insert_with(|| json!({}));
-        }
-        let object = node.as_object_mut().ok_or_else(|| anyhow!("{key} isn't in a section"))?;
-        if parsed.is_null() {
-            object.remove(*last);
-        } else {
-            object.insert(last.to_string(), parsed);
-        }
-        let mut updated: Config = serde_json::from_value(tree).with_context(|| format!("can't set {key}"))?;
-        updated.check()?;
-        *self = updated;
+        edit(&mut tree, key, value)?;
+        *self = Self::from_tree(tree)?;
         Ok(())
     }
 
@@ -272,7 +267,7 @@ impl Default for Indexing {
 }
 
 /// What indexing does on battery. In Low Power Mode, it's `words` at most.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum OnBattery {
     /// Everything goes on.
@@ -282,6 +277,18 @@ pub enum OnBattery {
     Words,
     /// Nothing goes on until there's a charger.
     None,
+}
+
+impl<'de> Deserialize<'de> for OnBattery {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        let value = Value::deserialize(deserializer)?;
+        match value.as_str() {
+            Some("all") => Ok(OnBattery::All),
+            Some("words") => Ok(OnBattery::Words),
+            Some("none") => Ok(OnBattery::None),
+            _ => Err(D::Error::custom(format!(r#"{value} isn't "words", "all" or "none""#))),
+        }
+    }
 }
 
 /// How the engine searches (services/engine.rs).
@@ -298,14 +305,59 @@ pub struct Search {
 }
 
 /// Sets the value at a dotted key in config.json when there's a value, and gives the settings: `sift-it config`, and
-/// the protocol's `config`.
+/// the protocol's `config`. It sets a config.json right that can't be read, too: see `repair`.
 pub fn configure(key: Option<&str>, value: Option<&str>) -> Result<Config> {
-    let mut config = Config::load()?;
-    if let (Some(key), Some(value)) = (key, value) {
-        config.set(key, value)?;
-        config.save()?;
-    }
+    let (Some(key), Some(value)) = (key, value) else { return Config::load() };
+    let mut config = match Config::load() {
+        Ok(config) => config,
+        Err(_) => return repair(&config_path(), key, value),
+    };
+    config.set(key, value)?;
+    config.save()?;
     Ok(config)
+}
+
+/// Sets a key in a config.json that can't be read (a value of another version, a typo made by hand): the value must
+/// do for its key beside the defaults, and goes into the file as it is. Then the file is read, and written out whole,
+/// or the error says which key still doesn't do.
+fn repair(path: &Path, key: &str, value: &str) -> Result<Config> {
+    Config::default().set(key, value)?;
+    let mut tree = read_tree(path)?.unwrap_or_else(|| json!({}));
+    edit(&mut tree, key, value)?;
+    write_atomically(path, &serde_json::to_vec_pretty(&tree)?)?;
+    let config = Config::read(path).with_context(|| format!("{key} is set"))?;
+    write_atomically(path, &serde_json::to_vec_pretty(&config)?)?;
+    Ok(config)
+}
+
+/// config.json's JSON, or None when there's none.
+fn read_tree(path: &Path) -> Result<Option<Value>> {
+    match std::fs::read(path) {
+        Ok(bytes) => {
+            Ok(Some(serde_json::from_slice(&bytes).with_context(|| format!("can't read {}", path.display()))?))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("can't read {}", path.display())),
+    }
+}
+
+/// Sets the value at a dotted key in config.json's JSON, from JSON or else as a string, or takes it out for `null`.
+fn edit(tree: &mut Value, key: &str, value: &str) -> Result<()> {
+    let parsed: Value = serde_json::from_str(value).unwrap_or_else(|_| Value::String(value.to_string()));
+    let parts: Vec<&str> = key.split('.').collect();
+    let (last, sections) = parts.split_last().ok_or_else(|| anyhow!("which key?"))?;
+    let mut node = tree;
+    for part in sections {
+        let object = node.as_object_mut().ok_or_else(|| anyhow!("{key}: {part} isn't a section"))?;
+        node = object.entry(part.to_string()).or_insert_with(|| json!({}));
+    }
+    let object = node.as_object_mut().ok_or_else(|| anyhow!("{key} isn't in a section"))?;
+    if parsed.is_null() {
+        object.remove(*last);
+    } else {
+        object.insert(last.to_string(), parsed);
+    }
+    Ok(())
 }
 
 /// An amount of memory in MB, or `auto`: what it is then depends on the Mac (resources.rs).
@@ -332,7 +384,7 @@ impl<'de> Deserialize<'de> for Budget {
             other => other
                 .as_u64()
                 .map(Budget::Mb)
-                .ok_or_else(|| D::Error::custom(format!("{other}: a number of MB, or \"auto\""))),
+                .ok_or_else(|| D::Error::custom(format!(r#"{other} isn't a number of MB or "auto""#))),
         }
     }
 }
@@ -394,6 +446,31 @@ mod tests {
         assert!(config.set("ranking.shown_lyft", "0.1").is_err());
         assert!(config.set("sources.kinds.image", r#"["mp4"]"#).is_err());
         assert!(config.set("search.memory_mb", "lots").is_err());
+    }
+
+    /// A config.json written by another version, or by hand, says which key doesn't do, and `sift-it config` sets it
+    /// right.
+    #[test]
+    fn a_config_that_cant_be_read_says_why_and_is_set_right() {
+        let folder = std::env::temp_dir().join(format!("sift-it-config-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let path = folder.join("config.json");
+        let error = |result: Result<Config>| format!("{:#}", result.unwrap_err());
+        // `on_battery` was true or false before it said what goes on.
+        std::fs::write(&path, r#"{"indexing": {"on_battery": true, "quiet_ms": 500}}"#).unwrap();
+        let read = error(Config::read(&path));
+        assert!(read.ends_with(r#"indexing.on_battery: true isn't "words", "all" or "none""#), "{read}");
+        // A value that doesn't do for its key isn't written; one that does is, and the rest stays as it was.
+        assert!(repair(&path, "indexing.on_battery", "sometimes").is_err());
+        let config = repair(&path, "indexing.on_battery", "all").unwrap();
+        assert_eq!((config.indexing.on_battery, config.indexing.quiet_ms), (OnBattery::All, 500));
+        assert_eq!(Config::read(&path).unwrap(), config);
+        // With two that don't do, each is set right in turn.
+        std::fs::write(&path, r#"{"indexing": {"on_battery": false}, "ranking": {"shown_lyft": 0.1}}"#).unwrap();
+        let set = error(repair(&path, "indexing.on_battery", "null"));
+        assert!(set.starts_with("indexing.on_battery is set") && set.contains("unknown field `shown_lyft`"), "{set}");
+        assert_eq!(repair(&path, "ranking.shown_lyft", "null").unwrap(), Config::default());
+        std::fs::remove_dir_all(&folder).unwrap();
     }
 
     #[test]

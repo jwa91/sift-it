@@ -176,7 +176,8 @@ Ends `sift-it serve` once the requests before it are answered: `{"id": 10, "ok":
 **Stats:** `files`, `done`, `pending`, `failed`, `segments`, `vectors`, `by_kind` (counts by kind), `bytes` (the
 index on disk).
 
-**IndexerStatus:** `pid`, `state`, `detail` (what the work that's left waits for: a charger, memory, a model),
+**IndexerStatus:** `pid`, `state`, `detail` (what the work that's left waits for: a charger, memory, a model, or a
+config.json that can be read, with the key that keeps it from it),
 `rounds` (a RoundStatus for each round this index has had work in, in their order), `current` (the file it did last),
 `updated` (seconds since 1970) and `last_error`. `state` is `starting`, `syncing`, `indexing` (its rounds say how
 far), `waiting` (nothing can run: `detail` says why), `paused`, `idle` or `stopped`. The indexer also writes it to
