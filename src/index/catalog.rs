@@ -9,7 +9,7 @@ use anyhow::{Context, Result, bail};
 use embedder::DIM;
 use protocol::{Kind, Round, Segment, Stats};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, Transaction, TransactionBehavior, params};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 /// An index of another version is dropped and made again.
@@ -124,6 +124,13 @@ impl Reader {
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 
+    /// The files whose work waits for their download.
+    pub fn waiting_for_download(&self) -> Result<HashSet<i64>> {
+        let mut statement = self.conn.prepare_cached("SELECT DISTINCT file_id FROM work WHERE state = 'cloud'")?;
+        let ids = statement.query_map([], |row| row.get(0))?;
+        Ok(ids.collect::<std::result::Result<_, _>>()?)
+    }
+
     /// The next of a round's work, at most `limit`: new files' first, then the cheapest, then the newest. With
     /// `new_only`, new files' alone. A file's sound waits for its speech (SOUND_WAITS).
     pub fn next(&self, round: Round, new_only: bool, limit: usize) -> Result<Vec<Work>> {
@@ -162,12 +169,13 @@ impl Reader {
         Ok(queues)
     }
 
-    /// How far each round is, for those with any work in this index.
+    /// How far each round is, for those with any work in this index. Work that waits for a file's download isn't
+    /// counted: a round is done with what it can do.
     pub fn rounds(&self) -> Result<Vec<RoundTotals>> {
         let mut statement = self.conn.prepare_cached(
             "SELECT round, TOTAL(done), TOTAL(amount), COUNT(*) FILTER (WHERE state = 'pending'),
                  COUNT(*) FILTER (WHERE state = 'pending' AND fast), COUNT(*) FILTER (WHERE state = 'failed')
-             FROM work GROUP BY round",
+             FROM work WHERE state <> 'cloud' GROUP BY round",
         )?;
         let mut totals: Vec<RoundTotals> = statement
             .query_map([], |row| {
@@ -272,12 +280,14 @@ impl Reader {
         Ok((!text.is_empty()).then_some(text))
     }
 
-    /// What's in the index. A file is pending while a round has work for it, and failed when one couldn't do it.
+    /// What's in the index. A file is pending while a round has work for it, failed when one couldn't do it, and
+    /// cloud while its work waits for its download.
     pub fn stats(&self) -> Result<Stats> {
         let mut stats = Stats::default();
         let mut statement = self.conn.prepare(
             "SELECT f.kind,
                  CASE WHEN EXISTS (SELECT 1 FROM work WHERE file_id = f.id AND state = 'failed') THEN 'failed'
+                      WHEN EXISTS (SELECT 1 FROM work WHERE file_id = f.id AND state = 'cloud') THEN 'cloud'
                       WHEN EXISTS (SELECT 1 FROM work WHERE file_id = f.id AND state = 'pending') THEN 'pending'
                       ELSE 'done' END,
                  COUNT(*), SUM(f.size)
@@ -293,13 +303,22 @@ impl Reader {
             match state.as_str() {
                 "done" => stats.done += count,
                 "pending" => stats.pending += count,
+                "cloud" => stats.cloud += count,
                 _ => stats.failed += count,
             }
             *stats.by_kind.entry(kind).or_default() += count;
         }
         stats.segments = self.conn.query_row("SELECT COUNT(*) FROM segments", [], |row| row.get(0))?;
-        stats.vectors =
-            self.conn.query_row("SELECT COUNT(*) FROM segments WHERE row IS NOT NULL", [], |row| row.get(0))?;
+        let mut statement = self.conn.prepare(
+            "SELECT f.kind, COUNT(*) FROM segments s JOIN files f ON f.id = s.file_id WHERE s.row IS NOT NULL
+             GROUP BY f.kind",
+        )?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            let count: i64 = row.get(1)?;
+            stats.vectors += count;
+            stats.vectors_by_kind.insert(row.get(0)?, count);
+        }
         Ok(stats)
     }
 
@@ -461,7 +480,7 @@ impl Writer {
              CREATE TABLE IF NOT EXISTS work (
                  file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
                  round TEXT NOT NULL,                     -- words | text | ocr | pictures | sound | speech
-                 state TEXT NOT NULL DEFAULT 'pending',   -- pending | done | failed
+                 state TEXT NOT NULL DEFAULT 'pending',   -- pending | done | failed | cloud (waits for a download)
                  cost REAL NOT NULL,                      -- what orders the round's queue: cheapest first
                  amount REAL NOT NULL,                    -- how much there is, in the round's unit
                  done REAL NOT NULL DEFAULT 0,            -- how much of it is done
@@ -472,6 +491,7 @@ impl Writer {
                  PRIMARY KEY (file_id, round)
              ) WITHOUT ROWID;
              CREATE INDEX IF NOT EXISTS work_queue ON work(round, fast DESC, cost) WHERE state = 'pending';
+             CREATE INDEX IF NOT EXISTS work_cloud ON work(file_id) WHERE state = 'cloud';
              CREATE TABLE IF NOT EXISTS segments (
                  id INTEGER PRIMARY KEY AUTOINCREMENT,
                  file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
@@ -551,6 +571,37 @@ impl Writer {
             )?;
         }
         recount_text(&self.conn, id, false)
+    }
+
+    /// A file only in iCloud: the work that would read it waits for its download (the text round's has what it needs,
+    /// and goes on). With nothing read of it, it's found by its name meanwhile.
+    pub fn wait_for_download(&self, id: i64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE work SET state = 'cloud' WHERE file_id = ?1 AND state = 'pending' AND round <> 'text'",
+            [id],
+        )?;
+        let unread: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT path FROM files WHERE id = ?1 AND NOT EXISTS (SELECT 1 FROM segments WHERE file_id = ?1)",
+                [id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(path) = unread {
+            placeholder(&self.conn, id, &file_words(Path::new(&path), &stored_info(&self.conn, id)?))?;
+        }
+        Ok(())
+    }
+
+    /// A file that's downloaded again: the work that waited for it goes on (first in every round, when `new`: FSEvents
+    /// said so).
+    pub fn downloaded(&self, id: i64, new: bool) -> Result<()> {
+        self.conn.execute(
+            "UPDATE work SET state = 'pending', fast = max(fast, ?2) WHERE file_id = ?1 AND state = 'cloud'",
+            params![id, new],
+        )?;
+        Ok(())
     }
 
     pub fn remove_file(&self, id: i64) -> Result<()> {
@@ -1094,6 +1145,19 @@ mod tests {
     fn totals(store: &Reader, round: Round) -> (f64, f64, usize) {
         let totals = store.rounds().unwrap().into_iter().find(|totals| totals.round == round).unwrap();
         (totals.done, totals.amount, totals.files)
+    }
+
+    #[test]
+    fn stats_count_the_vectors_of_each_kind() {
+        let index = TempIndex::new("vectors-by-kind");
+        let mut store = Writer::open(&index.path).unwrap();
+        add(&mut store, "/folder/a.txt", Kind::Plaintext, vec![("one".into(), Some(unit(1))), ("two".into(), None)]);
+        add(&mut store, "/folder/b.md", Kind::Plaintext, vec![("three".into(), Some(unit(2)))]);
+        add(&mut store, "/folder/c.rs", Kind::Code, vec![("four".into(), Some(unit(3)))]);
+        let stats = store.stats().unwrap();
+        assert_eq!(stats.vectors, 3);
+        assert_eq!(stats.vectors_by_kind, HashMap::from([("plaintext".into(), 2), ("code".into(), 1)]));
+        assert_eq!(stats.by_kind, HashMap::from([("plaintext".into(), 2), ("code".into(), 1)]));
     }
 
     #[test]

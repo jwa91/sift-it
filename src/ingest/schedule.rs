@@ -787,7 +787,8 @@ mod tests {
         let index = Writer::open(&folder.join("index.sqlite")).unwrap();
         for path in [&stuck, &fine] {
             let settings = config.reading.resolve(path, Kind::Plaintext);
-            let found = Found { path: path.clone(), kind: Kind::Plaintext, size: 1, modified: 1.0, settings };
+            let found =
+                Found { path: path.clone(), kind: Kind::Plaintext, size: 1, modified: 1.0, settings, cloud: false };
             index.queue(&found.new_file(), None, 0.0).unwrap();
         }
         let mut indexer = Indexer::new(index).unwrap();
@@ -829,7 +830,8 @@ mod tests {
         let settings = config.reading.resolve(&path, Kind::Plaintext);
         index
             .queue(
-                &Found { path: path.clone(), kind: Kind::Plaintext, size: 24, modified: 1.0, settings }.new_file(),
+                &Found { path: path.clone(), kind: Kind::Plaintext, size: 24, modified: 1.0, settings, cloud: false }
+                    .new_file(),
                 None,
                 0.0,
             )
@@ -869,7 +871,7 @@ mod tests {
             let path = folder.join(format!("note {n}.txt"));
             std::fs::write(&path, format!("note number {n}: the ferry leaves at noon")).unwrap();
             let settings = config.reading.resolve(&path, Kind::Plaintext);
-            let found = Found { path, kind: Kind::Plaintext, size: 40, modified: 1.0, settings };
+            let found = Found { path, kind: Kind::Plaintext, size: 40, modified: 1.0, settings, cloud: false };
             index.queue(&found.new_file(), None, 0.0).unwrap();
         }
         let mut indexer = Indexer::new(index).unwrap();

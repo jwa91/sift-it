@@ -174,7 +174,7 @@ src/
     launchd.rs           installing the LaunchAgents
   adapters/
     macos/               the frameworks: ImageIO, CoreGraphics and Vision (mod.rs), AVFoundation (av.rs), power,
-                         memory pressure (pressure.rs)
+                         memory pressure (pressure.rs), iCloud Drive's files only in the cloud (icloud.rs)
     speech.rs            the helper process
   clients/               the engine's client, the TUI, results in a terminal, previews, opening results, serve
   tools/                 eval, the benches, selftest, estimate

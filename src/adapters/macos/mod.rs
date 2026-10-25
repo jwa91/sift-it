@@ -1,9 +1,11 @@
 //! The Mac's own frameworks, for reading what's in files: ImageIO decodes every picture format macOS knows (HEIC, RAW,
 //! WebP, AVIF…) and writes JPEG previews; CoreGraphics turns pictures and PDF pages into pixels; Vision reads the text
 //! in them. AVFoundation plays recordings and videos (av.rs), IOKit says whether the Mac is on battery (power.rs), and
-//! a dispatch source how short of memory it is (pressure.rs).
+//! a dispatch source how short of memory it is (pressure.rs). iCloud Drive's files that are only in the cloud are left
+//! as they are (icloud.rs).
 
 pub mod av;
+pub mod icloud;
 pub mod power;
 pub mod pressure;
 

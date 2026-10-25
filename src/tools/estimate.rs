@@ -21,6 +21,9 @@ pub struct Estimate {
     pub seconds: u64,
     pub bytes: u64,
     pub by_kind: BTreeMap<&'static str, usize>,
+    /// Of the files, those only in iCloud: found by their names, and read once they're downloaded. They're not in the
+    /// rounds.
+    pub cloud: usize,
     /// The folder can't be read (missing, or macOS privacy settings).
     pub unreadable: bool,
 }
@@ -41,10 +44,14 @@ pub fn estimate(config: &Config, folder: PathBuf) -> Estimate {
     let crawled = crawl::crawl(&single);
     let mut by_kind = BTreeMap::new();
     let mut totals: BTreeMap<Round, (f64, f64)> = BTreeMap::new();
-    let mut bytes = 0;
+    let (mut bytes, mut cloud) = (0, 0);
     for file in &crawled.found {
         bytes += file.size;
         *by_kind.entry(file.kind.as_str()).or_default() += 1;
+        if file.cloud {
+            cloud += 1;
+            continue;
+        }
         for share in shares(file) {
             let (total, seconds) = totals.entry(share.round).or_default();
             *total += share.total;
@@ -69,6 +76,7 @@ pub fn estimate(config: &Config, folder: PathBuf) -> Estimate {
         seconds: seconds.round() as u64,
         bytes,
         by_kind,
+        cloud,
         unreadable: !crawled.unavailable.is_empty(),
     }
 }
@@ -169,11 +177,12 @@ mod tests {
             seconds: 16,
             bytes: 1234,
             by_kind: BTreeMap::from([("audio", 1), ("document", 1)]),
+            cloud: 0,
             unreadable: false,
         };
         assert_eq!(
             serde_json::to_string(&estimate).unwrap(),
-            r#"{"folder":"/Users/me/Documents","files":2,"rounds":[{"round":"words","total":2,"unit":"files","seconds":0},{"round":"speech","total":3600,"unit":"seconds","seconds":16}],"seconds":16,"bytes":1234,"by_kind":{"audio":1,"document":1},"unreadable":false}"#
+            r#"{"folder":"/Users/me/Documents","files":2,"rounds":[{"round":"words","total":2,"unit":"files","seconds":0},{"round":"speech","total":3600,"unit":"seconds","seconds":16}],"seconds":16,"bytes":1234,"by_kind":{"audio":1,"document":1},"cloud":0,"unreadable":false}"#
         );
     }
 }

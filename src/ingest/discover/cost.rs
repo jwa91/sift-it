@@ -71,9 +71,13 @@ pub struct Share {
     pub seconds: f64,
 }
 
-/// What reading a file's words takes, about: what orders the words round's queue.
+/// What reading a file's words takes, about: what orders the words round's queue. Nothing of a file only in iCloud is
+/// read for it: a PDF counts as one page.
 pub fn cost(file: &Found) -> f64 {
-    let pages = || objc2::rc::autoreleasepool(|_| macos::pdf_pages(&file.path)).unwrap_or(1);
+    let pages = || match file.cloud {
+        true => 1,
+        false => objc2::rc::autoreleasepool(|_| macos::pdf_pages(&file.path)).unwrap_or(1),
+    };
     words(file, pages)
 }
 
@@ -90,7 +94,7 @@ fn words(file: &Found, pages: impl FnOnce() -> usize) -> f64 {
 
 /// What a file brings each round, at its depth: what its words are, and then each round it passes through. It looks
 /// into the file as little as it can: a recording's or a video's length and whether it has sound, and a few of a
-/// PDF's pages for whether they're scans.
+/// PDF's pages for whether they're scans. Not for a file only in iCloud: looking into it would download it.
 pub fn shares(file: &Found) -> Vec<Share> {
     let settings = &file.settings;
     let mut found = rounds::Found::default();

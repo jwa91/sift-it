@@ -173,8 +173,10 @@ Ends `sift-it serve` once the requests before it are answered: `{"id": 10, "ok":
 
 **Segment:** `passage`, `page`, `picture`, `ocr`, `sound`, `frame`, `speech`.
 
-**Stats:** `files`, `done`, `pending`, `failed`, `segments`, `vectors`, `by_kind` (counts by kind), `bytes` (the
-index on disk).
+**Stats:** `files`, `done`, `pending`, `failed`, `cloud` (files only in iCloud whose work waits for their download:
+found by their names, or by what was read of them before macOS removed their download), `segments`, `vectors`,
+`by_kind` (files by kind), `vectors_by_kind` (vectors by their file's kind, keyed like `by_kind`; a kind with none
+is left out), `bytes` (the index on disk).
 
 **IndexerStatus:** `pid`, `state`, `detail` (what the work that's left waits for: a charger, memory, a model, or a
 config.json that can be read, with the key that keeps it from it),

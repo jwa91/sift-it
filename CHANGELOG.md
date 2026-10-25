@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com); versions follow
 [SemVer](https://semver.org).
 
+## [Unreleased]
+
+### Changed
+
+- iCloud Drive with Optimize Mac Storage: a file only in the cloud is found by its name, with nothing of it read, and
+  it's read once it's downloaded. A file macOS removes the download of stays in the index as it was, and nothing of it
+  is read again when it's back; work it still had waits for its download. sift-it never downloads a file: reading one
+  that's only in the cloud fails instead, previews included. `cloud` in status counts the files waiting for their
+  download, and `sift-it estimate` counts them apart (`cloud` in its JSON).
+
+### Added
+
+- `vectors_by_kind` in status: the vectors of each kind's files, beside `by_kind`.
+
 ## [0.4.1] — 2026-10-25
 
 ### Changed

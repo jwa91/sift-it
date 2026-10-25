@@ -9,9 +9,10 @@ use super::segment::passages::{self, Form, Text};
 use super::segment::pictures;
 use super::segment::sound::Windows;
 use super::{extract, prepare};
+use crate::adapters::macos::icloud;
 use crate::config::Settings;
 use crate::config::is_pdf;
-use anyhow::Result;
+use anyhow::{Result, bail};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use embedder::AUDIO_RATE;
@@ -114,7 +115,8 @@ pub fn fingerprint(path: &Path, kind: Kind, settings: &Settings) -> String {
 
 /// Reads an item of a file's work in `round` (words, OCR, pictures or sound) into pieces, streamed to `sink`, saying
 /// how far a long one has got at `checkpoint`. A file's words say which rounds it passes through next
-/// (rounds::after_words).
+/// (rounds::after_words). A file only in iCloud isn't read: reading it fails rather than download it, and some
+/// frameworks would say it's empty (AVFoundation, a recording of no length).
 pub fn read(
     round: Round,
     path: &Path,
@@ -124,6 +126,9 @@ pub fn read(
     sink: Sink,
     checkpoint: Checkpoint,
 ) -> Result<Ended> {
+    if icloud::cloud_only_at(path) {
+        bail!("it's only in iCloud");
+    }
     let mut content = Content::new(path, kind, settings, from, sink, checkpoint);
     let mut ended = extract::read(round, path, kind, settings, from, &mut content)?;
     if round == Round::Words {

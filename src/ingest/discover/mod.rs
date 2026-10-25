@@ -2,6 +2,10 @@
 //! each queued for its words with an estimate of what reading them costs (cost.rs); files that are gone leave the
 //! index. `sync` crawls the chosen folders; `sync_paths` looks at just the paths a file-system event named, and what it
 //! queues is new: it goes first in every round it needs.
+//!
+//! A file only in iCloud is never read, and its work waits for its download (Writer::wait_for_download): one never read
+//! is found by its name meanwhile, and one macOS removed the download of keeps what was read of it. Removing the
+//! download keeps its size and time, so when it's back, the same file goes on where it was.
 
 mod cost;
 pub mod crawl;
@@ -78,19 +82,33 @@ fn reconcile(
     new: bool,
 ) -> Result<(usize, usize, usize)> {
     let existing: HashMap<PathBuf, FileRow> = existing.into_iter().map(|row| (row.path.clone(), row)).collect();
+    let waiting = index.waiting_for_download()?;
     let (mut added, mut changed, mut removed) = (0, 0, 0);
     for file in found {
         match existing.get(&file.path) {
             None => {
-                index.queue(&NewFile { new, ..file.new_file() }, None, cost(file))?;
+                queue(index, file, None, new)?;
                 added += 1;
             }
+            // Only in iCloud, and the same file: what was read of it stays, and the rest waits. Whether it's to be read
+            // another way is seen once it's back.
+            Some(row) if file.cloud && !is_edited(row, file) => {
+                if !waiting.contains(&row.id) {
+                    index.wait_for_download(row.id)?;
+                }
+            }
             Some(row) if is_changed(row, file) => {
-                index.queue(&NewFile { new, ..file.new_file() }, Some(row.id), cost(file))?;
+                queue(index, file, Some(row.id), new)?;
                 changed += 1;
             }
-            Some(row) if row.speech != file.speech() => index.set_speech(row.id, file.speech())?,
-            Some(_) => {}
+            Some(row) => {
+                if waiting.contains(&row.id) {
+                    index.downloaded(row.id, new)?;
+                }
+                if row.speech != file.speech() {
+                    index.set_speech(row.id, file.speech())?;
+                }
+            }
         }
     }
     let found: HashSet<&Path> = found.iter().map(|file| file.path.as_path()).collect();
@@ -103,10 +121,117 @@ fn reconcile(
     Ok((added, changed, removed))
 }
 
+/// Queues a file for its words (as a `new` one, first in every round, when FSEvents said it changed). One only in iCloud
+/// waits for its download.
+fn queue(index: &Writer, file: &Found, existing: Option<i64>, new: bool) -> Result<()> {
+    let id = index.queue(&NewFile { new, ..file.new_file() }, existing, cost(file))?;
+    if file.cloud {
+        index.wait_for_download(id)?;
+    }
+    Ok(())
+}
+
+/// Another file than the one indexed: it changed.
+fn is_edited(row: &FileRow, found: &Found) -> bool {
+    row.size != found.size || (row.modified - found.modified).abs() > 0.001 || row.kind != found.kind
+}
+
 /// Changed, or to be read another way.
 fn is_changed(row: &FileRow, found: &Found) -> bool {
-    row.size != found.size
-        || (row.modified - found.modified).abs() > 0.001
-        || row.kind != found.kind
-        || row.reading != found.reading()
+    is_edited(row, found) || row.reading != found.reading()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{Depth, Settings};
+    use crate::index::NewSegment;
+    use crate::index::testing::TempIndex;
+    use protocol::{Kind, Round, Segment};
+    use serde_json::json;
+
+    fn found(path: &str, kind: Kind, cloud: bool) -> Found {
+        Found { path: path.into(), kind, size: 100, modified: 1.0, settings: Settings::BASE, cloud }
+    }
+
+    /// Brings the index in step with `found`, as a crawl does: how many files were added, changed and removed.
+    fn sync(index: &Writer, found: &[Found]) -> (usize, usize, usize) {
+        index.batch(|| reconcile(index, found, index.files()?, |_| false, false)).unwrap()
+    }
+
+    /// The files with `word` in their name or their words.
+    fn with(index: &Writer, word: &str) -> usize {
+        let mut files = HashSet::new();
+        index.word_matches(&[word.to_string()], false, |_, file| files.insert(file) || true).unwrap();
+        files.len()
+    }
+
+    fn passage(text: &str) -> NewSegment {
+        NewSegment { segment: Segment::Passage, text: Some(text.into()), ..Default::default() }
+    }
+
+    #[test]
+    fn a_file_only_in_icloud_is_found_by_its_name_and_read_once_its_downloaded() {
+        let temp = TempIndex::new("cloud-new");
+        let index = Writer::open(&temp.path).unwrap();
+        let notes = found("/iCloud/quokka-notes.txt", Kind::Plaintext, true);
+        assert_eq!(sync(&index, std::slice::from_ref(&notes)), (1, 0, 0));
+        // Nothing is read of it, and indexing has nothing left to do.
+        assert_eq!(with(&index, "quokka"), 1);
+        assert!(index.queues().unwrap().is_empty());
+        assert!(index.rounds().unwrap().is_empty());
+        let stats = index.stats().unwrap();
+        assert_eq!((stats.files, stats.cloud, stats.pending, stats.done), (1, 1, 0, 0));
+        // Downloaded: its words are read, and nothing else about it changed.
+        assert_eq!(sync(&index, &[Found { cloud: false, ..notes }]), (0, 0, 0));
+        assert_eq!(index.next(Round::Words, false, 10).unwrap().len(), 1);
+        assert_eq!(index.stats().unwrap().cloud, 0);
+    }
+
+    #[test]
+    fn a_file_whose_download_was_removed_keeps_what_was_read() {
+        let temp = TempIndex::new("cloud-evicted");
+        let mut index = Writer::open(&temp.path).unwrap();
+        let memo = found("/iCloud/voice-memo.m4a", Kind::Audio, false);
+        sync(&index, std::slice::from_ref(&memo));
+        // Its words are read, and what's said in it waits to be written down.
+        let words = index.next(Round::Words, false, 10).unwrap().remove(0);
+        let read = [passage("Kangaroo Island")];
+        assert!(index.write_words(&words, &read, &json!({"duration": 60.0}), &[(Round::Speech, 60.0)], false).unwrap());
+        // macOS removed its download: it stays as it was, and its speech waits for the download.
+        let evicted = Found { cloud: true, ..memo.clone() };
+        assert_eq!(sync(&index, std::slice::from_ref(&evicted)), (0, 0, 0));
+        assert_eq!(with(&index, "kangaroo"), 1);
+        assert!(index.next(Round::Speech, false, 10).unwrap().is_empty());
+        assert!(index.rounds().unwrap().iter().all(|totals| totals.round != Round::Speech));
+        assert_eq!(index.stats().unwrap().cloud, 1);
+        // To be read another way meanwhile: that's seen once it's back.
+        let lower = Found { settings: Settings { depth: Depth::Words, ..Settings::BASE }, ..evicted };
+        assert_eq!(sync(&index, &[lower]), (0, 0, 0));
+        assert_eq!(with(&index, "kangaroo"), 1);
+        // Downloaded again: its speech goes on, and nothing is read again.
+        assert_eq!(sync(&index, &[memo]), (0, 0, 0));
+        assert_eq!(index.next(Round::Speech, false, 10).unwrap().len(), 1);
+        assert!(index.next(Round::Words, false, 10).unwrap().is_empty());
+        assert_eq!(with(&index, "kangaroo"), 1);
+        assert_eq!(index.stats().unwrap().cloud, 0);
+    }
+
+    #[test]
+    fn a_file_changed_while_only_in_icloud_is_found_by_its_name_till_its_downloaded() {
+        let temp = TempIndex::new("cloud-changed");
+        let mut index = Writer::open(&temp.path).unwrap();
+        let notes = found("/iCloud/notes.txt", Kind::Plaintext, false);
+        sync(&index, std::slice::from_ref(&notes));
+        let words = index.next(Round::Words, false, 10).unwrap().remove(0);
+        assert!(index.write_words(&words, &[passage("the quokka smiles")], &json!({}), &[], false).unwrap());
+        // Changed on another device, and not downloaded here: what was read of it is gone, its name stays.
+        let changed = Found { size: 200, modified: 2.0, cloud: true, ..notes };
+        assert_eq!(sync(&index, std::slice::from_ref(&changed)), (0, 1, 0));
+        assert_eq!((with(&index, "quokka"), with(&index, "notes")), (0, 1));
+        assert!(index.next(Round::Words, false, 10).unwrap().is_empty());
+        // Downloaded: read again.
+        assert_eq!(sync(&index, &[Found { cloud: false, ..changed }]), (0, 0, 0));
+        assert_eq!(index.next(Round::Words, false, 10).unwrap().len(), 1);
+    }
 }

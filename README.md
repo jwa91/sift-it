@@ -219,7 +219,9 @@ There are no size or length limits: a four-hour podcast is read as fully as a sh
 depth, or let them run.
 
 sift-it skips hidden folders, nested `~/Library` folders, app bundles, packages, dependency folders, and build folders.
-It also skips recognized secret files and iCloud files that exist only in the cloud.
+It also skips recognized secret files. An iCloud file that exists only in the cloud is found by its name and read once
+it's downloaded: sift-it never downloads one, and one that was read keeps its place in the index when macOS removes its
+download.
 Inside code projects, it reads pictures, PDFs, and recordings unless you enable code indexing.
 On battery, every file's words and the text on screenshots and scans go on, new and changed files go through every
 round, and the rounds that need a model wait for a charger (`indexing.on_battery`: `words`, `all` or `none`). In Low

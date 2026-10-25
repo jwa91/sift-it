@@ -112,6 +112,7 @@ pub fn search(count: usize) -> Result<()> {
                 size: 1,
                 modified: 0.0,
                 settings: config::Settings::BASE,
+                cloud: false,
             };
             let id = index.queue(&found.new_file(), None, 0.0)?;
             let segments: Vec<index::NewSegment> = (0..per_file)
