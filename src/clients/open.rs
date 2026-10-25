@@ -149,7 +149,7 @@ fn resume(path: &Path) -> Result<String> {
 }
 
 /// A word for the shell: as it is when it's safe, else in single quotes.
-fn shell_quoted(word: &str) -> String {
+pub(super) fn shell_quoted(word: &str) -> String {
     if word.chars().all(|c| c.is_ascii_alphanumeric() || "/._-~+@".contains(c)) {
         return word.to_string();
     }

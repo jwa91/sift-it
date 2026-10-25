@@ -11,6 +11,7 @@ languages.
   reached through a link in the user's temporary folder (services/engine.rs says how).
 - **`sift-it serve`:** the same lines over its stdin and stdout. It starts the engine when it isn't running, starts it
   again when it stops, and answers two requests itself: `preview` and `quit`.
+- **Agents** speak MCP to `sift-it mcp` (README, "Agents"), which asks the engine with `search` and `text`.
 
 The engine starts at login (its LaunchAgent), or with the first client.
 
@@ -59,11 +60,13 @@ Recently changed files, newest first. The reply is a search's.
 
 ```json
 {"id": 3, "op": "text", "segment_id": 12}
+{"id": 3, "op": "text", "segment_id": 12, "around": 1}
 {"id": 3, "op": "text", "path": "/Users/me/notes.md"}
 ```
 
-A segment's whole text, or a file's (its text segments in order). Reply: `{"id": 3, "text": "…"}` (`null` when there's
-none).
+A segment's whole text, or a file's (its text segments in order). With `"around": n`, a segment's with the `n` text
+segments before and after it in its file, in order, each a paragraph: the passages around a match, the exchanges
+before and after one. Reply: `{"id": 3, "text": "…"}` (`null` when there's none).
 
 ### status
 

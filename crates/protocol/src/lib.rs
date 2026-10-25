@@ -27,12 +27,16 @@ pub enum Op {
     Search(Search),
     /// Recently changed files, of the kinds asked for → Results.
     Recent(Search),
-    /// A segment's whole text, or a file's (its text segments in order) → Text.
+    /// A segment's whole text, or a file's (its text segments in order) → Text. With `around`, a segment's with as
+    /// many of its file's text segments before and after it, in order: the passages around a match, the exchanges
+    /// before and after one.
     Text {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         segment_id: Option<i64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         path: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        around: Option<usize>,
     },
     /// What the engine holds, and the indexer's progress → Status.
     Status,
@@ -567,7 +571,7 @@ mod tests {
         assert_eq!(request(r#"{"id":2,"op":"status"}"#).op, Op::Status);
         assert_eq!(
             request(r#"{"id":3,"op":"text","segment_id":12}"#).op,
-            Op::Text { segment_id: Some(12), path: None }
+            Op::Text { segment_id: Some(12), path: None, around: None }
         );
         assert_eq!(
             request(r#"{"id":4,"op":"folders","action":"exclude","paths":["~/Old"]}"#).op,
@@ -591,7 +595,7 @@ mod tests {
             Op::Unload,
             Op::Config { key: None, value: None },
             Op::Folders { action: None, paths: vec![] },
-            Op::Text { segment_id: None, path: Some("/a.txt".into()) },
+            Op::Text { segment_id: None, path: Some("/a.txt".into()), around: None },
         ];
         for op in ops {
             let line = serde_json::to_string(&Request { id: json!(9), op: op.clone() }).unwrap();

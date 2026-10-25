@@ -162,11 +162,11 @@ impl Client {
     }
 
     pub fn segment_text(&mut self, segment_id: i64) -> Result<Option<String>> {
-        Ok(self.request::<Text>(Op::Text { segment_id: Some(segment_id), path: None })?.text)
+        Ok(self.request::<Text>(Op::Text { segment_id: Some(segment_id), path: None, around: None })?.text)
     }
 
     pub fn file_text(&mut self, path: &str) -> Result<Option<String>> {
-        Ok(self.request::<Text>(Op::Text { segment_id: None, path: Some(path.into()) })?.text)
+        Ok(self.request::<Text>(Op::Text { segment_id: None, path: Some(path.into()), around: None })?.text)
     }
 
     /// Waits until the engine has closed the connection (it stopped), for at most a few seconds.
