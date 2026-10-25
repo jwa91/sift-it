@@ -252,7 +252,9 @@ other apps may use.
 ### Configuration
 
 `config.json` holds every setting, each with its value written out. `sift-it config` shows it, and
-`sift-it config <key> <value>` sets a value by its dotted name. `null` puts a value back to its default.
+`sift-it config <key> <value>` sets a value by its dotted name. `null` puts a value back to its default. When the file
+can't be read (a value from another version, a typo made by hand), the error names the key and what it takes, the
+indexer waits for it (`sift-it status` says why), and `sift-it config <key> <value>` sets it right.
 
 ```sh
 sift-it config sources.ignore '["*.psd", "~/Documents/Old"]'
@@ -275,8 +277,9 @@ sift-it config indexing.memory_mb 4096
 `auto` it's a quarter of the Mac's memory. Each round's tool says what it holds: the text model about 630 MB (its mapped
 file included), with 290 MB more for the vision encoder or 320 MB for the audio encoder, Vision's text recognition about
 430 MB (171 MB of it on the Neural Engine), and the speech model about 980 MB (the Neural Engine's copy of it included).
-The rounds that fit run side by side, one per chip (the GPU, the Neural Engine), and on a small budget one at a time.
-Reading takes up to a third of the cores, two to four files at once, and what's left of the budget can make that fewer.
+The rounds that fit run side by side, one per chip (the GPU, the Neural Engine), and on a small budget one at a time,
+each through its whole queue. The text model stays loaded while it fits, counted, and goes when it doesn't. Reading
+takes up to a third of the cores, two to four files at once in all, and what's left of the budget can make that fewer.
 When macOS says memory is short, indexing shrinks to one tool, or stops and lets everything go until it isn't.
 `sift-it status` shows the plan.
 

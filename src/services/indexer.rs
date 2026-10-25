@@ -4,7 +4,8 @@
 //! (resources::Plan): what runs side by side by `indexing.memory_mb`, what goes on on battery by
 //! `indexing.on_battery`, and less, or nothing, when macOS says memory is short. What changes in the folders goes
 //! first in every round it needs. It lets the model go after `indexing.release_model_s` with nothing to do. A change
-//! to config.json counts at once, with a full sync.
+//! to config.json counts at once, with a full sync. While config.json can't be read, nothing is indexed: status.json
+//! says why, and the daemon waits for the file to change.
 //!
 //! With nothing left to do, it writes the next generation of a vector partition that's due one (index/vectors.rs).
 //!
@@ -173,7 +174,7 @@ pub fn running_pid() -> Option<i32> {
 fn interrupted(config_path: &Path, seen: &Cell<Option<SystemTime>>, config: &Config) -> bool {
     SHUTDOWN.load(Ordering::SeqCst) || TOGGLE_PAUSE.load(Ordering::SeqCst) || RESYNC.load(Ordering::SeqCst) || {
         let time = modified(config_path);
-        time != seen.replace(time) && Config::load().is_ok_and(|new| !same_work(&new, config))
+        time != seen.replace(time) && !Config::load().is_ok_and(|new| same_work(&new, config))
     }
 }
 
@@ -185,6 +186,34 @@ fn same_work(a: &Config, b: &Config) -> bool {
 
 fn modified(path: &Path) -> Option<SystemTime> {
     std::fs::metadata(path).and_then(|m| m.modified()).ok()
+}
+
+/// config.json, and when it was written, once it can be read. Until then nothing is indexed and the model goes:
+/// status.json says why, and the daemon waits for the file to change. None when the daemon is to stop meanwhile.
+fn read_config(
+    path: &Path,
+    reporter: &mut Reporter,
+    mut indexer: Option<&mut Indexer>,
+) -> Option<(Config, Option<SystemTime>)> {
+    loop {
+        let time = modified(path);
+        let error = match Config::load() {
+            Ok(config) => return Some((config, time)),
+            Err(error) => error,
+        };
+        log(&format!("can't read the config, waiting for it to change: {error:#}"));
+        reporter
+            .set(IndexerState::Waiting, Some(format!("Waiting: config.json can't be read: {}", error.root_cause())));
+        if let Some(indexer) = indexer.as_deref_mut() {
+            indexer.release_model();
+        }
+        while modified(path) == time {
+            if SHUTDOWN.load(Ordering::SeqCst) {
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+    }
 }
 
 fn watch(
@@ -301,9 +330,6 @@ pub fn run() -> Result<()> {
     let _lock = lock()?;
     install_signal_handlers();
     let config_path = config::config_path();
-    let mut config = Config::load()?;
-    let mut config_time = modified(&config_path);
-    trim_log(config.log.max_mb << 20);
     log(&format!("sift-it daemon started (pid {})", std::process::id()));
     let mut reporter = Reporter {
         status: IndexerStatus { pid: std::process::id(), ..Default::default() },
@@ -311,6 +337,11 @@ pub fn run() -> Result<()> {
         power: Power::Charger,
     };
     reporter.write(true);
+    let Some((mut config, mut config_time)) = read_config(&config_path, &mut reporter, None) else {
+        reporter.set(IndexerState::Stopped, None);
+        return Ok(());
+    };
+    trim_log(config.log.max_mb << 20);
 
     let index = Writer::open(&config::index_path()).context("can't open the index")?;
     let mut indexer = Indexer::new(index)?;
@@ -340,20 +371,18 @@ pub fn run() -> Result<()> {
         // The config changed: watch the folders it names now, and sync it all (what's read, and how, may differ). A
         // change to search, ranking or the log is only taken in.
         if modified(&config_path) != config_time {
-            config_time = modified(&config_path);
-            match Config::load() {
-                Ok(new) if same_work(&new, &config) => config = new,
-                Ok(new) => {
-                    config = new;
-                    looked.at = None;
-                    changes.roots = config.sources.paths.clone();
-                    changes.quiet = Duration::from_millis(config.indexing.quiet_ms);
-                    drop(watcher);
-                    watcher = watch(&config, sender.clone())?;
-                    changes.rescan = true;
-                    log("the config changed");
-                }
-                Err(error) => log(&format!("can't read the config: {error:#}")),
+            let Some((new, time)) = read_config(&config_path, &mut reporter, Some(&mut indexer)) else { break };
+            config_time = time;
+            let changed = !same_work(&new, &config);
+            config = new;
+            if changed {
+                looked.at = None;
+                changes.roots = config.sources.paths.clone();
+                changes.quiet = Duration::from_millis(config.indexing.quiet_ms);
+                drop(watcher);
+                watcher = watch(&config, sender.clone())?;
+                changes.rescan = true;
+                log("the config changed");
             }
         }
         if TOGGLE_PAUSE.swap(false, Ordering::SeqCst) {
@@ -400,7 +429,8 @@ pub fn run() -> Result<()> {
             .into_iter()
             .map(|(round, new, old)| Queue { round, new, old })
             .collect();
-        let plan = Plan::of(&config.indexing, facts.conditions, &queues, &facts.missing);
+        let held = if indexer.model_loaded() { vec![Tool::TextModel] } else { Vec::new() };
+        let plan = Plan::of(&config.indexing, facts.conditions, &queues, &facts.missing, &held);
         let mut report = |reporter: &mut Reporter, indexer: &Indexer| {
             if shown.as_ref() != Some(&plan)
                 && let Ok(totals) = indexer.index.rounds()

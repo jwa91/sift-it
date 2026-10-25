@@ -127,9 +127,11 @@ Each tool says which chip it runs on and what it holds at its peak, as measured 
 | the speech helper | Neural Engine | 340 MB, 607 MB on the Neural Engine, and 32 MB mapped |
 | a reader | CPU | 128 MB |
 
-What runs is a plan, made again whenever what it depends on changes. Rounds that have work are taken in order (words,
-text, OCR, pictures, sound, speech), and each joins when its tools fit in the budget beside those of the rounds before
-it. The first always runs, whatever the budget: indexing never stops for want of memory, it only goes slower.
+What runs is a plan, made again whenever what it depends on changes. Rounds that have work are taken new files' first
+([New files first](#new-files-first)), then those whose tools are loaded, then in order (words, text, OCR, pictures,
+sound, speech), and each joins when its tools fit in the budget beside those of the rounds before it. Words always run,
+and so does the first round that needs a tool, whatever the budget: indexing never stops for want of memory, it only
+goes slower.
 
 - **One chip, one round.** Text, pictures and sound share the text model and the GPU: two of them at once would share
   its time, so neither would finish sooner, and the earlier one should. So the GPU takes pictures or sound, one at a
@@ -137,7 +139,16 @@ it. The first always runs, whatever the budget: indexing never stops for want of
   gets the GPU between them: passages keep coming as OCR and speech read them.
 - **The Neural Engine takes OCR and speech together.** Measured, they get more done side by side than one after the
   other (below).
-- **The readers take what's left,** two to four (a third of the cores), down to one.
+- **A loaded tool works through its queue.** Rounds bring each other work: OCR and speech bring the text round
+  passages as they read. Taken in order alone, text would push speech out whenever passages wait on a small budget,
+  and speech text, every second or two: at 1024 MB, three podcasts started the speech helper 14 times and took 29 s
+  instead of 24. Now the passages wait for speech to be done, and the helper starts once.
+- **The text model stays while it fits** beside what runs, counted in the budget: loading it again takes only 0.2 s,
+  but the other rounds bring it passages every second or two. When it doesn't fit, it goes. At 1200 MB with speech
+  alone, the indexer held 261 to 374 MB beside the helper while the text model stayed (and its 296 MB file mapped);
+  it holds 108 to 194 MB now.
+- **Each lane that reads has a reader,** in the budget: the words round's, and the GPU's media round's. More read at
+  once with what's left, two to four in all (a third of the cores).
 
 On a big budget, that's every chip busy at once. On a small one, one tool works through its whole queue before the
 next loads. On a Mac with ten cores:
@@ -145,8 +156,8 @@ next loads. On a Mac with ten cores:
 | `memory_mb` | What runs side by side | With screenshots and scans to read too |
 |---|---|---|
 | 1024 | words and text, then one tool at a time | the same |
-| 2048 | words, text, pictures and speech, then sound; one file read at once | speech waits for OCR; three read at once |
-| 4096, and `auto` from 16 GB | the same, three files read at once | everything |
+| 2048 | words, text and pictures, then speech beside them, then sound; one file read at once beside speech | speech waits for OCR; with no pictures or sound to do, OCR and speech go side by side and text waits for one of them |
+| 4096, and `auto` from 16 GB | words, text, pictures and speech, then sound; three files read at once | everything |
 
 ### New files first
 
@@ -159,7 +170,7 @@ minutes of sound or video, that's seconds. On the GPU, the other encoder goes an
 
 The budget is a ceiling, and macOS says when memory runs short (a memory-pressure dispatch source):
 
-- **Warning:** the plan shrinks to one tool, as on the smallest budget, with one reader.
+- **Warning:** the plan shrinks to one tool, as on the smallest budget, with one reader for each lane that reads.
 - **Critical:** everything stops at once, and lets its memory go: the models, the encoders, the speech helper. The
   items in hand are read again later. Indexing goes on once the pressure is back to a warning or less.
 
@@ -167,9 +178,10 @@ The budget is a ceiling, and macOS says when memory runs short (a memory-pressur
 
 On battery, `indexing.on_battery` decides what goes on:
 
-- `words`, the default: words and new files, while the other rounds wait for a charger. Meaning costs energy: on the
-  M5, above idle, a thousand passages take 408 J, a photo 1.9 J, a video frame 0.8 J, 30 s of sound 2.6 J, and an
-  hour of speech 116 J. The text of a large collection can take more than a MacBook Air's whole battery (190 kJ).
+- `words`, the default: words and new files, while the other rounds wait for a charger, and the old files' work in
+  hand stops at its next checkpoint. Meaning costs energy: on the M5, above idle, a thousand passages take 408 J, a
+  photo 1.9 J, a video frame 0.8 J, 30 s of sound 2.6 J, and an hour of speech 116 J. The text of a large collection
+  can take more than a MacBook Air's whole battery (190 kJ).
 - `all`: everything goes on.
 - `none`: nothing does, until there's a charger.
 
@@ -193,11 +205,15 @@ Measured on an M5 with 24 GB:
   | `memory_mb` | | Every file found by its words | Text by meaning | All done | Indexer | Speech helper | Engine | All at once |
   |---|---|---|---|---|---|---|---|---|
   | 2048 | before | 2,171 s | 2,179 s | 2,844 s | 1,018 MB | 149 + 607 MB | 290 MB | |
-  | | after | 10 s | 100 s | 2,075 s | 715 MB | 262 + 607 MB | 342 MB | 1,724 MB |
+  | | after | 5 s | 93 s | 2,037 s | 756 MB | 313 + 607 MB | 385 MB | 1,764 MB |
   | 4096 | before | 2,130 s | 2,140 s | 2,164 s | 1,107 MB | 116 + 607 MB | 316 MB | 2,123 MB |
-  | | after | 5 s | 104 s | 2,131 s | 822 MB | 336 + 607 MB | 309 MB | 1,934 MB |
+  | | after¹ | 5 s | 104 s | 2,131 s | 822 MB | 336 + 607 MB | 309 MB | 1,934 MB |
   | `auto` (6 GB) | before | 2,117 s | 2,127 s | 2,151 s | 1,072 MB | 104 + 607 MB | 309 MB | 2,041 MB |
-  | | after | 6 s | 107 s | 2,135 s | 739 MB | 324 + 607 MB | 337 MB | 1,801 MB |
+  | | after | 6 s | 104 s | 2,109 s | 767 MB | 342 + 607 MB | 506 MB | 1,843 MB |
+
+  ¹ Measured with an earlier plan, in which the text round could push out a loaded tool and the words and media
+  lanes each took all the readers. At 2048 MB and `auto`, the plan as it is now found every file by its words 5 s
+  sooner and as soon, text by meaning 8 s and 3 s sooner, and was all done 38 s and 26 s sooner.
 
   Read file by file, a file was found only once all of it was read, and the cheapest went first: a book and the long
   podcasts came last, so nearly everything was found only at the end. All done is the GPU's work, which is the same

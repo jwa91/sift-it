@@ -13,8 +13,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com); versions follow
   layer, documents through textutil: no model), then what text means, the text on screenshots and scans, what
   pictures show, what sound sounds like, and what's said. Every file is found by its exact words within minutes of
   choosing the folders, and meaning comes round by round. On the demo folder (628 files, 28 hours of sound), every
-  file is found by its words after 5 to 10 s instead of 35 minutes, and its texts by meaning after 100 s; it's all
-  done as soon as before, or 27% sooner at 2048 MB, and the indexer peaks at 715 to 822 MB instead of 1,018 to
+  file is found by its words after 5 or 6 s instead of 35 minutes, and its texts by meaning after 93 to 104 s; it's
+  all done as soon as before, or 28% sooner at 2048 MB, and the indexer peaks at 756 to 822 MB instead of 1,018 to
   1,107 MB.
 - `indexing.memory_mb` is a ceiling: each round's tool says its chip and what it holds, and the rounds that fit run
   side by side, one per chip (the GPU, the Neural Engine), one tool at a time on a small budget. When macOS says memory
@@ -23,7 +23,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com); versions follow
   words and what it shows in seconds, even while a long video is read.
 - Long recordings and videos are read five minutes at a time, and a stopped file goes on from where it was.
 - `indexing.on_battery` is `words` (the default: words and new files go on, the rest waits for a charger), `all` or
-  `none`, in place of `true` and `false`. Low Power Mode is `words` at most, where it waited.
+  `none`, in place of `true` and `false`. Low Power Mode is `words` at most, where it waited. A config.json that says
+  `true` or `false` there can't be read: `sift-it config indexing.on_battery words` sets it right.
+- A config.json that can't be read names the key and what it takes. `sift-it config <key> <value>` sets it right, and
+  the indexer waits for it, with its status saying why, where it exited before.
 - The indexer's status (`status.json`, the protocol's IndexerStatus) says how far each round is: `rounds`, with each
   round's state, what's done of its total in its own unit, and the time it has left at the speed it went. `done`,
   `total`, `speech_done`, `speech_total` and the `transcribing` state are gone. `sift-it status` shows the rounds.

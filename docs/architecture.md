@@ -48,8 +48,9 @@ adapters    index (SQLite and vector files) · embedder (llama.cpp) · transcrib
   Markdown, code, records (CSV, JSON, YAML, TOML), pages, frames, sound windows, speech. Pure, and tested on its own.
 - **Prepare:** a segment becomes the model's input: the prompt with the file's title, a picture fitted to its token
   budget, a window of sound.
-- **Embed:** the model's only owner. It batches texts and hands back vectors. It holds the text model while any of
-  the GPU's rounds has work, and one encoder: the vision encoder for pictures, the audio encoder for sound.
+- **Embed:** the model's only owner. It batches texts and hands back vectors. It holds the text model while the plan
+  has it (one of its rounds runs, or it fits beside those that do), and one encoder: the vision encoder for pictures,
+  the audio encoder for sound.
 - **Write:** the index's only writer. Each round writes only its own segments (words its passages and pages, OCR its
   passages and the words on pictures, pictures its pictures and frames, sound its windows, speech its passages), and
   the text round the vectors of the passages waiting for one. It keeps the rule that a vector is appended before the
@@ -64,8 +65,9 @@ scheduler only holds the few items it hands out next, so a stop or a crash loses
 A run has a thread for each lane, and items go between them on bounded channels:
 
 - **The run's own thread:** the plan, the GPU (embed), the writer, and what the other lanes hand back.
-- **The words lane:** a few readers, reading files' words.
-- **The media lane:** as many, decoding for the GPU's round: pictures and frames, or sound.
+- **The words lane:** readers, reading files' words.
+- **The media lane:** readers decoding for the GPU's round: pictures and frames, or sound. The two lanes share the
+  plan's readers, one each at least while their rounds run.
 - **The OCR lane:** one thread, since Vision reads text in one picture at a time per process anyway.
 - **The speech lane:** one thread, which talks to the speech helper.
 

@@ -121,6 +121,11 @@ impl Speech {
     pub fn has(&self, file: i64) -> bool {
         self.listening.iter().any(|listening| listening.work.file.id == file)
     }
+
+    /// The files it's on and has waiting.
+    pub fn files(&self) -> impl Iterator<Item = &Work> {
+        self.listening.iter().map(|listening| &listening.work)
+    }
 }
 
 impl Indexer {
