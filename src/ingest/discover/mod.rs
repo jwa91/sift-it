@@ -1,7 +1,8 @@
 //! Discovering: which files are new or changed, or are to be read another way (their fingerprint, ingest::fingerprint),
 //! each queued for its words with an estimate of what reading them costs (cost.rs); files that are gone leave the
 //! index. `sync` crawls the chosen folders; `sync_paths` looks at just the paths a file-system event named, and what it
-//! queues is new: it goes first in every round it needs.
+//! queues is new: it goes first in every round it needs. A conversation's log that grew is read on from where its last
+//! read ended.
 //!
 //! A file only in iCloud is never read, and its work waits for its download (Writer::wait_for_download): one never read
 //! is found by its name meanwhile, and one macOS removed the download of keeps what was read of it. Removing the
@@ -13,10 +14,12 @@ pub mod crawl;
 pub use cost::{cost, shares};
 
 use super::Event;
+use super::conversation;
 use crate::config::Config;
 use crate::index::{FileRow, NewFile, Writer};
 use anyhow::Result;
 use crawl::{Found, Rescan};
+use protocol::Kind;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -98,7 +101,11 @@ fn reconcile(
                 }
             }
             Some(row) if is_changed(row, file) => {
-                queue(index, file, Some(row.id), new)?;
+                if grown(index, row, file)? {
+                    index.queue_grown(row.id, &NewFile { new, ..file.new_file() }, cost(file))?;
+                } else {
+                    queue(index, file, Some(row.id), new)?;
+                }
                 changed += 1;
             }
             Some(row) => {
@@ -131,9 +138,20 @@ fn queue(index: &Writer, file: &Found, existing: Option<i64>, new: bool) -> Resu
     Ok(())
 }
 
-/// Another file than the one indexed: it changed.
+/// A conversation's log that grew as its session went on, read the same way, and still what it was up to where its
+/// last read ended: the next read goes on from there. One only in iCloud isn't looked at.
+fn grown(index: &Writer, row: &FileRow, found: &Found) -> Result<bool> {
+    if found.cloud || found.kind != Kind::Conversation || row.kind != found.kind || row.reading != found.reading() {
+        return Ok(false);
+    }
+    Ok(index.words_resume(row.id)?.is_some_and(|resume| conversation::goes_on(&found.path, &resume)))
+}
+
+/// Another file than the one indexed: it changed. While it's only in iCloud, a conversation's log stays one: what
+/// tells a log, its first lines, can't be read meanwhile, so it's found by its type.
 fn is_edited(row: &FileRow, found: &Found) -> bool {
-    row.size != found.size || (row.modified - found.modified).abs() > 0.001 || row.kind != found.kind
+    let kind = row.kind != found.kind && !(found.cloud && row.kind == Kind::Conversation);
+    row.size != found.size || (row.modified - found.modified).abs() > 0.001 || kind
 }
 
 /// Changed, or to be read another way.
@@ -197,7 +215,11 @@ mod tests {
         // Its words are read, and what's said in it waits to be written down.
         let words = index.next(Round::Words, false, 10).unwrap().remove(0);
         let read = [passage("Kangaroo Island")];
-        assert!(index.write_words(&words, &read, &json!({"duration": 60.0}), &[(Round::Speech, 60.0)], false).unwrap());
+        assert!(
+            index
+                .write_words(&words, &read, &json!({"duration": 60.0}), &[(Round::Speech, 60.0)], false, None)
+                .unwrap()
+        );
         // macOS removed its download: it stays as it was, and its speech waits for the download.
         let evicted = Found { cloud: true, ..memo.clone() };
         assert_eq!(sync(&index, std::slice::from_ref(&evicted)), (0, 0, 0));
@@ -218,13 +240,35 @@ mod tests {
     }
 
     #[test]
+    fn a_conversation_whose_download_was_removed_stays_one() {
+        let temp = TempIndex::new("cloud-conversation");
+        let mut index = Writer::open(&temp.path).unwrap();
+        let log = found("/iCloud/session.jsonl", Kind::Conversation, false);
+        sync(&index, std::slice::from_ref(&log));
+        let words = index.next(Round::Words, false, 10).unwrap().remove(0);
+        let read =
+            [NewSegment { segment: Segment::Exchange, loc: Some(1.0), ..passage("User: where do wombats sleep?") }];
+        let resume = json!({ "from": 1.0 });
+        assert!(index.write_words(&words, &read, &json!({}), &[], false, Some(&resume)).unwrap());
+        // Only in iCloud, a log can't be told from other JSON Lines: it's found by its type. Nothing changes.
+        let evicted = Found { kind: Kind::Structured, cloud: true, ..log.clone() };
+        assert_eq!(sync(&index, &[evicted]), (0, 0, 0));
+        assert_eq!(with(&index, "wombats"), 1);
+        assert_eq!(index.files().unwrap()[0].kind, Kind::Conversation);
+        // Downloaded again: nothing is read again, and it goes on from where it was when it grows.
+        assert_eq!(sync(&index, &[log]), (0, 0, 0));
+        assert!(index.next(Round::Words, false, 10).unwrap().is_empty());
+        assert_eq!(index.words_resume(index.files().unwrap()[0].id).unwrap(), Some(resume));
+    }
+
+    #[test]
     fn a_file_changed_while_only_in_icloud_is_found_by_its_name_till_its_downloaded() {
         let temp = TempIndex::new("cloud-changed");
         let mut index = Writer::open(&temp.path).unwrap();
         let notes = found("/iCloud/notes.txt", Kind::Plaintext, false);
         sync(&index, std::slice::from_ref(&notes));
         let words = index.next(Round::Words, false, 10).unwrap().remove(0);
-        assert!(index.write_words(&words, &[passage("the quokka smiles")], &json!({}), &[], false).unwrap());
+        assert!(index.write_words(&words, &[passage("the quokka smiles")], &json!({}), &[], false, None).unwrap());
         // Changed on another device, and not downloaded here: what was read of it is gone, its name stays.
         let changed = Found { size: 200, modified: 2.0, cloud: true, ..notes };
         assert_eq!(sync(&index, std::slice::from_ref(&changed)), (0, 1, 0));

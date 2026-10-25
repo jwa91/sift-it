@@ -93,8 +93,17 @@ pub(super) fn place(hit: &Hit) -> Option<String> {
             Some(format!("cell {cell}"))
         }
         (Segment::Passage, Some(line)) if line > 1.0 => Some(format!("line {line}")),
+        (Segment::Exchange, Some(at)) => Some(local_time(at)),
         _ => None,
     }
+}
+
+/// A moment, in the Mac's time zone: "2026-10-25 14:02".
+pub(super) fn local_time(seconds: f64) -> String {
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    unsafe { libc::localtime_r(&(seconds as libc::time_t), &mut tm) };
+    let (year, month, day) = (tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday);
+    format!("{year:04}-{month:02}-{day:02} {:02}:{:02}", tm.tm_hour, tm.tm_min)
 }
 
 pub(super) fn kind_label(kind: Kind) -> &'static str {
@@ -107,6 +116,7 @@ pub(super) fn kind_label(kind: Kind) -> &'static str {
         Kind::Audio => "recording",
         Kind::Video => "video",
         Kind::Code => "code",
+        Kind::Conversation => "conversation",
     }
 }
 
@@ -189,7 +199,7 @@ fn body(terminal: &Terminal, hit: &Hit, words: &[String], client: &mut Client) -
                 push_line(&mut out, &code_line);
             }
         }
-        Kind::Plaintext | Kind::Document => {
+        Kind::Plaintext | Kind::Document | Kind::Conversation => {
             for text_line in
                 hit.excerpt.as_deref().map(|t| passage(terminal, t, width, PASSAGE_LINES, words)).unwrap_or_default()
             {

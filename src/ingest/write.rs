@@ -139,7 +139,7 @@ impl Items {
         let count = written + segments.len();
         let vectors = vectors + segments.iter().filter(|s| s.vector.is_some()).count();
         let stored = if work.round == Round::Words {
-            index.write_words(&work, &segments, &ended.info, &ended.rounds, written > 0)?
+            index.write_words(&work, &segments, &ended.info, &ended.rounds, written > 0, ended.resume.as_ref())?
         } else {
             let done = Done { done: ended.done, resume: ended.resume, finished: ended.finished, info: ended.info };
             index.write_item(&work, &segments, &done)?

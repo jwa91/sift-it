@@ -103,6 +103,7 @@ impl Default for Reading {
                 (Kind::Audio, Values::default()),
                 (Kind::Video, Values { tokens: Some(70), ..Default::default() }),
                 (Kind::Code, Values { passage_chars: Some(600), ..Default::default() }),
+                (Kind::Conversation, Values::default()),
             ]),
             types: BTreeMap::new(),
             rules: Vec::new(),

@@ -171,6 +171,10 @@ impl Config {
             if *kind == Kind::Screenshot {
                 bail!("sources.kinds: a screenshot is a picture macOS marked as one, not a file type");
             }
+            // A conversation's types are those other files of a type can be logs in: what's in them tells.
+            if *kind == Kind::Conversation {
+                continue;
+            }
             for file_type in types {
                 if let Some(other) = seen.insert(file_type, *kind) {
                     bail!("sources.kinds: .{file_type} is both {} and {}", other.as_str(), kind.as_str());

@@ -1,8 +1,10 @@
 //! Extracting: a file decoded into content, per container format and round: lines of text, a page's text, the text on
 //! pictures, pictures and video frames, sound. What it decodes goes to Content by its type; nothing here decides how
 //! it's cut or what the model is shown of it. Speech (extract/speech.rs) is an extractor too, with a lane of its own.
+//! An agent's session log (extract/conversation.rs) is a container too: of messages.
 
 mod audio;
+pub mod conversation;
 mod document;
 mod image;
 mod notebook;
@@ -30,6 +32,7 @@ pub fn read(
     match (round, kind) {
         (Round::Words, Kind::Code) if extension_of(path) == "ipynb" => notebook::read(path, content),
         (Round::Words, Kind::Plaintext | Kind::Structured | Kind::Code) => text::read(path, content),
+        (Round::Words, Kind::Conversation) => conversation::read(path, from, content),
         (Round::Words, Kind::Document) if is_pdf(path) => pdf::words(path, content),
         (Round::Words, Kind::Document) => document::read(path, content),
         (Round::Words, Kind::Image | Kind::Screenshot) => image::words(content),

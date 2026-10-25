@@ -493,9 +493,10 @@ read in full at its depth. What a limit would guard is handled where it arises:
 
 ### Kinds
 
-Kinds are plaintext, document, structured, image, screenshot, audio, video and code. `sources` maps file types to
-kinds, with built-in defaults. A PDF is a document. A screenshot is a picture macOS (or a screenshot tool) marked as
-one: it's read for its text as well as what it shows, and takes the image settings.
+Kinds are plaintext, document, structured, image, screenshot, audio, video, code and conversation. `sources` maps
+file types to kinds, with built-in defaults. A PDF is a document. A screenshot is a picture macOS (or a screenshot
+tool) marked as one: it's read for its text as well as what it shows, and takes the image settings. A conversation is
+a JSON Lines file whose first lines are an agent's session log.
 
 | Kind | Settings |
 |---|---|
@@ -506,6 +507,7 @@ one: it's read for its text as well as what it shows, and takes the image settin
 | plaintext | passage size, cut at headings |
 | code | passage size, cut at definitions |
 | structured | passage size, cut at records |
+| conversation | passage size, cut at exchanges |
 
 Text is cut where its form breaks (`src/ingest/segment/`). A part between two breaks that fits the maximum stays
 whole, and a longer one is cut at its next weaker breaks. Parts next to each other are joined up to the passage size,
@@ -530,6 +532,34 @@ cut at its own keys and items. Records are read one by one: their passage size i
 (a setting's line) go together. A passage of several records blurs what each says: on the testbed, a journal entry
 asked for by meaning comes first this way, and second in passages of 600. Lock files (`package-lock.json`,
 `pnpm-lock.yaml`) are never read, and in a code project structured files are read only with the code.
+
+### Conversations
+
+Claude Code keeps a log of each session in `~/.claude/projects/<folder>/<session>.jsonl`, and Codex in
+`~/.codex/sessions/<year>/<month>/<day>/rollout-*.jsonl`: a JSON record per line. A log is known by its first lines
+(Claude Code's records carry a `sessionId`, Codex's log starts with its `session_meta`), so one is found in any folder,
+and a chosen folder may be hidden itself (only what's below it is judged).
+
+- **What's read** is what the user said and what the agent answered. Not read: tool calls and what they gave back, the
+  agent's thinking, the app's own records, what an app wraps around a prompt (an element on lines of its own, such as
+  `<system-reminder>` or a command's output, unless it holds the user's own words: a command they typed, text they
+  pasted), Codex's instructions, and a subagent's transcript (its conversation is the one that started it). What
+  Claude Code keeps for a session in a folder beside its log (tool output, subagents' transcripts) isn't read either.
+- **An exchange** is what the user says after the agent answered, and what the agent says until the user speaks again,
+  with who speaks named where that changes (`User: …`, `Claude: …`). It's cut as Markdown: a short one is a passage, a
+  long one several, each part after the first embedded with what was asked before it. A passage is at the time its
+  first message was said, to its last one's.
+- **Its title** is the one the app gave the session (Claude Code's custom title), else the agent's (its AI title, an
+  older log's summary), else its first prompt. It's the result's name, it's in the keyword index with every passage,
+  and the passages are embedded with it, as a document's with its file name.
+- **A running session's log** grows every few seconds. It's handed over 30 s after it went quiet (the agent waits for
+  the user), and its next read goes on from where its last exchange started, which may have grown: what was read before
+  stays, and of the last exchange what's the same keeps its vector. A log that's shorter, or other just before that
+  point, is read again from the top. On this Mac's 365 MB of logs, what's said is 0.35% of their bytes: 1,401 passages
+  of 1.26 million characters, read in 0.27 s.
+- **Resuming** a session: a result's `info` has the command (`claude --resume <session>`, `codex resume <session>`)
+  and the folder to run it in. `sift-it open` resumes it there when it runs in a terminal, and says the command
+  otherwise.
 
 ### Example
 

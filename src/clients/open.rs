@@ -1,9 +1,11 @@
 //! Opening a result where it matched: a recording or video at its moment (QuickTime), a PDF at its page (Preview),
 //! text and code at the line ($VISUAL or $EDITOR: vim, nvim, helix, emacs and nano in the terminal, VS Code, Cursor,
-//! Zed and Sublime Text at the line), anything else in its app. `sift-it search` remembers its results, so
+//! Zed and Sublime Text at the line), a conversation resumed in the folder its session ran in (`claude --resume`,
+//! `codex resume`, in the terminal), anything else in its app. `sift-it search` remembers its results, so
 //! `sift-it open 2` opens the second.
 
 use crate::config;
+use crate::ingest::conversation;
 use crate::query::timestamp;
 use anyhow::{Context, Result, bail};
 use protocol::{Hit, Kind};
@@ -29,8 +31,8 @@ impl Place {
         if !path.exists() {
             bail!("no such file: {}", path.display());
         }
-        let sources = config::Config::load().unwrap_or_default().sources;
-        let kind = sources.kind_of(&config::extension_of(path)).unwrap_or(Kind::Document);
+        let config = config::Config::load().unwrap_or_default();
+        let kind = crate::ingest::discover::crawl::kind_of(&config, path).unwrap_or(Kind::Document);
         Ok(Self { path: path.to_path_buf(), kind, loc: at })
     }
 
@@ -43,16 +45,19 @@ impl Place {
             {
                 Target::Line(line.max(1.0) as usize)
             }
+            (Kind::Conversation, _) => Target::Resume,
             _ => Target::File,
         }
     }
 }
 
-/// What opening a place does: play from a moment, open a PDF at a page or text at a line, or just open the file.
+/// What opening a place does: play from a moment, open a PDF at a page or text at a line, resume a conversation, or
+/// just open the file.
 pub enum Target {
     Moment(f64),
     Page(usize),
     Line(usize),
+    Resume,
     File,
 }
 
@@ -114,11 +119,41 @@ pub fn open(place: &Place, reveal: bool) -> Result<String> {
             open_file(&place.path)?;
             Ok(format!("Opened {name}; the match is at line {line} (set $EDITOR to open at the line)"))
         }
+        Target::Resume => resume(&place.path),
         Target::File => {
             open_file(&place.path)?;
             Ok(format!("Opened {name}"))
         }
     }
+}
+
+/// Resumes a conversation with its agent, in the folder its session ran in, when this is a terminal: the agent takes
+/// over until it's quit, as an editor in the terminal does. Elsewhere it says how.
+fn resume(path: &Path) -> Result<String> {
+    let session = conversation::session(path).context("can't tell which session this log is of")?;
+    let command = session.resume();
+    let folder = session.cwd.as_deref().map(Path::new).filter(|folder| folder.is_dir());
+    let line = match &session.cwd {
+        Some(cwd) => format!("cd {} && {}", shell_quoted(cwd), command.join(" ")),
+        None => command.join(" "),
+    };
+    let terminal = unsafe { libc::isatty(0) == 1 && libc::isatty(1) == 1 };
+    if !terminal || folder.is_none() {
+        let gone = if session.cwd.is_some() && folder.is_none() { " (its folder is gone)" } else { "" };
+        return Ok(format!("Resume it with: {line}{gone}"));
+    }
+    match Command::new(&command[0]).args(&command[1..]).current_dir(folder.unwrap()).status() {
+        Ok(_) => Ok(format!("Resumed with: {line}")),
+        Err(_) => Ok(format!("{} isn't on the PATH; resume it with: {line}", command[0])),
+    }
+}
+
+/// A word for the shell: as it is when it's safe, else in single quotes.
+fn shell_quoted(word: &str) -> String {
+    if word.chars().all(|c| c.is_ascii_alphanumeric() || "/._-~+@".contains(c)) {
+        return word.to_string();
+    }
+    format!("'{}'", word.replace('\'', "'\\''"))
 }
 
 fn open_file(path: &Path) -> Result<()> {
