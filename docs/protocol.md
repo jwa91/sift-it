@@ -88,10 +88,12 @@ mapped, `scan` the form searches scan (what `auto` picked), `resident` how many 
 {"id": 5, "op": "config"}
 {"id": 5, "op": "config", "key": "search.mode"}
 {"id": 5, "op": "config", "key": "search.mode", "value": "words"}
+{"id": 5, "op": "config", "key": "sources.ignore", "value": "[\"*.psd\"]"}
 ```
 
 The settings, or the one at a dotted key, set first when there's a `value`: what `sift-it config <key> <value>` does.
-A value is read as JSON, or else taken as a string; `null` puts it back to its default. Reply:
+`value` is always a string, read as JSON, or else taken as the string it is: `"4096"` is a number, `"words"` a
+string, and `"null"` puts the setting back to its default. Reply:
 `{"id": 5, "config": …}`. The indexer follows the change at once, and the engine at its next request.
 
 ### folders
@@ -125,7 +127,7 @@ The folders indexed, changed first when there's an `action`: `add`, `remove` (an
 ```
 
 A picture to show beside a result: `kind` is `image`, `pdf` (page `loc`), `video` (the frame at `loc` seconds) or
-`waveform` (a recording's, with `loc` to `loc_end` seconds highlighted). `size` is the longest side in pixels (640
+`waveform` (an audio file's, with `loc` to `loc_end` seconds highlighted). `size` is the longest side in pixels (640
 when left out). Reply: `{"id": 9, "image": "/…/preview.jpg"}`.
 
 ### quit (sift-it serve)
@@ -139,7 +141,7 @@ Ends `sift-it serve` once the requests before it are answered: `{"id": 10, "ok":
 ## Events
 
 ```json
-{"event": "ready", "version": "0.3.1", "build": "0.3.1+3f2a…", "index": "/…/index.sqlite", "meaning": "unloaded"}
+{"event": "ready", "version": "0.4.1", "build": "0.4.1+3f2a…", "index": "/…/index.sqlite", "meaning": "unloaded"}
 {"event": "meaning", "state": "loading"}
 {"event": "meaning", "state": "unavailable", "error": "embeddinggemma-2-Q8_0.gguf isn't downloaded (run `sift-it model download`)"}
 {"event": "config", "error": "can't read config.json: …"}
@@ -202,3 +204,15 @@ far), `waiting` (nothing can run: `detail` says why), `paused`, `idle` or `stopp
 | `seconds_left` | about how long the rest takes, at the speed it went while it ran; `null` until it has run a while |
 
 So "words: done, text: 60%, pictures: 10%, speech: waiting" is `done / total` of each, with its `state`.
+
+**Phases.** Front ends show the rounds as three phases, named the same everywhere:
+
+| Phase | Rounds | Depth (`reading.depth`) |
+|---|---|---|
+| Exact | `words`, `ocr` | `words` |
+| Embeddings | `text`, `pictures`, `sound` | `meaning` |
+| Transcribed | `speech`, and `sound` when the index has a `speech` round | `speech` |
+
+A file's sound round waits for its speech, so in an index that writes down what's said, `sound` finishes with
+Transcribed. A phase's progress is the mean of its rounds' `done / total`, since their units differ, and its time left
+the longest of their `seconds_left`, since they run side by side.

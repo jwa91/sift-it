@@ -16,7 +16,7 @@ There is one index for everything. An index of another version isn't migrated: i
 
 ## One index
 
-One index gives one ranked list across photos, PDFs, recordings and code, with scores on one scale, no file embedded
+One index gives one ranked list across photos, PDFs, audio and code, with scores on one scale, no file embedded
 twice, and nothing to load or unload by hand. Focus comes from filters, not from separate indexes: a search can carry
 the kinds it wants.
 
@@ -34,10 +34,9 @@ encoder, which is four compiled Core ML models and a vocabulary.
   SHA-256 of a file it keeps in LFS, else its git blob id. So a model of one file is there when any repository's folder
   in the cache holds a whole blob of that name, whichever app or revision put it there. The speech model is a folder:
   it's there when its revision's folder in its repository holds each of its files whole, since that folder is what
-  Core ML loads (compiled models load through the cache's links as they are). Handy's GGUF of Parakeet Ultra served
-  sift-it while it ran transcribe.cpp, and doesn't any more. What's missing is downloaded at a pinned revision and
-  checked against its hash before it gets that name. sift-it only adds what's missing to the cache and never removes
-  anything, and uninstalling it leaves the files there for the other apps.
+  Core ML loads (compiled models load through the cache's links as they are). What's missing is downloaded at a pinned
+  revision and checked against its hash before it gets that name. sift-it only adds what's missing to the cache and
+  never removes anything, and uninstalling it leaves the files there for the other apps.
 - **Loaded once.** llama.cpp maps the weights from their files and Metal uses them in place, so the engine and the
   indexer share the text model's pages, and macOS can drop them when memory runs short and read them again. Only the
   vision and audio encoders are read into memory of their own: llama.cpp's mtmd copies them. Core ML gives the Neural
@@ -60,22 +59,20 @@ mapped model files come on top, as file pages in memory, counted once however ma
 - While speech is written down with the models taking turns, the indexer holds 360 MB and the speech helper 110 MB,
   and the Neural Engine 607 MB for it.
 - The engine and the indexer reading text at once hold 500 MB together.
-- ggml's Metal backend keeps its buffers resident for three minutes after each call (residency sets, macOS 15 and
-  later), renewed by a thread that wakes every 5 ms for as long as the process lives, idle or not: 174 times a second in
-  an idle engine. In the engine, one search by meaning kept about 330 MB of the GPU's memory wired for three minutes.
-  sift-it turns them off (`GGML_METAL_NO_RESIDENCY`): Metal makes memory resident for the calls that use it, nothing
-  stays wired between calls, and the idle engine doesn't wake. Embedding is as fast, within the noise of three rounds of
-  `sift-it bench-embed` (medians, without and with): a query 10.7 and 11.9 ms, 44 and 45 passages a second, 30 s of
-  sound 309 and 318 ms. A shorter keep-alive (`GGML_METAL_RESIDENCY_KEEP_ALIVE_S`) would let the memory go sooner, but
-  the thread would keep waking.
-- The environment llama.cpp wants is set first thing, while one thread runs (`embedder::set_environment`).
-  - **What's set:** the residency switch above, and AGX_RELAX_CDM_CTXSTORE_TIMEOUT=1, which ggml's Metal backend adds
-    itself when it registers.
-  - **Why it matters:** macOS reallocates the environment's list to add a variable, so a process another thread starts
-    at that moment can get a list that was just freed. When the indexer loaded the model, its readers were starting
-    textutil, and two or three documents failed with "Bad address" now and then.
-  - **Now:** set beforehand, the backend's setenv rewrites the same value in place. `make selftest` fails if loading
-    the models changes the environment.
+- ggml's Metal backend can keep its buffers resident for three minutes after each call (residency sets, macOS 15 and
+  later), renewed by a thread that wakes every 5 ms for as long as the process lives, idle or not. sift-it turns them
+  off (`GGML_METAL_NO_RESIDENCY`): Metal makes memory resident for the calls that use it, nothing stays wired between
+  calls, and the idle engine doesn't wake. With them on, one search by meaning keeps about 330 MB of the GPU's memory
+  wired for three minutes, and an idle engine wakes 174 times a second. Embedding is as fast either way, within the
+  noise of three rounds of `sift-it bench-embed` (medians, off and on): a query 10.7 and 11.9 ms, 44 and 45 passages a
+  second, 30 s of sound 309 and 318 ms. A shorter keep-alive (`GGML_METAL_RESIDENCY_KEEP_ALIVE_S`) would let the
+  memory go sooner, but the thread would keep waking.
+- The environment llama.cpp wants is set first thing, while one thread runs (`embedder::set_environment`): the
+  residency switch above, and AGX_RELAX_CDM_CTXSTORE_TIMEOUT=1, which ggml's Metal backend would add itself when it
+  registers. macOS reallocates the environment's list to add a variable, so a process another thread starts at that
+  moment can get a list that was just freed: a reader starting textutil while the model loads fails with "Bad
+  address". Set beforehand, the backend's setenv rewrites the same value in place. `make selftest` fails if loading
+  the models changes the environment.
 
 ## Indexing
 
@@ -85,16 +82,20 @@ Every vector it writes is f32, and what it produces never depends on the Mac it 
 ### Rounds
 
 It goes over the whole collection in rounds, each with one tool, so that what's cheap is searchable soon, and a model
-loads once for everything that needs it rather than once per file:
+loads once for everything that needs it rather than once per file. The rounds make up three phases, which is how front
+ends show them:
 
-| Round | Its tool, on its chip | Reads | So a file is found by |
-|---|---|---|---|
-| words | none: readers, on the CPU | every file | its name, tags and metadata, and the text that's simply in it: plain text, code, records, a PDF's text layer, documents through textutil |
-| text | the text model, on the GPU | passages | what they mean |
-| OCR | Vision's text recognition, on the Neural Engine | screenshots, scanned pages | the text on them |
-| pictures | the text model with its vision encoder, on the GPU | photos, screenshots, scanned pages with little text, video frames | what they show |
-| sound | the text model with its audio encoder, on the GPU | recordings, a video's sound | what they sound like |
-| speech | Parakeet Ultra in the speech helper, on the Neural Engine | recordings, a video's sound | what's said in them |
+| Round | Phase | Its tool, on its chip | Reads | So a file is found by |
+|---|---|---|---|---|
+| words | Exact | none: readers, on the CPU | every file | its name, tags and metadata, and the text that's simply in it: plain text, code, records, a PDF's text layer, documents through textutil |
+| text | Embeddings | the text model, on the GPU | passages | what they mean |
+| OCR | Exact | Vision's text recognition, on the Neural Engine | screenshots, scanned pages | the text on them |
+| pictures | Embeddings | the text model with its vision encoder, on the GPU | photos, screenshots, scanned pages with little text, video frames | what they show |
+| sound | Embeddings | the text model with its audio encoder, on the GPU | audio, a video's sound | what they sound like |
+| speech | Transcribed | Parakeet Ultra in the speech helper, on the Neural Engine | audio, a video's sound | what's said in them |
+
+Exact needs no model, Embeddings needs EmbeddingGemma 2, and Transcribed needs Parakeet Ultra. Since a file's sound
+waits for its speech (below), in an index that writes down what's said the sound round finishes with Transcribed.
 
 - **A file's kind decides its rounds.** A note goes through words and text, a photo through words and pictures, a
   screenshot through words, OCR, pictures and text, a video through words, pictures, sound, speech and text. Its depth
@@ -104,16 +105,16 @@ loads once for everything that needs it rather than once per file:
   round embeds a window only every two minutes, since the passages say what's in it, and its sound adds little to
   them; music, nature and the stretches between what's said keep a window every 20 s. Speech is told from singing by
   its passages' words a second: half of them at least 1.8, where three podcasts and two narrated videos had 2.25 to
-  3.39, and an aria whose singing was written down as garbled French and Italian 1.29. On three podcasts, 327 windows
-  became 56. On a part of the demo folder (three podcasts, three pieces of music, five videos), indexing took 62 s
-  instead of 113, and each query for the music found what it did before.
-- **Words first, for every file.** They need no model, so an exact search finds everything within minutes of choosing
+  3.39, and an aria whose singing was written down as garbled French and Italian 1.29. On three podcasts that's 56
+  windows, where one every 20 s would be 327, and each query for the demo's music finds what it does with every
+  window.
+- **Words first, for every file.** They need no model, so an exact search finds everything within seconds of choosing
   the folders, while meaning comes round by round.
 - **What OCR and speech find is words at once.** It goes into the keyword index as soon as it's read, and its passages
   join the text round like any others.
 - **Cheapest first.** A round's queue goes from the file with the least to do in it to the one with the most.
 - **An item at a time.** A round works in items: a file, a batch of 16 passages, ten pages of a scan, or five minutes
-  of a video. What an item found is written when it ends, with where the next one goes on. A recording's sound is read
+  of a video. What an item found is written when it ends, with where the next one goes on. Audio is read
   in one go, and every five minutes what it found is written with how far it got: it stops there when the plan needs
   its lane. So a file stopped partway goes on from there, and what runs can change between any two items, or at such a
   checkpoint, without losing work.
@@ -148,12 +149,11 @@ goes slower.
   other (below).
 - **A loaded tool works through its queue.** Rounds bring each other work: OCR and speech bring the text round
   passages as they read. Taken in order alone, text would push speech out whenever passages wait on a small budget,
-  and speech text, every second or two: at 1024 MB, three podcasts started the speech helper 14 times and took 29 s
-  instead of 24. Now the passages wait for speech to be done, and the helper starts once.
+  and speech text, every second or two: at 1024 MB, three podcasts would start the speech helper 14 times and take
+  29 s instead of 24. So the passages wait for speech to be done, and the helper starts once.
 - **The text model stays while it fits** beside what runs, counted in the budget: loading it again takes only 0.2 s,
-  but the other rounds bring it passages every second or two. When it doesn't fit, it goes. At 1200 MB with speech
-  alone, the indexer held 261 to 374 MB beside the helper while the text model stayed (and its 296 MB file mapped);
-  it holds 108 to 194 MB now.
+  but the other rounds bring it passages every second or two. When it doesn't fit, it goes: at 1200 MB with speech
+  alone, the indexer holds 108 to 194 MB beside the helper.
 - **Each lane that reads has a reader,** in the budget: the words round's, and the GPU's media round's. More read at
   once with what's left, two to four in all (a third of the cores).
 
@@ -201,15 +201,15 @@ The budget is a ceiling, and macOS says when memory runs short (a memory-pressur
 
 On battery, `indexing.on_battery` decides what goes on:
 
-- `words`, the default: the words and OCR rounds (no model: every file found by its exact words, the text on
-  screenshots and scans included) and new files, while the other rounds wait for a charger, and the old files' work in
+- `words`, the default: Exact, the words and OCR rounds (no model: every file found by its exact words, the text on
+  screenshots and scans included), and new files, while the other rounds wait for a charger, and the old files' work in
   hand stops at its next checkpoint. Meaning costs energy: on the M5, above idle, a thousand passages take 408 J, a
   photo 1.9 J, a video frame 0.8 J, 30 s of sound 2.6 J, and an hour of speech 116 J. The text of a large collection
   can take more than a MacBook Air's whole battery (190 kJ).
 - `all`: everything goes on.
 - `none`: nothing does, until there's a charger.
 
-Low Power Mode lets only words, OCR and new files go, or nothing at `none`. `sift-it index` doesn't wait: it was asked to
+Low Power Mode lets only Exact and new files go, or nothing at `none`. `sift-it index` doesn't wait: it was asked to
 index now.
 
 ### How far it is
@@ -217,55 +217,37 @@ index now.
 Each round knows how far it is: what's done of what's known, in its own unit (files, passages, pictures, seconds of
 sound), and how fast it went while it ran, for the time it has left. There are no fixed rates: a fanless Mac slows as
 it warms, and the rounds measure that as they go. So status can say "words: done, text: 60%, pictures: 10%, speech:
-waiting", and the time left once a round has run a while. A round's total grows while the rounds before it find more:
-the text round's passages, as words, OCR and speech read them.
+waiting", and the time left once a round has run a while. Front ends sum the rounds up by phase: "Exact ✓ ·
+Embeddings 60% · about 12 min". A round's total grows while the rounds before it find more: the text round's
+passages, as words, OCR and speech read them.
 
 Before a folder is indexed, `sift-it estimate` says what each round will have to do in it and about how long that
 takes, at the depth each file is read, from rates measured on an M5 (`src/ingest/discover/cost.rs`). It looks into a
-file as little as it can: a recording's or a video's length and whether it has sound, and four of a PDF's pages for
+file as little as it can: an audio or video file's length and whether it has sound, and four of a PDF's pages for
 whether it's scanned. Then it runs the plan at `indexing.memory_mb` over that work, for how long all of it takes with
-the rounds on different chips side by side. On the demo folder it says 2,027 s, and indexing took 2,037 s at 2048 MB
-and 2,109 s at `auto`; for three of its podcasts it says 101 s, which took 94.
+the rounds on different chips side by side.
 
 Measured on an M5 with 24 GB:
 
-- **The demo folder:** 628 files (428 photos, 91 videos, 71 recordings, 38 documents and texts, 28 hours of sound),
-  read with `sift-it index` while the engine searched by meaning every 5 s, file by file before and in rounds after.
-  The peaks are each process's footprint, and the Neural Engine's memory after the plus.
-
-  | `memory_mb` | | Every file found by its words | Text by meaning | All done | Indexer | Speech helper | Engine | All at once |
-  |---|---|---|---|---|---|---|---|---|
-  | 2048 | before | 2,171 s | 2,179 s | 2,844 s | 1,018 MB | 149 + 607 MB | 290 MB | |
-  | | after | 5 s | 93 s | 2,037 s | 756 MB | 313 + 607 MB | 385 MB | 1,764 MB |
-  | 4096 | before | 2,130 s | 2,140 s | 2,164 s | 1,107 MB | 116 + 607 MB | 316 MB | 2,123 MB |
-  | | after¹ | 5 s | 104 s | 2,131 s | 822 MB | 336 + 607 MB | 309 MB | 1,934 MB |
-  | `auto` (6 GB) | before | 2,117 s | 2,127 s | 2,151 s | 1,072 MB | 104 + 607 MB | 309 MB | 2,041 MB |
-  | | after | 6 s | 104 s | 2,109 s | 767 MB | 342 + 607 MB | 506 MB | 1,843 MB |
-
-  ¹ Measured with an earlier plan, in which the text round could push out a loaded tool and the words and media
-  lanes each took all the readers. At 2048 MB and `auto`, the plan as it is now found every file by its words 5 s
-  sooner and as soon, text by meaning 8 s and 3 s sooner, and was all done 38 s and 26 s sooner.
-
-  Read file by file, a file was found only once all of it was read, and the cheapest went first: a book and the long
-  podcasts came last, so nearly everything was found only at the end. All done is the GPU's work, which is the same
-  either way; at 2048 MB speech was written down after the reading before, and beside it now. The indexer holds less
-  because it never has both encoders loaded.
-
-- **The same index.** The testbed indexed in rounds has the segments it had read file by file, all 578, with the same
-  places and text, and its 115 vectors are the same (cosine 1.0). `make eval` and `make selftest` give what they did.
-  On the demo, all segments but 36 passages of speech are the same, and those differ in a word or two: two runs file
-  by file differ in 39, since the speech model doesn't write the same twice to the letter. Of the 21,931 vectors,
-  the frames and pictures are the same to the bit, and the rest at a cosine of 0.99997 or more.
+- **The demo folder:** 628 files (428 photos, 91 videos, 71 audio files, 38 documents and texts, 28 hours of sound),
+  indexed with `sift-it index` at 2048 MB, 4096 MB and `auto` (6 GB), while the engine searched by meaning every 5 s.
+  At each budget every file was found by its words after 5 to 6 s, and text by its meaning after 93 to 104 s. At
+  their peaks, as footprint, the indexer held 756 to 822 MB, the speech helper 313 to 342 MB and 607 MB on the Neural
+  Engine, and the engine 309 to 506 MB: 1,764 to 1,934 MB together. The indexer never has both encoders loaded.
+- **The same index, whatever the plan.** What runs side by side, and in what order, changes nothing that's written:
+  between two runs of the demo, of its 21,931 vectors the frames and pictures are the same to the bit, and the rest
+  at a cosine of 0.99997 or more. Only speech differs, in a word or two of a few dozen passages, since the speech model
+  doesn't write the same twice to the letter.
 - **New files first.** In the daemon at 2048 MB, a screenshot saved while the GPU read a podcast's sound was found by
   its words 1.8 s after it landed (1.5 s of that is `indexing.quiet_ms`), by the text on it at 2.7 s, by that text's
   meaning at 3.3 s, and by what it shows at 6.3 s: the sound round went on to its next checkpoint, and the vision
   encoder took over.
-- **An item at a time.** A podcast whose sound round was stopped at 600 s went on from there, and its 105 windows
-  are those of one read, to the bit (cosine 1.0): a read that starts partway warms the decoder up first
+- **An item at a time.** A podcast whose sound round was stopped at 600 s goes on from there, and its windows are
+  those of one read, to the bit (cosine 1.0): a read that starts partway warms the decoder up first
   (docs/audio-decoding.md). A video's frames go on after the frame kept last, which the item before wrote down, and
   are the same too. Reading sound in five-minute items that each started partway wasn't: in one of the demo's VBR MP3s
   (music), AVFoundation's seek lands a fraction of a second off, and every window after the first seek was shifted
-  (cosine 0.977). So a recording is read in one go, and only one that was stopped is read from partway.
+  (cosine 0.977). So an audio file is read in one go, and only one that was stopped is read from partway.
 - **OCR and speech on the Neural Engine.** The 362 pages of the demo's PDFs as screenshots, and ten of its podcasts
   (6.4 hours), at `auto`:
 
@@ -279,8 +261,8 @@ Measured on an M5 with 24 GB:
   another process reading sound, 0.64 s beside three busy cores).
 - **One thread for the GPU, and the writer.** It embeds a sound window in about 200 ms, and the lanes that need no GPU
   can't wait that long for each message: the words, OCR and speech lanes are answered between any two of the media
-  lane's pieces, and may run far ahead. When they were answered once a pass, OCR took 3 s a screenshot beside the
-  sound round in the same process, speech went at half its speed, and the demo's words took 107 s instead of 9.
+  lane's pieces, and may run far ahead. Answered once a pass, OCR would take 3 s a screenshot beside the sound round in
+  the same process, speech would go at half its speed, and the demo's words would take 107 s instead of 9.
 
 - The embedding model's batch size changes nothing: 17.7 passages a second one at a time, and 17.7, 18.1 and 18.0 in
   batches of 2,048, 4,096 and 8,192 tokens, with the same footprint. So it isn't part of the budget, and stays at
@@ -298,29 +280,27 @@ What's said is written down by Parakeet Ultra on the Neural Engine, through Flui
 helper. FluidAudio decodes a chunk of about three minutes in 15-second windows, each starting with the end of the one
 before (an 80 ms mel prefix, its `melChunkContext`), rather than at a silence nearby. The helper hands over each word
 with its time, and a passage ends with the first sentence that brings it to 160 characters, or where a pause of more
-than 4 s comes: 92% of the passages end with a sentence, where half of transcribe.cpp's 28-second windows did.
+than 4 s comes: 92% of the passages end with a sentence.
 
-Measured on an M5 with 24 GB, against transcribe.cpp 0.4.1 on the GPU with the same model:
+Measured on an M5 with 24 GB:
 
 - **Speed:** in the indexer, its passages embedded, about 220 times as fast as the sound plays: three podcasts and
-  four videos (124 minutes) in 34 s, against 118 s (63 times). On its own, 235 to 286 times, against 83 to 93.
-- **Energy:** 116 J an hour of sound, on battery, against 553 J.
-- **Memory:** 100 to 120 MB of its own on long recordings, plus the Neural Engine's copy of the model, 607 MB, and the
+  four videos (124 minutes) in 34 s. On its own, 235 to 286 times.
+- **Energy:** 116 J an hour of sound, on battery.
+- **Memory:** 100 to 120 MB of its own on long audio, plus the Neural Engine's copy of the model, 607 MB, and the
   32 MB it maps of what Core ML compiled for the Neural Engine. That copy doesn't show in its footprint: `footprint`
   lists it apart, as "owned physical footprint (neural)", and proc_pid_rusage as `ri_neural_footprint`. The first time
   a Mac loads the model, the Neural Engine compiles it (about 8 s), and Core ML keeps that in
-  `~/Library/Caches/sift-it-transcribe`. A run of short recordings, each a chunk of a length of its own, takes more:
+  `~/Library/Caches/sift-it-transcribe`. A run of short audio files, each a chunk of a length of its own, takes more:
   FluidAudio keeps a buffer of each for a while (`footprint`: large allocations of a chunk's size), and the demo's
   videos, cheapest first, took the helper to 245 to 336 MB before it let them go.
-- **Accuracy:** on FLEURS Dutch (read sentences, with human transcripts) 5.65 to 5.67% WER, against 5.49% (5.46%
-  published). On Dutch conversation (two NOS "De Dag" episodes), about 0.2 points of WER behind: 12 clear errors in 60
-  judged spans, against 10, and 19 without the mel prefix. On the demo's English podcasts and videos, the two differ
-  in 5.8% of the words: fillers, small words, and how a number is written.
-- **Numbers** come out as the model learned to write them, in either engine: most as digits (years, prices, times,
-  "1,500", "3,5 procent", "12 maart 2024"), small counts and ordinals often as words ("two tickets", "tien jaar",
-  "derde"). Where one engine writes "15" and the other "fifteen", the model's choice tipped the other way, in Dutch
-  as in English. FluidAudio's inverse text normalization (NeMo's) isn't used: it has no Dutch, and in English it also
-  writes "one of the" as "1 of the", and "at six and eight thirty" as "at 44".
+- **Accuracy:** on FLEURS Dutch (read sentences, with human transcripts) 5.65 to 5.67% WER, where 5.46% is published
+  for the model. On Dutch conversation (two NOS "De Dag" episodes), 12 clear errors in 60 judged spans, names among
+  them, and 19 without the mel prefix.
+- **Numbers** come out as the model learned to write them: most as digits (years, prices, times, "1,500", "3,5
+  procent", "12 maart 2024"), small counts and ordinals often as words ("two tickets", "tien jaar", "derde").
+  FluidAudio's inverse text normalization (NeMo's) isn't used: it has no Dutch, and in English it also writes "one of
+  the" as "1 of the", and "at six and eight thirty" as "at 44".
 - **The Neural Engine is shared** with Vision's OCR, which the reading uses for screenshots and scans (171 MB of the
   Neural Engine's memory, in the indexer). The two run at once without failing: 1,086 screenshots read beside speech
   (362 in the indexer, at `auto`, and 724 beside a helper writing down the demo's 30 podcasts without a pause), none
@@ -399,7 +379,7 @@ loading anything again, since every form of the vectors is mapped. There are no 
 
 An exact scan reads every row, so it's only fast while those pages stay in memory. `auto`, the default, picks the most
 precise form whose scan fits `search.memory_mb`. That budget is 10% of the Mac's memory unless set; 800 MB holds exact
-f32 for some 260,000 vectors and exact f16 for some 520,000.
+f32 for some 270,000 vectors and exact f16 for some 550,000.
 
 A sketch search goes in two steps. First it estimates every row's cosine from its sketch, with the kind filter as a
 mask. The query stays exact: each dimension counts by how much of the query is in it and how far the partition's rows
@@ -453,11 +433,11 @@ shows a reason to vary it.
 The index stores, per file, a fingerprint of how it was read: its reader's version and the reading values that reader
 uses, as the cascade resolves them for that file. A sync compares it like the size and the modified time, so a change
 queues exactly the files it affects, wherever in the cascade it was made. Whether speech is written down stays out of
-it: that comes after reading, so moving between `meaning` and `speech` adds or drops transcripts without reading a
-file again. Two more records cover the models, and each brings back only what it covers. `embedder::VECTOR_SOURCE`
-covers every vector: another embedding model reads every file again, and embeds what's written down of recordings as
-it was written down, without writing it down again. `speech::SOURCE` covers what's written down: another speech
-model writes down every recording again, and nothing else.
+it: that comes after reading, so moving between `meaning` and `speech` adds or drops transcripts without reading a file
+again. Two more records cover the models, and each brings back only what it covers. `embedder::VECTOR_SOURCE` covers
+every vector: another embedding model reads every file again, and embeds what's written down of audio and video as it
+was written down, without writing it down again. `speech::SOURCE` covers what's written down: another speech model
+writes down all audio and video again, and nothing else.
 
 ### The cascade
 
@@ -470,11 +450,11 @@ folder.
 `ignore` decides what's in the index. `reading.depth` decides how deep a file in it is read, in three stages that
 build on each other:
 
-| Depth | A file is found by | Costs |
-|---|---|---|
-| `words` | its name, its tags and the words in it: text, a PDF's text layer, text on screenshots and scans | little, and no model |
-| `meaning` | also what it means: passages, pictures, video frames and sound, embedded | most of the work |
-| `speech` | also what's said in it, written down and embedded | time per hour of sound |
+| Depth | Phase | A file is found by | Costs |
+|---|---|---|---|
+| `words` | Exact | its name, its tags and the words in it: text, a PDF's text layer, text on screenshots and scans | little, and no model |
+| `meaning` | Embeddings | also what it means: passages, pictures, video frames and sound, embedded | most of the work |
+| `speech` | Transcribed | also what's said in it, written down and embedded | time per hour of sound |
 
 `speech`, the default, is everything. For kinds without sound it's the same as `meaning`. A folder of raw footage can
 be `words`, a folder of music `meaning`.
@@ -623,7 +603,7 @@ A folder with its own git repository is a project. Its code is handled apart fro
 - A search of code, by `code:`, the code filter, or `--here` inside a project, covers the code of active projects only.
   Other searches never show code, only project summaries.
 
-Pictures, PDFs and recordings inside a project are indexed like any other file.
+Pictures, PDFs and audio inside a project are indexed like any other file.
 
 Today the median a lift is measured from counts code vectors, even in searches that never show code. Once code is only
 in memory for code searches it doesn't, so ranking shifts even with the same values: run `make eval` and the demo
@@ -653,7 +633,7 @@ photo library. It costs a detection on every picture. Screenshot then becomes a 
 
 Chapters come from explicit structure when a file has it: PDF outlines, markdown headings, chapter markers in audio and
 video. Otherwise a chapter ends where the similarity between neighbouring segments drops sharply. One threshold serves
-every kind. Text nearly always has structure from its formatting, so these breaks matter most for recordings without
+every kind. Text nearly always has structure from its formatting, so these breaks matter most for audio without
 chapter markers, like a badly tagged podcast. The engine computes them from the stored vectors, so tuning the
 threshold never embeds anything again.
 
@@ -700,7 +680,7 @@ segments keeps the built-in values, and `sift-it status` shows what was measured
   the rest as it grows, so the share it takes should fall, and a 32nd would keep up; a large real collection will
   tell. `sift-it eval --compare docs/demo-queries.json` measures the demo collection.
 - What a project summary needs: which files, and how many commit messages.
-- The chapter break threshold, tuned on recordings without chapter markers.
+- The chapter break threshold, tuned on audio without chapter markers.
 - How a word found only in metadata counts when the query has a number, which makes the words decide. "beach 2017"
   belongs in the eval set.
 - Whether 10% of memory is the right default search budget.

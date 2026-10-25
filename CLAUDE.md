@@ -1,7 +1,8 @@
 # sift-it
 
-Search the files on a Mac by what's in them: a Rust CLI around EmbeddingGemma 2 (llama.cpp with Metal, statically
-linked), Apple's frameworks for reading files, and SQLite. The CLI is the product; front ends are clients of it, through
+Search the files on a Mac by what's in them: a Rust engine and CLI around EmbeddingGemma 2 (llama.cpp with Metal,
+statically linked), Parakeet Ultra (FluidAudio, in the Swift speech helper), Apple's frameworks for reading files, and
+SQLite. Front ends (the Sift It app in sift-it-mac, Raycast) are clients of the engine, through `engine.sock` or
 `sift-it serve` and the protocol (docs/protocol.md), or `--json`.
 
 ## CLI Family Conventions

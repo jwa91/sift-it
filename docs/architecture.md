@@ -40,7 +40,8 @@ adapters    index (SQLite and vector files) · embedder (llama.cpp) · transcrib
 
 - **Discover:** which files are new or changed (by their reading fingerprint), queued for the words round.
 - **Rounds:** the policy of what indexing does, and in what order: the six rounds, the unit each counts in, which a
-  file of each kind passes through, and their order. Pure, and tested on its own.
+  file of each kind passes through, and their order. Pure, and tested on its own. Front ends show them as three
+  phases, Exact, Embeddings and Transcribed (docs/protocol.md).
 - **Extract:** a file becomes a stream of content, for one round at a time: its text and metadata (words), the text on
   its pictures (OCR), its pictures and frames, its sound, what's said in it (speech). Extracting decodes; it decides
   nothing about cutting.
@@ -71,14 +72,14 @@ A run has a thread for each lane, and items go between them on bounded channels:
 - **The OCR lane:** one thread, since Vision reads text in one picture at a time per process anyway.
 - **The speech lane:** one thread, which talks to the speech helper.
 
-The run's thread embeds a picture in about 120 ms and a sound window in 200 ms, and a batch of the text round's
-passages in a few hundred. What the other lanes hand back needs no GPU, and comes in many small messages (a passage, a
-page's text, a stretch of what's said), so it's taken between any two of the media lane's pieces, and those lanes may
-run far ahead: taken once a pass, each message waited for a picture's embedding, and OCR went six times slower beside
-the sound round, speech half as fast, and words crawled. The speech lane doesn't wait for a stretch to be stored at
-all: it goes on with the next, with the next file waiting beside it, and the run stops a file by naming it. On the
-GPU, the text round's batches go first while passages wait (unless the media round's work is new files'), and the
-media lane's pieces wait meanwhile.
+The run's thread embeds a picture in about 120 ms and a sound window in 200 ms, and a batch of the text round's passages
+in a few hundred. What the other lanes hand back needs no GPU, and comes in many small messages (a passage, a page's
+text, a stretch of what's said), so it's taken between any two of the media lane's pieces, and those lanes may run far
+ahead: taken once a pass, each message would wait for a picture's embedding, and OCR would go six times slower beside
+the sound round, speech half as fast, and words would crawl. The speech lane doesn't wait for a stretch to be stored at
+all: it goes on with the next, with the next file waiting beside it, and the run stops a file by naming it. On the GPU,
+the text round's batches go first while passages wait (unless the media round's work is new files'), and the media
+lane's pieces wait meanwhile.
 
 ### The query path
 
