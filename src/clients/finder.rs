@@ -39,7 +39,7 @@ const FILTERS: [(&str, &[Kind]); 7] = [
     ("everything", &[]),
     ("documents", &[Kind::Plaintext, Kind::Document, Kind::Structured]),
     ("pictures", &[Kind::Image, Kind::Screenshot]),
-    ("recordings", &[Kind::Audio]),
+    ("audio", &[Kind::Audio]),
     ("videos", &[Kind::Video]),
     ("code", &[Kind::Code]),
     ("conversations", &[Kind::Conversation]),

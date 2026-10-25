@@ -68,8 +68,8 @@ enum Command {
         /// Start with these words
         words: Vec<String>,
     },
-    /// Open a result where it matched: a recording at its moment, a PDF at its page, code at its line, a
-    /// conversation resumed
+    /// Open a result where it matched: audio at its moment, a PDF at its page, code at its line, a conversation
+    /// resumed
     Open {
         /// A result's number from the last search, or a file
         target: String,
@@ -486,7 +486,7 @@ fn index(json: bool, reindex: bool) -> Result<()> {
                 eprintln!("done: {files} files through their rounds, {failed} failed, in {seconds:.1} s")
             }
             ingest::Event::SpeechStopped { error } => {
-                eprintln!("what's said in recordings isn't written down: {error}")
+                eprintln!("what's said in audio isn't written down: {error}")
             }
             ingest::Event::Transcribing { .. } | ingest::Event::Rounds { .. } => {}
         }

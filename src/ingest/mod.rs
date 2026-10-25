@@ -109,7 +109,7 @@ impl Indexer {
             eprintln!("the index was made by another model or pipeline: everything is indexed again");
         }
         if index.adopt_speech_source(crate::adapters::speech::SOURCE)? {
-            eprintln!("what's said in recordings was written down by another speech model: it's written down again");
+            eprintln!("what's said in audio was written down by another speech model: it's written down again");
         }
         index.tidy_vectors()?;
         Ok(Self { index, embed: Embed::default() })
