@@ -251,11 +251,12 @@ impl Plan {
         };
         let mut queues: Vec<Queue> = queues.to_vec();
         queues.sort_by_key(|queue| (!queue.new, !loaded(queue.round), queue.round));
-        // What power lets go on: all of a round's work, or only new files'.
+        // What power lets go on: all of a round's work, or only new files'. At `words` that's every file's exact words:
+        // the words and OCR rounds, which need no model.
         let all = |round: Round| match (conditions.power, on_battery) {
             (Power::Charger, _) | (Power::Battery, OnBattery::All) => true,
             (_, OnBattery::None) => false,
-            _ => round == Round::Words,
+            _ => matches!(round, Round::Words | Round::Ocr),
         };
         let new_only = on_battery != OnBattery::None;
         let one_tool = conditions.pressure == Pressure::Warning;
@@ -470,23 +471,30 @@ mod tests {
     #[test]
     fn on_battery_words_and_new_files_go_on() {
         let battery = Conditions { power: Power::Battery, ..CALM };
-        let mut work = queues(&[Words, Text, Pictures, Speech]);
-        work[2].new = true;
+        let mut work = queues(&[Words, Text, Ocr, Pictures, Speech]);
+        work[3].new = true;
         let words = Plan::within(4096 * MB, 10, OnBattery::Words, battery, &work, &[], &[]);
         let runs: Vec<Running> = words.runs.clone();
-        assert_eq!(runs, [Running { round: Pictures, new_only: true }, Running { round: Words, new_only: false }]);
+        assert_eq!(
+            runs,
+            [
+                Running { round: Pictures, new_only: true },
+                Running { round: Words, new_only: false },
+                Running { round: Ocr, new_only: false }
+            ]
+        );
         assert!(words.waits.contains(&(Text, Wait::Charger)) && words.waits.contains(&(Pictures, Wait::Charger)));
         let all = Plan::within(4096 * MB, 10, OnBattery::All, battery, &work, &[], &[]);
-        assert_eq!(all.runs.len(), 4);
+        assert_eq!(all.runs.len(), 5);
         let none = Plan::within(4096 * MB, 10, OnBattery::None, battery, &work, &[], &[]);
         assert!(none.runs.is_empty());
         assert_eq!(none.waits_for(), Some(Wait::Charger));
         // Low Power Mode is `words` at most.
         let low = Conditions { power: Power::LowPowerMode, ..CALM };
         let low = Plan::within(4096 * MB, 10, OnBattery::All, low, &work, &[], &[]);
-        assert_eq!(rounds(&low), [Pictures, Words]);
-        // What it lets go on: words, and the new file's pictures.
-        assert!(words.lets(Words, false) && words.lets(Pictures, true));
+        assert_eq!(rounds(&low), [Pictures, Words, Ocr]);
+        // What it lets go on: words and OCR, and the new file's pictures.
+        assert!(words.lets(Words, false) && words.lets(Ocr, false) && words.lets(Pictures, true));
         assert!(!words.lets(Pictures, false) && !words.lets(Speech, true));
     }
 

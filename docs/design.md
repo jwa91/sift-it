@@ -185,14 +185,15 @@ The budget is a ceiling, and macOS says when memory runs short (a memory-pressur
 
 On battery, `indexing.on_battery` decides what goes on:
 
-- `words`, the default: words and new files, while the other rounds wait for a charger, and the old files' work in
+- `words`, the default: the words and OCR rounds (no model: every file found by its exact words, the text on
+  screenshots and scans included) and new files, while the other rounds wait for a charger, and the old files' work in
   hand stops at its next checkpoint. Meaning costs energy: on the M5, above idle, a thousand passages take 408 J, a
   photo 1.9 J, a video frame 0.8 J, 30 s of sound 2.6 J, and an hour of speech 116 J. The text of a large collection
   can take more than a MacBook Air's whole battery (190 kJ).
 - `all`: everything goes on.
 - `none`: nothing does, until there's a charger.
 
-Low Power Mode lets only words and new files go, or nothing at `none`. `sift-it index` doesn't wait: it was asked to
+Low Power Mode lets only words, OCR and new files go, or nothing at `none`. `sift-it index` doesn't wait: it was asked to
 index now.
 
 ### How far it is
