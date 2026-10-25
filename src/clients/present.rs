@@ -113,7 +113,7 @@ pub(super) fn kind_label(kind: Kind) -> &'static str {
         Kind::Structured => "data",
         Kind::Image => "picture",
         Kind::Screenshot => "screenshot",
-        Kind::Audio => "recording",
+        Kind::Audio => "audio",
         Kind::Video => "video",
         Kind::Code => "code",
         Kind::Conversation => "conversation",
