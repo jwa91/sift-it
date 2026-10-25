@@ -1,0 +1,2 @@
+{"timestamp": "2026-06-02T14:01:00.000Z", "type": "session_meta", "payload": {"id": "019a3f2e-0000-7000-8000-000000000001", "cwd": "/Users/someone/projects/bakery", "source": {"subagent": {"thread_spawn": {"parent_thread_id": "019a3f2e-7c41-7d20-b8e5-5f0c9d1a2b3c", "depth": 1}}}, "thread_source": "subagent", "parent_thread_id": "019a3f2e-7c41-7d20-b8e5-5f0c9d1a2b3c"}}
+{"timestamp": "2026-06-02T14:01:01.000Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "List the flours in the pantry."}]}}

@@ -9,6 +9,7 @@ use anyhow::{Context, Result, bail};
 use embedder::DIM;
 use protocol::{Kind, Round, Segment, Stats};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, Transaction, TransactionBehavior, params};
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -16,7 +17,7 @@ use std::path::{Path, PathBuf};
 const SCHEMA_VERSION: i64 = 7;
 
 /// The segments whose vectors the text round makes.
-const TEXT_SEGMENTS: &str = "('passage', 'page', 'ocr', 'speech')";
+const TEXT_SEGMENTS: &str = "('passage', 'page', 'ocr', 'speech', 'exchange')";
 
 /// The columns a FileRow is made of (file_row), of `files f`.
 /// A file's sound round waits while its speech round has work: the sound round listens closely only where little is
@@ -552,6 +553,30 @@ impl Writer {
         Ok(id)
     }
 
+    /// A file that grew, whose words can be read on from where its last read ended (a conversation's log, as its
+    /// session goes on): they're queued again from there, and what was read before stays.
+    pub fn queue_grown(&self, id: i64, file: &NewFile, cost: f64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE files SET size = ?2, modified = ?3 WHERE id = ?1",
+            params![id, file.size as i64, file.modified],
+        )?;
+        self.conn.execute(
+            "UPDATE work SET state = 'pending', done = 0, cost = ?2, fast = ?3, error = NULL, failed_at = NULL
+             WHERE file_id = ?1 AND round = 'words'",
+            params![id, cost, file.new],
+        )?;
+        Ok(())
+    }
+
+    /// Where a file's words go on from, when its last read said so (a conversation's log).
+    pub fn words_resume(&self, id: i64) -> Result<Option<serde_json::Value>> {
+        let resume: Option<Option<String>> = self
+            .conn
+            .query_row("SELECT resume FROM work WHERE file_id = ?1 AND round = 'words'", [id], |row| row.get(0))
+            .optional()?;
+        Ok(resume.flatten().and_then(|resume| serde_json::from_str(&resume).ok()))
+    }
+
     /// Whether what's said in a file is to be written down, when only that changed: nothing is read again. What was
     /// written down goes either way (it's to do, or not wanted). Before its words are read, its words round decides.
     pub fn set_speech(&self, id: i64, speech: bool) -> Result<()> {
@@ -619,19 +644,17 @@ impl Writer {
         if !as_handed_out(&tx, &work.file)? {
             return Ok(false);
         }
-        if first {
-            delete_read(&tx, work.file.id)?;
-        }
-        insert_segments(&tx, &folder, &work.file, &name_words(&work.file.path), segments)?;
+        let fresh = if first { clear_words(&tx, work, segments)? } else { Cow::Borrowed(segments) };
+        insert_segments(&tx, &folder, &work.file, &name_words(&work.file.path), &fresh)?;
         tx.commit()?;
         Ok(true)
     }
 
     /// Writes what the words round read of a file (its last segments, or all of them), what it learned (`info`), and
-    /// the rounds it passes through next, each with how much it has for it, in one transaction. `parts`: some of its
-    /// segments were written already (write_words_part), and stay. A file with nothing in it is still findable by its
-    /// name. Nothing is written (false) when the file left the index or changed since it was handed out: it's been
-    /// queued again.
+    /// the rounds it passes through next, each with how much it has for it, in one transaction, with where its next
+    /// read goes on (`resume`, for a file that grows). `parts`: some of its segments were written already
+    /// (write_words_part), and stay. A file with nothing in it is still findable by its name. Nothing is written
+    /// (false) when the file left the index or changed since it was handed out: it's been queued again.
     pub fn write_words(
         &mut self,
         work: &Work,
@@ -639,6 +662,7 @@ impl Writer {
         info: &serde_json::Value,
         rounds: &[(Round, f64)],
         parts: bool,
+        resume: Option<&serde_json::Value>,
     ) -> Result<bool> {
         let folder = self.vectors_folder();
         let tx = self.reader.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -646,13 +670,20 @@ impl Writer {
         if !as_handed_out(&tx, file)? {
             return Ok(false);
         }
-        if !parts {
-            delete_read(&tx, file.id)?;
-        }
+        let fresh = if parts { Cow::Borrowed(segments) } else { clear_words(&tx, work, segments)? };
+        let named = file_words(&file.path, &stored_info(&tx, file.id)?);
         merge_info(&tx, file.id, info)?;
         let name = file_words(&file.path, &stored_info(&tx, file.id)?);
-        insert_segments(&tx, &folder, file, &name, segments)?;
-        if segments.is_empty() && !parts {
+        if name != named && read_again_from(work).is_some() {
+            // What a read that goes on kept is found by the file's name and tags as they are now (a new title).
+            tx.execute("DELETE FROM words WHERE rowid IN (SELECT id FROM segments WHERE file_id = ?1)", [file.id])?;
+            tx.execute(
+                "INSERT INTO words (rowid, name, text) SELECT id, ?2, COALESCE(text, '') FROM segments WHERE file_id = ?1",
+                params![file.id, name],
+            )?;
+        }
+        insert_segments(&tx, &folder, file, &name, &fresh)?;
+        if segments.is_empty() && !parts && read_again_from(work).is_none() {
             placeholder(&tx, file.id, &name)?;
         }
         for &(round, amount) in rounds {
@@ -663,7 +694,7 @@ impl Writer {
                 params![file.id, round.as_str(), amount, work.new],
             )?;
         }
-        finish(&tx, work, &Done { done: 1.0, finished: true, ..Default::default() })?;
+        finish(&tx, work, &Done { done: 1.0, finished: true, resume: resume.cloned(), ..Default::default() })?;
         recount_text(&tx, file.id, work.new)?;
         tx.commit()?;
         Ok(true)
@@ -765,6 +796,8 @@ impl Writer {
             delete_read(&tx, file.id)?;
             placeholder(&tx, file.id, &file_words(&file.path, &stored_info(&tx, file.id)?))?;
             recount_text(&tx, file.id, false)?;
+            // What it read before is gone: its next read starts from the top.
+            tx.execute("UPDATE work SET resume = NULL WHERE file_id = ?1 AND round = 'words'", [file.id])?;
         }
         tx.execute(
             "UPDATE work SET state = 'failed', error = ?3, failed_at = ?4 WHERE file_id = ?1 AND round = ?2",
@@ -969,6 +1002,48 @@ fn delete_read(conn: &Connection, file_id: i64) -> Result<()> {
     Ok(())
 }
 
+/// Where a words round that goes on from where the last read ended reads again from (`resume.from`, a place in the
+/// file): what was read from there on may have changed since (a conversation's last exchange, which grew).
+fn read_again_from(work: &Work) -> Option<f64> {
+    (work.round == Round::Words).then(|| work.resume.as_ref()?.get("from")?.as_f64()).flatten()
+}
+
+/// Clears what an earlier read of a file's words left, before the first of its segments are written: all of it, or
+/// for a read that goes on, what it read again that changed. Of that, the segments that are as they were stay, their
+/// vectors with them, and aren't written again. Returns the segments to write.
+fn clear_words<'a>(tx: &Transaction, work: &Work, segments: &'a [NewSegment]) -> Result<Cow<'a, [NewSegment]>> {
+    let Some(from) = read_again_from(work) else {
+        delete_read(tx, work.file.id)?;
+        return Ok(Cow::Borrowed(segments));
+    };
+    let mut statement = tx.prepare_cached(
+        "SELECT id, segment, loc, loc_end, text FROM segments WHERE file_id = ?1 AND loc >= ?2 AND segment != 'speech'",
+    )?;
+    let mut before: Vec<(i64, NewSegment)> = statement
+        .query_map(params![work.file.id, from], |row| {
+            let segment = Segment::parse(&row.get::<_, String>(1)?).unwrap_or_default();
+            let (loc, loc_end, text) = (row.get(2)?, row.get(3)?, row.get(4)?);
+            Ok((row.get(0)?, NewSegment { segment, loc, loc_end, text, ..Default::default() }))
+        })?
+        .collect::<std::result::Result<_, _>>()?;
+    let mut fresh = Vec::new();
+    for segment in segments {
+        let same = before.iter().position(|(_, was)| {
+            (was.segment, was.loc, was.loc_end, &was.text)
+                == (segment.segment, segment.loc, segment.loc_end, &segment.text)
+        });
+        match same {
+            Some(at) => _ = before.swap_remove(at),
+            None => fresh.push(segment.clone()),
+        }
+    }
+    for (id, ..) in before {
+        tx.execute("DELETE FROM words WHERE rowid = ?1", [id])?;
+        tx.execute("DELETE FROM segments WHERE id = ?1", [id])?;
+    }
+    Ok(Cow::Owned(fresh))
+}
+
 /// Drops a file's segments of one sort.
 fn delete_kind(conn: &Connection, file_id: i64, segment: Segment) -> Result<()> {
     conn.execute(
@@ -1171,7 +1246,7 @@ mod tests {
         let renamed = store.queue(&found("/folder/new.txt"), None, 0.0).unwrap();
         assert_eq!(renamed, work.file.id);
         assert!(!store.fail(&work, "no such file", false).unwrap());
-        assert!(!store.write_words(&work, &[], &serde_json::json!({}), &[], false).unwrap());
+        assert!(!store.write_words(&work, &[], &serde_json::json!({}), &[], false, None).unwrap());
         assert_eq!(store.work_state(Path::new("/folder/new.txt"), Round::Words), "pending");
     }
 
@@ -1184,10 +1259,10 @@ mod tests {
         // The reading values changed while it was read: it's queued again, to be read the new way.
         let shorter = NewFile { reading: "shorter passages".into(), ..found("/a/note.txt") };
         store.queue(&shorter, Some(id), 0.0).unwrap();
-        assert!(!store.write_words(&work, &[], &serde_json::json!({}), &[], false).unwrap());
+        assert!(!store.write_words(&work, &[], &serde_json::json!({}), &[], false, None).unwrap());
         let again = next(&store, Round::Words, "/a/note.txt");
         assert_eq!(again.file.reading, shorter.reading);
-        assert!(store.write_words(&again, &[], &serde_json::json!({}), &[], false).unwrap());
+        assert!(store.write_words(&again, &[], &serde_json::json!({}), &[], false, None).unwrap());
     }
 
     #[test]
@@ -1207,6 +1282,58 @@ mod tests {
     }
 
     #[test]
+    fn a_read_that_goes_on_keeps_what_it_read_again_as_it_was() {
+        let index = TempIndex::new("goes-on");
+        let mut store = Writer::open(&index.path).unwrap();
+        let log = file("/a/session.jsonl", Kind::Conversation);
+        let id = store.queue(&log, None, 0.0).unwrap();
+        let said = |at: f64, text: &str| NewSegment {
+            segment: Segment::Exchange,
+            loc: Some(at),
+            loc_end: Some(at),
+            due: Some(Round::Text),
+            ..passage(text)
+        };
+        let ids = |store: &Reader| -> Vec<(i64, String, bool)> {
+            let mut statement = store
+                .conn
+                .prepare("SELECT id, text, row IS NOT NULL FROM segments WHERE file_id = ?1 ORDER BY id")
+                .unwrap();
+            statement.query_map([id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap().map(Result::unwrap).collect()
+        };
+        let work = next(&store, Round::Words, "/a/session.jsonl");
+        let resume = serde_json::json!({ "from": 20.0 });
+        let first = [said(10.0, "asked"), said(20.0, "asked again"), said(20.0, "answered so far")];
+        assert!(store.write_words(&work, &first, &serde_json::json!({}), &[], false, Some(&resume)).unwrap());
+        let due = store.due_text(false, 10).unwrap();
+        store.write_text(&due.iter().map(|due| (due, unit(1))).collect::<Vec<_>>()).unwrap();
+        let before = ids(&store);
+        assert!(before.iter().all(|(_, _, embedded)| *embedded));
+
+        // It grew: its words go on from where its last exchange started, which is read again.
+        assert_eq!(store.words_resume(id).unwrap(), Some(resume.clone()));
+        store.queue_grown(id, &NewFile { size: 2, modified: 2.0, ..log }, 0.0).unwrap();
+        let work = next(&store, Round::Words, "/a/session.jsonl");
+        assert_eq!(work.resume, Some(resume));
+        let grown = [said(20.0, "asked again"), said(20.0, "answered in full"), said(30.0, "asked a third time")];
+        let resume = serde_json::json!({ "from": 30.0 });
+        assert!(store.write_words(&work, &grown, &serde_json::json!({}), &[], false, Some(&resume)).unwrap());
+        let after = ids(&store);
+        // What's as it was keeps its row and its vector; what changed is written again, and waits for one.
+        assert_eq!(after[..2], before[..2]);
+        let rest: Vec<(&str, bool)> = after[2..].iter().map(|(_, text, embedded)| (text.as_str(), *embedded)).collect();
+        assert_eq!(rest, [("answered in full", false), ("asked a third time", false)]);
+        assert_eq!(totals(&store, Round::Text), (2.0, 4.0, 1));
+        // A read that fails forgets where it went on: the next starts from the top.
+        store
+            .queue_grown(id, &NewFile { size: 3, modified: 3.0, ..file("/a/session.jsonl", Kind::Conversation) }, 0.0)
+            .unwrap();
+        let work = next(&store, Round::Words, "/a/session.jsonl");
+        assert!(store.fail(&work, "can't read it", false).unwrap());
+        assert_eq!(store.words_resume(id).unwrap(), None);
+    }
+
+    #[test]
     fn a_big_files_words_are_written_in_parts() {
         let index = TempIndex::new("parts");
         let mut store = Writer::open(&index.path).unwrap();
@@ -1217,7 +1344,7 @@ mod tests {
         assert!(store.write_words_part(&work, &[due("one")], true).unwrap());
         assert!(store.write_words_part(&work, &[due("two")], false).unwrap());
         assert_eq!(texts(&store, id), ["one", "two"]);
-        assert!(store.write_words(&work, &[passage("three")], &serde_json::json!({}), &[], true).unwrap());
+        assert!(store.write_words(&work, &[passage("three")], &serde_json::json!({}), &[], true, None).unwrap());
         assert_eq!(texts(&store, id), ["one", "two", "three"]);
         // Two of them wait for their vectors.
         assert_eq!(totals(&store, Round::Text), (0.0, 2.0, 1));
@@ -1234,7 +1361,9 @@ mod tests {
         let words = next(&store, Round::Words, "/a/scan.pdf");
         let info = serde_json::json!({"pages": 3});
         assert!(
-            store.write_words(&words, &[due("page one"), due("page two")], &info, &[(Round::Ocr, 1.0)], false).unwrap()
+            store
+                .write_words(&words, &[due("page one"), due("page two")], &info, &[(Round::Ocr, 1.0)], false, None)
+                .unwrap()
         );
         assert_eq!(store.queues().unwrap(), [(Round::Text, true, false), (Round::Ocr, true, false)]);
 
@@ -1281,7 +1410,7 @@ mod tests {
         let mut store = Writer::open(&index.path).unwrap();
         store.queue(&file("/a/scan.pdf", Kind::Document), None, 1.0).unwrap();
         let words = next(&store, Round::Words, "/a/scan.pdf");
-        assert!(store.write_words(&words, &[], &serde_json::json!({}), &[(Round::Ocr, 2.0)], false).unwrap());
+        assert!(store.write_words(&words, &[], &serde_json::json!({}), &[(Round::Ocr, 2.0)], false, None).unwrap());
         let page = |loc: f64| NewSegment {
             segment: Segment::Picture,
             loc: Some(loc),
@@ -1322,7 +1451,7 @@ mod tests {
             } else {
                 &[(Round::Sound, 60.0)]
             };
-            assert!(store.write_words(&words, &[], &serde_json::json!({}), rounds, false).unwrap());
+            assert!(store.write_words(&words, &[], &serde_json::json!({}), rounds, false, None).unwrap());
         }
         let sound = |store: &Writer| -> Vec<String> {
             let work = store.next(Round::Sound, false, 10).unwrap();
@@ -1353,7 +1482,7 @@ mod tests {
         let id = store.queue(&file("/a/podcast.mp3", Kind::Audio), None, 1.0).unwrap();
         let words = next(&store, Round::Words, "/a/podcast.mp3");
         let info = serde_json::json!({"duration": 500.0});
-        assert!(store.write_words(&words, &[], &info, &[(Round::Sound, 500.0)], false).unwrap());
+        assert!(store.write_words(&words, &[], &info, &[(Round::Sound, 500.0)], false, None).unwrap());
         // Findable by its name meanwhile.
         assert_eq!(texts(&store, id), [""]);
         let window = |at: f64| NewSegment {
@@ -1401,7 +1530,7 @@ mod tests {
         let id = store.queue(&recording, None, 0.0).unwrap();
         let words = next(&store, Round::Words, "/a/memo.m4a");
         let rounds = [(Round::Sound, 4.0), (Round::Speech, 4.0)];
-        assert!(store.write_words(&words, &[], &serde_json::json!({"duration": 4.0}), &rounds, false).unwrap());
+        assert!(store.write_words(&words, &[], &serde_json::json!({"duration": 4.0}), &rounds, false, None).unwrap());
         let end = Done { done: 4.0, finished: true, ..Default::default() };
         let said = NewSegment {
             segment: Segment::Speech,
@@ -1424,7 +1553,7 @@ mod tests {
         assert_eq!(texts(&store, id), ["buy milk"]);
         assert!(stored(&store, id).is_empty());
         let words = next(&store, Round::Words, "/a/memo.m4a");
-        assert!(store.write_words(&words, &[], &serde_json::json!({"duration": 4.0}), &rounds, false).unwrap());
+        assert!(store.write_words(&words, &[], &serde_json::json!({"duration": 4.0}), &rounds, false, None).unwrap());
         assert_eq!(store.work_state(Path::new("/a/memo.m4a"), Round::Speech), "done");
         assert_eq!(totals(&store, Round::Text), (0.0, 1.0, 1));
         let waiting = store.due_text(false, 10).unwrap();

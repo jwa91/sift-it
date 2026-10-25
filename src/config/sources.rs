@@ -19,7 +19,9 @@ pub struct Sources {
     /// output and secrets are always left out.
     pub ignore: Vec<Pattern>,
     /// The file types of each kind, by extension. A kind left out keeps its defaults, and an empty list reads none.
-    /// Screenshots are pictures macOS (or a screenshot tool) marked as one.
+    /// Screenshots are pictures macOS (or a screenshot tool) marked as one. Conversations are the JSON Lines files whose
+    /// first lines are an agent's session log (Claude Code's, Codex's), wherever they are: their types are the ones
+    /// such a log can have, and with none, logs aren't read at all.
     #[serde(deserialize_with = "kinds_over_defaults")]
     pub kinds: BTreeMap<Kind, Vec<String>>,
     /// Read source code too, and in code projects their notes and documents as well.
@@ -56,6 +58,7 @@ impl Default for Sources {
                         "svelte", "dart", "ex", "exs", "hs", "ml", "zig", "ipynb",
                     ]),
                 ),
+                (Kind::Conversation, types(&["jsonl"])),
             ]),
             code: false,
         }
@@ -81,9 +84,25 @@ pub fn is_pdf(path: &Path) -> bool {
 }
 
 impl Sources {
-    /// The kind a file type is read as, if it's one at all (code too, whether or not code is read).
+    /// The kind a file type is read as, if it's one at all (code too, whether or not code is read). A conversation is
+    /// known by what's in it, not by its type (discover::crawl::kind_of).
     pub fn kind_of(&self, extension: &str) -> Option<Kind> {
-        self.kinds.iter().find(|(_, types)| types.iter().any(|t| t == extension)).map(|(kind, _)| *kind)
+        self.kinds
+            .iter()
+            .filter(|(kind, _)| **kind != Kind::Conversation)
+            .find(|(_, types)| types.iter().any(|t| t == extension))
+            .map(|(kind, _)| *kind)
+    }
+
+    /// Whether a file of this type can be a conversation's log, and so is looked into: a JSON Lines file, or a type
+    /// `kinds.conversation` lists. With conversations off, a log is still known as one, and left out.
+    pub fn may_be_conversation(&self, extension: &str) -> bool {
+        matches!(extension, "jsonl" | "ndjson") || self.reads(Kind::Conversation, extension)
+    }
+
+    /// Whether files of this type are read as `kind`.
+    pub fn reads(&self, kind: Kind, extension: &str) -> bool {
+        self.kinds.get(&kind).is_some_and(|types| types.iter().any(|t| t == extension))
     }
 }
 

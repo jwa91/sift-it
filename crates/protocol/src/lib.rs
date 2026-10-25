@@ -152,7 +152,8 @@ pub struct Hit {
     /// The segment that matched best: where the result opens.
     pub segment: Segment,
     pub segment_id: i64,
-    /// Where in the file: a line, a page or a second, by the segment.
+    /// Where in the file: a line, a page or a second, by the segment; in a conversation, when it was said (seconds
+    /// since 1970).
     pub loc: Option<f64>,
     pub loc_end: Option<f64>,
     /// What it's ranked by: its best segment's lift, less what the length of the file explains, plus any bonus for
@@ -170,7 +171,8 @@ pub struct Hit {
     pub excerpt: Option<String>,
     pub modified: f64,
     pub size: u64,
-    /// What the reader found out about the file: pages, duration, size in pixels, tags.
+    /// What the reader found out about the file: pages, duration, size in pixels, tags; for a conversation, its title
+    /// (`tags.title`), the agent, the session, its folder (`cwd`) and the command that resumes it.
     pub info: Value,
 }
 
@@ -417,10 +419,12 @@ pub enum Kind {
     Video,
     /// Source code (only with `sources.code`).
     Code,
+    /// A conversation with an agent: a Claude Code or Codex session log, read as what was asked and answered.
+    Conversation,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 8] = [
+    pub const ALL: [Kind; 9] = [
         Kind::Plaintext,
         Kind::Document,
         Kind::Structured,
@@ -429,6 +433,7 @@ impl Kind {
         Kind::Audio,
         Kind::Video,
         Kind::Code,
+        Kind::Conversation,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -441,6 +446,7 @@ impl Kind {
             Kind::Audio => "audio",
             Kind::Video => "video",
             Kind::Code => "code",
+            Kind::Conversation => "conversation",
         }
     }
 
@@ -468,10 +474,12 @@ pub enum Segment {
     Frame,
     /// What's said in a recording or video, written down: a sentence or a few, with their time.
     Speech,
+    /// A prompt and what the agent answered, in a conversation (or a part of a long one), with when it was said.
+    Exchange,
 }
 
 impl Segment {
-    pub const ALL: [Segment; 7] = [
+    pub const ALL: [Segment; 8] = [
         Segment::Passage,
         Segment::Page,
         Segment::Picture,
@@ -479,6 +487,7 @@ impl Segment {
         Segment::Sound,
         Segment::Frame,
         Segment::Speech,
+        Segment::Exchange,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -490,6 +499,7 @@ impl Segment {
             Segment::Sound => "sound",
             Segment::Frame => "frame",
             Segment::Speech => "speech",
+            Segment::Exchange => "exchange",
         }
     }
 

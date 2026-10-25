@@ -1,11 +1,14 @@
 //! Which files get indexed, and finding them. Only the chosen folders are read, and in them never hidden folders,
 //! app bundles and libraries, build output, dependency folders, keys and other secrets, or what `sources.ignore`
 //! leaves out. An iCloud file that's only in the cloud is found with nothing read of it: reading it would download it.
+//! A chosen folder may be hidden itself (~/.claude/projects, where Claude Code keeps its sessions' logs): only what's
+//! below it is judged.
 
 use crate::adapters::macos::icloud;
 use crate::config::{Config, Settings, extension_of, is_pdf};
 use crate::index::NewFile;
 use crate::ingest;
+use crate::ingest::extract::conversation;
 use protocol::Kind;
 use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt;
@@ -193,13 +196,18 @@ fn walk(folder: &Path, config: &Config, in_project: bool, found: &mut Vec<Found>
     }
 }
 
-/// A folder never entered: dependencies, caches, packages, a project's build output.
+/// A folder never entered: dependencies, caches, packages, a project's build output, and what an agent kept for a
+/// session beside its log (Claude Code's tool output, subagents' transcripts, the title), which its conversation is.
 fn is_skipped_folder(path: &Path, in_project: bool) -> bool {
     let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
     name.starts_with('.')
         || SKIPPED_FOLDERS.contains(&name.as_str())
         || (in_project && SKIPPED_PROJECT_FOLDERS.contains(&name.as_str()))
         || PACKAGE_EXTENSIONS.contains(&extension_of(path).as_str())
+        || path.parent().is_some_and(|folder| {
+            let log = folder.join(format!("{name}.jsonl"));
+            log.is_file() && conversation::recognise(&log).is_some()
+        })
 }
 
 /// A folder with a project's marker in it: a code project.
@@ -311,10 +319,25 @@ fn is_secret(name: &str, extension: &str) -> bool {
         || lower.contains("credential")
 }
 
-/// A file's kind, by its type (`sources.kinds`), a picture of the screen being a screenshot. None for a type that
-/// isn't read.
+/// A file's kind, by its type (`sources.kinds`), a picture of the screen being a screenshot, and an agent's session
+/// log (by its first lines) a conversation. None for a type that isn't read, and for a subagent's transcript, which
+/// is part of the conversation that started it.
 pub fn kind_of(config: &Config, path: &Path) -> Option<Kind> {
-    let kind = config.sources.kind_of(&extension_of(path))?;
+    let extension = extension_of(path);
+    let sources = &config.sources;
+    if sources.may_be_conversation(&extension) {
+        // Only in iCloud, a log can't be told (its first lines would have to be downloaded): it's found by its type,
+        // as a conversation when only conversations are of it.
+        if icloud::cloud_only_at(path) {
+            let conversation = || sources.reads(Kind::Conversation, &extension).then_some(Kind::Conversation);
+            return sources.kind_of(&extension).or_else(conversation);
+        }
+        if let Some(log) = conversation::recognise(path) {
+            let read = !log.subagent && sources.reads(Kind::Conversation, &extension);
+            return read.then_some(Kind::Conversation);
+        }
+    }
+    let kind = sources.kind_of(&extension)?;
     let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
     Some(if kind == Kind::Image && is_screenshot(path, &name) { Kind::Screenshot } else { kind })
 }
@@ -370,6 +393,28 @@ mod tests {
             crawl(config).found.iter().map(|file| file.path.file_name().unwrap().to_string_lossy().into()).collect();
         names.sort();
         names
+    }
+
+    #[test]
+    fn a_sessions_own_folder_beside_its_log_is_left_out() {
+        let root = TempFolder::new("session-folder");
+        let log =
+            std::fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/conversations/claude.jsonl")).unwrap();
+        std::fs::write(root.0.join("6f1c2a9e.jsonl"), &log).unwrap();
+        std::fs::create_dir_all(root.0.join("6f1c2a9e/tool-results")).unwrap();
+        std::fs::write(root.0.join("6f1c2a9e/tool-results/output.txt"), "what a tool gave back").unwrap();
+        std::fs::create_dir_all(root.0.join("memory")).unwrap();
+        std::fs::write(root.0.join("memory/notes.md"), "a note").unwrap();
+        // A folder beside a file of its name that isn't a log is read.
+        std::fs::write(root.0.join("plants.jsonl"), "{\"name\": \"fern\"}\n").unwrap();
+        std::fs::create_dir_all(root.0.join("plants")).unwrap();
+        std::fs::write(root.0.join("plants/fern.txt"), "a fern").unwrap();
+        let config = config(&root.0);
+        assert_eq!(found(&config), ["6f1c2a9e.jsonl", "fern.txt", "notes.md", "plants.jsonl"]);
+        let kinds: Vec<Kind> = crawl(&config).found.iter().map(|file| file.kind).collect();
+        assert!(kinds.contains(&Kind::Conversation) && kinds.contains(&Kind::Structured));
+        let output = root.0.join("6f1c2a9e/tool-results/output.txt");
+        assert!(matches!(rescan(&config, &output), Rescan::Skipped));
     }
 
     #[test]

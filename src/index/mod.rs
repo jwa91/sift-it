@@ -208,7 +208,7 @@ pub mod testing {
             })
             .collect();
         let words = words.unwrap();
-        assert!(index.write_words(&words, &segments, &serde_json::json!({}), &[], false).unwrap());
+        assert!(index.write_words(&words, &segments, &serde_json::json!({}), &[], false, None).unwrap());
         words.file.id
     }
 }

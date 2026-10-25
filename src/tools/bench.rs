@@ -135,7 +135,7 @@ pub fn search(count: usize) -> Result<()> {
             };
             let words =
                 index::Work { file, round: protocol::Round::Words, amount: 1.0, done: 0.0, resume: None, new: false };
-            index.write_words(&words, &segments, &serde_json::json!({}), &[], false)?;
+            index.write_words(&words, &segments, &serde_json::json!({}), &[], false, None)?;
         }
     }
     println!("built an index of {count} vectors around {TOPICS} topics in {:.1} s", started.elapsed().as_secs_f64());

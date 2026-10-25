@@ -157,21 +157,27 @@ Ends `sift-it serve` once the requests before it are answered: `{"id": 10, "ok":
 
 | Field | |
 |---|---|
-| `path`, `name` | the file |
+| `path`, `name` | the file, and what it's called: its name, or a conversation's title |
 | `kind` | its Kind |
 | `segment`, `segment_id` | the segment that matched best, where the result opens |
-| `loc`, `loc_end` | where in the file: a line, a page or a second, by the segment |
+| `loc`, `loc_end` | where in the file: a line, a page or a second, by the segment; for an exchange, when it was said (seconds since 1970) |
 | `score` | what it's ranked by |
 | `lift`, `cosine` | how far its meaning stands above the query's median, and its cosine (`null` by words) |
 | `meaning`, `words`, `strong` | it matched by meaning; all of the query's words are in it; it's a strong match |
 | `excerpt` | about 300 characters around the query's words |
 | `modified`, `size` | seconds since 1970, bytes |
-| `info` | what the reader found out: pages, duration, size in pixels, tags |
+| `info` | what the reader found out: pages, duration, size in pixels, tags; for a conversation, see below |
 
 **Kind:** `plaintext`, `document`, `structured` (csv, tsv, json, jsonl, yaml, toml), `image`, `screenshot`, `audio`,
-`video`, `code`.
+`video`, `code`, `conversation` (a Claude Code or Codex session log, known by its first lines).
 
-**Segment:** `passage`, `page`, `picture`, `ocr`, `sound`, `frame`, `speech`.
+**Segment:** `passage`, `page`, `picture`, `ocr`, `sound`, `frame`, `speech`, `exchange` (a prompt and what the agent
+answered, or a part of a long one).
+
+**A conversation's `info`:** `tags.title` (its title: the one the app or the agent gave it, else its first prompt),
+`agent` (`claude` or `codex`), `session` (its id), `cwd` (the folder it ran in) and `resume`, the command that resumes
+it, as words, to run in `cwd`: `["claude", "--resume", "<session>"]` or `["codex", "resume", "<session>"]`. A
+segment's text reads as the conversation: `User: …`, then `Claude: …` or `Codex: …`, where the speaker changes.
 
 **Stats:** `files`, `done`, `pending`, `failed`, `cloud` (files only in iCloud whose work waits for their download:
 found by their names, or by what was read of them before macOS removed their download), `segments`, `vectors`,

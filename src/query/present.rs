@@ -48,8 +48,11 @@ fn telling(word: &str) -> bool {
 pub fn hit(index: &Reader, segment_id: i64, words: &[String]) -> Result<Option<Hit>> {
     let Some(row) = index.segment(segment_id)? else { return Ok(None) };
     let focus = row.text.as_deref().and_then(|text| focus(text, words));
+    // A conversation is called by its title: its log's name is a number.
+    let title = (row.kind == Kind::Conversation).then(|| row.info["tags"]["title"].as_str().map(str::to_string));
+    let name = Path::new(&row.path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
     let mut hit = Hit {
-        name: Path::new(&row.path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
+        name: title.flatten().unwrap_or(name),
         path: row.path,
         kind: row.kind,
         modified: row.modified,

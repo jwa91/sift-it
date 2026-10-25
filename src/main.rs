@@ -68,7 +68,8 @@ enum Command {
         /// Start with these words
         words: Vec<String>,
     },
-    /// Open a result where it matched: a recording at its moment, a PDF at its page, code at its line
+    /// Open a result where it matched: a recording at its moment, a PDF at its page, code at its line, a
+    /// conversation resumed
     Open {
         /// A result's number from the last search, or a file
         target: String,
@@ -307,8 +308,16 @@ fn run(cli: Cli) -> Result<()> {
         Command::Read { path, tokens } => {
             let path = config::expand(&path.to_string_lossy());
             let config = Config::load()?;
-            let kind = ingest::discover::crawl::kind_of(&config, &path)
-                .ok_or_else(|| anyhow::anyhow!("Sift It doesn't read .{} files", config::extension_of(&path)))?;
+            let kind =
+                ingest::discover::crawl::kind_of(&config, &path).ok_or_else(
+                    || match ingest::conversation::recognise(&path) {
+                        Some(log) if log.subagent => {
+                            anyhow::anyhow!("a subagent's transcript isn't read: its conversation is")
+                        }
+                        Some(_) => anyhow::anyhow!("conversations aren't read (sources.kinds.conversation)"),
+                        None => anyhow::anyhow!("Sift It doesn't read .{} files", config::extension_of(&path)),
+                    },
+                )?;
             let settings = config.reading.resolve(&path, kind);
             let mut model = if tokens {
                 Some(embedder::Embedder::load(&models::TEXT.require()?, embedder::Inputs::Documents)?)

@@ -154,9 +154,10 @@ src/
     rounds.rs            the rounds: their order and units, and which a file passes through
     discover/            what's new or changed (mod.rs), crawling (crawl.rs), what reading costs (cost.rs)
     read.rs              extract, segment and prepare, joined, for one round
-    extract/             per container: text, document, notebook, pdf, image, audio, video, speech
+    extract/             per container: text, document, notebook, pdf, image, audio, video, speech, an agent's
+                         session log (conversation)
     segment/             per content type: text by its form (passages; prose, code, records), pictures, frames,
-                         sound, speech
+                         sound, speech, a conversation's messages (exchanges)
     prepare.rs           prompts, fitting pictures, sound
     embed.rs             the embedding stage, the model's owner: the text model, and an encoder while needed
     write.rs             what a round found, put together and written

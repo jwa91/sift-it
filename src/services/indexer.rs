@@ -1,8 +1,9 @@
 //! `sift-it daemon`: the background indexer. It keeps the index in step with the chosen folders: a full sync when it
 //! starts (and every `indexing.full_sync_min`, in case an event was missed), then the paths macOS reports as changed
-//! (FSEvents), a moment after they go quiet. It indexes in rounds (ingest/rounds.rs), words first, as the plan says
-//! (resources::Plan): what runs side by side by `indexing.memory_mb`, what goes on on battery by
-//! `indexing.on_battery`, and less, or nothing, when macOS says memory is short. What changes in the folders goes
+//! (FSEvents), a moment after they go quiet (an agent's session log, once the agent waits). It indexes in rounds
+//! (ingest/rounds.rs), words first, as the plan says (resources::Plan): what runs side by side by
+//! `indexing.memory_mb`, what goes on on battery by `indexing.on_battery`, and less, or nothing, when macOS says memory
+//! is short. What changes in the folders goes
 //! first in every round it needs. It lets the model go after `indexing.release_model_s` with nothing to do. A change
 //! to config.json counts at once, with a full sync. While config.json can't be read, nothing is indexed: status.json
 //! says why, and the daemon waits for the file to change.
@@ -39,6 +40,9 @@ const WAIT_CHECK: Duration = Duration::from_secs(10);
 const SPEECH_RETRY: Duration = Duration::from_secs(300);
 /// Writing the vectors' next generation, when it failed (a full disk), is tried again after this long.
 const COMPACT_RETRY: Duration = Duration::from_secs(3600);
+/// A JSON Lines file may be a running session's log, which grows every few seconds while the agent works: it's
+/// handed over once it has been quiet this long (the agent waits for the user), and read on from where it was.
+const LOG_QUIET: Duration = Duration::from_secs(30);
 
 static RESYNC: AtomicBool = AtomicBool::new(false);
 static TOGGLE_PAUSE: AtomicBool = AtomicBool::new(false);
@@ -282,8 +286,16 @@ impl Changes {
     /// The paths that have settled, folded so a folder covers what's in it. The rest wait.
     fn take(&mut self) -> Vec<PathBuf> {
         self.drain();
-        let mut settled: Vec<PathBuf> =
-            self.paths.iter().filter(|(_, changed)| changed.elapsed() >= self.quiet).map(|(p, _)| p.clone()).collect();
+        let quiet = |path: &Path| match config::extension_of(path).as_str() {
+            "jsonl" | "ndjson" => self.quiet.max(LOG_QUIET),
+            _ => self.quiet,
+        };
+        let mut settled: Vec<PathBuf> = self
+            .paths
+            .iter()
+            .filter(|(path, changed)| changed.elapsed() >= quiet(path))
+            .map(|(p, _)| p.clone())
+            .collect();
         if settled.is_empty() {
             return Vec::new();
         }

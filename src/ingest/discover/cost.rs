@@ -18,6 +18,14 @@ const PDF_PAGE_TEXT: f64 = 0.004;
 const TEXTUTIL: f64 = 0.05;
 /// The words round: opening a picture, a recording or a video for its tags, its length, its metadata.
 const OPEN: f64 = 0.02;
+/// The words round: an agent's session log, read record by record for its messages: 365 MB of Claude Code's and
+/// Codex's logs in 0.27 s.
+const LOG_BYTES_PER_SECOND: f64 = 1e9;
+/// What's said in a session log, as a share of its bytes: 0.35% of those 365 MB (1.26 million characters). The rest is
+/// tool calls and what they gave back, the agent's thinking, and the app's own records. An exchange is a passage of
+/// its own, however short: their passages averaged 900 characters.
+const LOG_SAID: f64 = 0.0035;
+const EXCHANGE_FILL: f64 = 0.9;
 
 /// The text round: the text model reads about this many tokens a second, a passage's title and context included
 /// (PROMPT), at about 4 characters a token: `sift-it bench-embed` embeds 64 passages of 976 characters in 0.95 s
@@ -89,6 +97,7 @@ fn words(file: &Found, pages: impl FnOnce() -> usize) -> f64 {
         // Other documents are mostly packaging (zip, markup): a tenth of them is text.
         Kind::Document => TEXTUTIL + size / 10.0 / CUT_BYTES_PER_SECOND,
         Kind::Image | Kind::Screenshot | Kind::Audio | Kind::Video => OPEN,
+        Kind::Conversation => size / LOG_BYTES_PER_SECOND,
     }
 }
 
@@ -150,6 +159,7 @@ pub fn shares(file: &Found) -> Vec<Share> {
             Kind::Structured => passages.text(size, settings, 1.75 / PASSAGE_FILL),
             Kind::Document if is_pdf(&file.path) => passages.add(text_pages, PAGE_CHARS),
             Kind::Document => passages.text(size / 10.0, settings, 1.0),
+            Kind::Conversation => passages.text(size * LOG_SAID, settings, EXCHANGE_FILL),
             _ => {}
         }
         if passages.count > 0.0 {

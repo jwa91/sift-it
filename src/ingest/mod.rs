@@ -28,6 +28,7 @@ mod schedule;
 mod segment;
 mod write;
 
+pub use extract::conversation;
 pub use read::{Payload, Piece, fingerprint};
 pub use rounds::transcribes;
 pub use schedule::{Facts, Outcome, Stuck};

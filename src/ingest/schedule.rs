@@ -686,9 +686,10 @@ impl Indexer {
                 let title = titles
                     .entry(passage.file.id)
                     .or_insert_with(|| prepare::title(&passage.file.path, passage.file.kind));
-                // What's said in a recording is embedded with its title, when it has one.
+                // What's said in a recording is embedded with its title, when it has one, and a conversation with
+                // its own.
                 let title = match (&passage.title, passage.segment) {
-                    (Some(tag), Segment::Speech) => tag.as_str(),
+                    (Some(tag), Segment::Speech | Segment::Exchange) => tag.as_str(),
                     _ => title.as_str(),
                 };
                 prepare::prompt(title, passage.context.as_deref(), &passage.text)
@@ -855,6 +856,59 @@ mod tests {
             indexer.run(&config, &mut pressed(Pressure::Warning), &mut progress, &mut |_| {}, &|| false, &mut Vec::new);
         assert_eq!(outcome.unwrap(), Outcome::Done);
         assert_eq!(indexer.index.work_state(&path, Round::Words), "done");
+        std::fs::remove_dir_all(&folder).unwrap();
+    }
+
+    /// A conversation's log that grows as its session goes on is read on from where its last read ended: what was
+    /// read before stays (the same segments), and its last exchange, which grew, is read again with what came after.
+    #[test]
+    fn a_growing_conversation_is_read_on_from_where_it_ended() {
+        let folder = std::env::temp_dir().join(format!("sift-it-test-growing-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&folder);
+        std::fs::create_dir_all(folder.join(".claude/projects")).unwrap();
+        // Chosen itself, the hidden folder is read.
+        let projects = folder.join(".claude/projects");
+        let mut config = Config::default();
+        config.reading.all.depth = Some(Depth::Words);
+        config.sources.paths = vec![projects.clone()];
+        let log = projects.join("session.jsonl");
+        let whole =
+            std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/conversations/claude.jsonl"))
+                .unwrap();
+        // Up to the answer about peppers, without it.
+        let cut = whole.find("Peppers and chillies").map(|at| whole[..at].rfind('\n').unwrap() + 1).unwrap();
+        std::fs::write(&log, &whole[..cut]).unwrap();
+        let mut indexer = Indexer::new(Writer::open(&folder.join("index.sqlite")).unwrap()).unwrap();
+        let run = |indexer: &mut Indexer| {
+            let mut progress = Progress::default();
+            let outcome = indexer.run(&config, &mut calm, &mut progress, &mut |_| {}, &|| false, &mut Vec::new);
+            assert_eq!(outcome.unwrap(), Outcome::Done);
+        };
+        let found = |indexer: &Indexer, word: &str| {
+            let mut segments = Vec::new();
+            indexer
+                .index
+                .word_matches(&[word.into()], false, |segment, _| {
+                    segments.push(segment);
+                    true
+                })
+                .unwrap();
+            segments
+        };
+        indexer.sync(&config).unwrap();
+        run(&mut indexer);
+        let litres = found(&indexer, "litres");
+        assert_eq!((litres.len(), found(&indexer, "chillies").len(), found(&indexer, "sunniest")), (1, 1, vec![]));
+
+        std::fs::write(&log, &whole).unwrap();
+        indexer.sync_paths(&config, std::slice::from_ref(&log)).unwrap();
+        assert_eq!(indexer.index.work_state(&log, Round::Words), "pending");
+        run(&mut indexer);
+        assert_eq!(found(&indexer, "litres"), litres);
+        assert_eq!((found(&indexer, "sunniest").len(), found(&indexer, "pots").len()), (1, 1));
+        assert_eq!(found(&indexer, "chillies").len(), 1);
+        // Its title changed meanwhile: every passage is found by the new one, none by the old.
+        assert_eq!((found(&indexer, "vegetables").len(), found(&indexer, "tomatoes").len()), (3, 1));
         std::fs::remove_dir_all(&folder).unwrap();
     }
 

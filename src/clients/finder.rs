@@ -35,13 +35,14 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// The kinds Tab steps through.
-const FILTERS: [(&str, &[Kind]); 6] = [
+const FILTERS: [(&str, &[Kind]); 7] = [
     ("everything", &[]),
     ("documents", &[Kind::Plaintext, Kind::Document, Kind::Structured]),
     ("pictures", &[Kind::Image, Kind::Screenshot]),
     ("recordings", &[Kind::Audio]),
     ("videos", &[Kind::Video]),
     ("code", &[Kind::Code]),
+    ("conversations", &[Kind::Conversation]),
 ];
 
 const ACCENT: Color = Color::Blue;
@@ -429,7 +430,9 @@ fn make_preview(client: &mut Client, hit: &Hit, folder: &Path) -> Preview {
                 preview.text = segment_text(client);
             }
         }
-        Kind::Plaintext | Kind::Document | Kind::Structured | Kind::Code => preview.text = segment_text(client),
+        Kind::Plaintext | Kind::Document | Kind::Structured | Kind::Code | Kind::Conversation => {
+            preview.text = segment_text(client)
+        }
     }
     preview
 }

@@ -4,6 +4,7 @@
 //! one ended to where this one does (rounds::SLICE).
 
 use super::rounds::{self, Found};
+use super::segment::exchanges::Exchange;
 use super::segment::frames::Shots;
 use super::segment::passages::{self, Form, Text};
 use super::segment::pictures;
@@ -85,7 +86,7 @@ pub type Checkpoint<'a> = &'a mut dyn FnMut(&Ended) -> Result<bool>;
 /// it couldn't: the files it read (or failed to) are read again.
 pub fn version(kind: Kind) -> u32 {
     match kind {
-        Kind::Structured | Kind::Image => 1,
+        Kind::Structured | Kind::Image | Kind::Conversation => 1,
         Kind::Plaintext | Kind::Document | Kind::Screenshot | Kind::Code => 2,
         // Where speech was heard, the sound round keeps fewer windows (segment/sound.rs).
         Kind::Audio | Kind::Video => 3,
@@ -96,13 +97,13 @@ pub fn version(kind: Kind) -> u32 {
 /// the file is read again. Whether what's said in it is written down isn't in it: that comes after reading.
 pub fn fingerprint(path: &Path, kind: Kind, settings: &Settings) -> String {
     let words = match kind {
-        Kind::Plaintext | Kind::Structured | Kind::Code | Kind::Document | Kind::Screenshot => {
+        Kind::Plaintext | Kind::Structured | Kind::Code | Kind::Document | Kind::Screenshot | Kind::Conversation => {
             json!([settings.passage_chars, settings.max_passage_chars])
         }
         Kind::Image | Kind::Audio | Kind::Video => json!(null),
     };
     let meaning = settings.embeds().then(|| match kind {
-        Kind::Plaintext | Kind::Structured | Kind::Code | Kind::Audio => json!(null),
+        Kind::Plaintext | Kind::Structured | Kind::Code | Kind::Audio | Kind::Conversation => json!(null),
         Kind::Document if is_pdf(path) => json!(settings.text_tokens),
         Kind::Document => json!(null),
         Kind::Image => json!(settings.tokens),
@@ -222,6 +223,22 @@ impl<'a> Content<'a> {
     pub fn text(&mut self, segment: Segment, loc: Option<f64>, text: &str, form: Form) -> Result<()> {
         for passage in passages::passages(text, form, self.settings) {
             self.passage(segment, loc, None, passage)?;
+        }
+        Ok(())
+    }
+
+    /// An exchange of a conversation, cut as Markdown: each passage at when its first message was said, to when its
+    /// last one was. A passage after its exchange's first line is read with what was asked.
+    pub fn exchange(&mut self, exchange: &Exchange) -> Result<()> {
+        for mut passage in passages::passages(&exchange.text, Form::Markdown, self.settings) {
+            let (loc, loc_end) = (exchange.time(passage.first_line), exchange.time(passage.last_line));
+            if passage.first_line > 1 && !exchange.asked.is_empty() {
+                passage.context = match passage.context.is_empty() {
+                    true => exchange.asked.clone(),
+                    false => format!("{}\n{}", exchange.asked, passage.context),
+                };
+            }
+            self.passage(Segment::Exchange, Some(loc), Some(loc_end), passage)?;
         }
         Ok(())
     }
