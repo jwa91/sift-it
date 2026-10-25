@@ -42,6 +42,8 @@ pub struct From {
     pub resume: Option<serde_json::Value>,
     /// The pages whose pictures wait for the pictures round (a PDF's scanned pages with little text).
     pub pages: Vec<usize>,
+    /// For the sound round, where speech was heard in it: (start, end) in seconds.
+    pub spoken: Vec<(f64, f64)>,
 }
 
 /// How reading an item ended: what was learned about the file, how much of its work in the round is done now, where
@@ -83,7 +85,9 @@ pub type Checkpoint<'a> = &'a mut dyn FnMut(&Ended) -> Result<bool>;
 pub fn version(kind: Kind) -> u32 {
     match kind {
         Kind::Structured | Kind::Image => 1,
-        Kind::Plaintext | Kind::Document | Kind::Screenshot | Kind::Audio | Kind::Video | Kind::Code => 2,
+        Kind::Plaintext | Kind::Document | Kind::Screenshot | Kind::Code => 2,
+        // Where speech was heard, the sound round keeps fewer windows (segment/sound.rs).
+        Kind::Audio | Kind::Video => 3,
     }
 }
 

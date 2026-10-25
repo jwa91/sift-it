@@ -71,8 +71,8 @@ These family rules are Go-specific and don't apply here:
 - Nothing adds to the environment once other threads run: a process started meanwhile can fail with "Bad address".
   The variables llama.cpp sets are set first thing in `main` (`embedder::set_environment`), and `make selftest` checks
   that loading the models changes nothing more.
-- `make eval` (testbed + evals/evals.json) after anything that touches ranking or readers. Currently 53/54 top-1, 18
-  of 19 at the right place, 0/4 false alarms. "someone who can fix a leaking tap" finds contacts.csv first, but too
+- `make eval` (testbed + evals/evals.json) after anything that touches ranking or readers. Currently 54/55 top-1, 19
+  of 20 at the right place, 0/4 false alarms. "someone who can fix a leaking tap" finds contacts.csv first, but too
   weakly to show it (a table's many rows lower its score); "penguin in the film" opens where the narration names it,
   a few seconds before it's shown.
 - The index records what made its vectors (`embedder::VECTOR_SOURCE`): the model and the pipeline's version, not the

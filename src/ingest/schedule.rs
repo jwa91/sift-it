@@ -545,7 +545,11 @@ impl Indexer {
                 } else {
                     Vec::new()
                 };
-                let from = From { done: work.done, resume: work.resume.clone(), pages };
+                let spoken = match work.round {
+                    Round::Sound => super::segment::sound::speech(&self.index.spoken(work.file.id)?),
+                    _ => Vec::new(),
+                };
+                let from = From { done: work.done, resume: work.resume.clone(), pages, spoken };
                 let stop = Arc::new(AtomicBool::new(false));
                 run.in_hand.insert((work.file.id, work.round), (work.clone(), stop.clone()));
                 lane.give(Item { work, from, stop });

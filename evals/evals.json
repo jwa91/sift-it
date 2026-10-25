@@ -36,6 +36,7 @@
   {"q": "pick up the bicycle from the repair shop", "expect": ["Recording 0003.m4a"]},
   {"q": "Yemen", "expect": ["episode-12.m4a"], "loc": [0, 26]},
   {"q": "meeting with the architect about the kitchen renovation", "expect": ["nota-voz.mp3"]},
+  {"q": "a telephone ringing", "expect": ["Recording 0004.m4a"], "loc": [0, 20]},
   {"q": "zebra in a video", "expect": ["clip_0001.mp4"], "loc": [0, 12]},
   {"q": "penguin in the film", "expect": ["clip_0001.mp4"], "loc": [12, 24]},
   {"q": "temperature humidity readings", "expect": ["readings.txt"]},

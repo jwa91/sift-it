@@ -358,6 +358,18 @@ ffmpeg -loglevel error -i "$TMP/memo.aiff" -c:a aac -b:a 64k "$OUT/Recordings/Re
 say -v "Eddy (Spanish (Spain))" -o "$TMP/es.aiff" "Recordatorio: la reunión con el arquitecto es el martes a las \
 diez. Hay que llevar los planos de la cocina y el presupuesto de la reforma."
 ffmpeg -loglevel error -i "$TMP/es.aiff" "$OUT/Recordings/nota-voz.mp3"
+# A voice message with a telephone ringing for half a minute in the middle (440 and 480 Hz, two seconds of every six):
+# the sound between what's said is listened to as closely as a recording without speech.
+say -o "$TMP/call1.aiff" "Hello, this is a message for the book club. We meet on Thursday at seven in the back room \
+of the cafe on the corner, as usual. Please finish the first three chapters before then, and write down anything you \
+want to talk about. If you can't make it, send a text, so we know how many chairs to put out."
+ffmpeg -loglevel error -f lavfi -i "aevalsrc='0.3*(sin(2*PI*440*t)+sin(2*PI*480*t))*lt(mod(t,6),2)':s=22050:d=30" \
+  "$TMP/ring.aiff"
+say -o "$TMP/call2.aiff" "Sorry, that was the other line. Where was I. Yes, the chapters. The library has two more \
+copies, and the shop near the station said it would order more this week. Thanks, and see you on Thursday."
+ffmpeg -loglevel error -i "$TMP/call1.aiff" -i "$TMP/ring.aiff" -i "$TMP/call2.aiff" \
+  -filter_complex "[0:a]aresample=22050[a];[1:a]aresample=22050[b];[2:a]aresample=22050[c];[a][b][c]concat=n=3:v=0:a=1" \
+  -c:a aac -b:a 64k "$OUT/Recordings/Recording 0004.m4a"
 
 # --- A video: three shots (zebra, penguin, guitar) with a voice over --------------------------------------------------
 
