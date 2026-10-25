@@ -103,6 +103,41 @@ sift-it search "code: validate a configuration file"
 
 `NO_COLOR` turns off colour, and `SIFT_IT_IMAGES=0` inline pictures.
 
+## Agents
+
+`sift-it mcp` is an MCP server over stdio with two read-only tools: `search`, for files and past Claude Code and Codex
+conversations, and `read`, for a result's text with the passages around it. It asks the engine, so the model loads
+once, there. Add it to Claude Code:
+
+```sh
+claude mcp add sift-it -- sift-it mcp
+```
+
+Claude Desktop, in `~/Library/Application Support/Claude/claude_desktop_config.json`, with the full path, since apps
+don't get your shell's `PATH` (`which sift-it` says it):
+
+```json
+{"mcpServers": {"sift-it": {"command": "/opt/homebrew/bin/sift-it", "args": ["mcp"]}}}
+```
+
+Codex, in `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.sift-it]
+command = "sift-it"
+args = ["mcp"]
+```
+
+Agents with a shell can use the command itself. [skills/sift-it](skills/sift-it/SKILL.md) is an Agent Skill that
+teaches them `sift-it search --json`. Put it in `~/.claude/skills` for Claude Code, or `~/.agents/skills` for Codex:
+
+```sh
+mkdir -p ~/.claude/skills/sift-it
+curl -fsSL https://raw.githubusercontent.com/jwa91/sift-it/main/skills/sift-it/SKILL.md -o ~/.claude/skills/sift-it/SKILL.md
+```
+
+To search past conversations, add their folders: `sift-it folders add ~/.claude/projects ~/.codex/sessions`.
+
 ## Supported files
 
 sift-it reads only the folders you choose, and never changes, moves or uploads a file.

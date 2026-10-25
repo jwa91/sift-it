@@ -193,9 +193,12 @@ impl Core {
         match op {
             Op::Search(search) if !search.q.trim().is_empty() => reply(self.search(search)?),
             Op::Search(search) | Op::Recent(search) => reply(self.with_searcher(|searcher| searcher.recent(search))?),
-            Op::Text { segment_id: Some(id), .. } => {
-                reply(Text { text: self.with_searcher(|searcher| searcher.index().segment_text(*id))? })
-            }
+            Op::Text { segment_id: Some(id), around, .. } => reply(Text {
+                text: self.with_searcher(|searcher| match around {
+                    Some(around) => searcher.index().segment_text_around(*id, *around),
+                    None => searcher.index().segment_text(*id),
+                })?,
+            }),
             Op::Text { path: Some(path), .. } => {
                 reply(Text { text: self.with_searcher(|searcher| searcher.index().file_text(path))? })
             }
@@ -566,7 +569,7 @@ mod tests {
         let reply = core.handle(&Op::Search(request(Mode::Words))).unwrap();
         let results: Results = serde_json::from_value(reply).unwrap();
         assert_eq!(results.hits[0].name, "pancakes.txt");
-        assert!(core.handle(&Op::Text { segment_id: None, path: None }).is_err());
+        assert!(core.handle(&Op::Text { segment_id: None, path: None, around: None }).is_err());
 
         // By meaning: the model loads (here it can't), and the search is answered by words meanwhile.
         let response = core.search(&request(Mode::Meaning)).unwrap();

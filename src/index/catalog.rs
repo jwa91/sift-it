@@ -261,6 +261,34 @@ impl Reader {
             .flatten())
     }
 
+    /// A segment's text, with `around` of its file's text segments before it and after it, in order (by their place,
+    /// as file_text), each a paragraph of its own.
+    pub fn segment_text_around(&self, segment_id: i64, around: usize) -> Result<Option<String>> {
+        let Some((file, loc, text)) = self
+            .conn
+            .query_row("SELECT file_id, COALESCE(loc, -1), text FROM segments WHERE id = ?1", [segment_id], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, f64>(1)?, row.get::<_, Option<String>>(2)?))
+            })
+            .optional()?
+        else {
+            return Ok(None);
+        };
+        let neighbours = |side: &str, order: &str| -> Result<Vec<String>> {
+            let mut statement = self.conn.prepare_cached(&format!(
+                "SELECT text FROM segments WHERE file_id = ?1 AND text IS NOT NULL AND text != '' AND id != ?3
+                     AND (COALESCE(loc, -1), id) {side} (?2, ?3)
+                 ORDER BY COALESCE(loc, -1) {order}, id {order} LIMIT ?4"
+            ))?;
+            let rows = statement.query_map(params![file, loc, segment_id, around as i64], |row| row.get(0))?;
+            Ok(rows.collect::<std::result::Result<_, _>>()?)
+        };
+        let mut parts = neighbours("<", "DESC")?;
+        parts.reverse();
+        parts.extend(text.filter(|text| !text.is_empty()));
+        parts.extend(neighbours(">", "ASC")?);
+        Ok((!parts.is_empty()).then(|| parts.join("\n\n")))
+    }
+
     /// A file's text, for a preview: its text segments in order, until there are some 8,000 bytes (more than a
     /// preview shows).
     pub fn file_text(&self, path: &str) -> Result<Option<String>> {
@@ -1331,6 +1359,23 @@ mod tests {
         let work = next(&store, Round::Words, "/a/session.jsonl");
         assert!(store.fail(&work, "can't read it", false).unwrap());
         assert_eq!(store.words_resume(id).unwrap(), None);
+    }
+
+    #[test]
+    fn a_segment_is_read_with_the_ones_around_it() {
+        let index = TempIndex::new("around");
+        let mut store = Writer::open(&index.path).unwrap();
+        let texts = |names: &[&str]| names.iter().map(|name| (name.to_string(), None)).collect::<Vec<_>>();
+        add(&mut store, "/a/other.txt", Kind::Plaintext, texts(&["elsewhere"]));
+        add(&mut store, "/a/story.txt", Kind::Plaintext, texts(&["one", "two", "three", "four", "five"]));
+        let id = |text: &str| -> i64 {
+            store.conn.query_row("SELECT id FROM segments WHERE text = ?1", [text], |row| row.get(0)).unwrap()
+        };
+        let around = |text: &str, n| store.segment_text_around(id(text), n).unwrap().unwrap();
+        assert_eq!(around("three", 1), "two\n\nthree\n\nfour");
+        assert_eq!(around("one", 2), "one\n\ntwo\n\nthree");
+        assert_eq!(around("five", 0), "five");
+        assert_eq!(store.segment_text_around(-1, 1).unwrap(), None);
     }
 
     #[test]

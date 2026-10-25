@@ -178,7 +178,8 @@ src/
     macos/               the frameworks: ImageIO, CoreGraphics and Vision (mod.rs), AVFoundation (av.rs), power,
                          memory pressure (pressure.rs), iCloud Drive's files only in the cloud (icloud.rs)
     speech.rs            the helper process
-  clients/               the engine's client, the TUI, results in a terminal, previews, opening results, serve
+  clients/               the engine's client, the TUI, results in a terminal, previews, opening results, serve, the
+                         MCP server for agents (mcp.rs)
   tools/                 eval, the benches, selftest, estimate
 crates/
   protocol/              sift-it-protocol

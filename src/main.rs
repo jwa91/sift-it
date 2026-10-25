@@ -82,6 +82,8 @@ enum Command {
     },
     /// Relay a front end's searches (JSON lines over stdin/stdout) to the engine, and make its previews
     Serve,
+    /// An MCP server over stdin/stdout, for agents: search files and conversations, and read what was found
+    Mcp,
     /// The engine that answers every search: run it (launchd does), or stop it or let its model go
     Engine {
         #[command(subcommand)]
@@ -253,6 +255,7 @@ fn run(cli: Cli) -> Result<()> {
             Ok(())
         }
         Command::Serve => clients::serve::serve(),
+        Command::Mcp => clients::mcp::run(),
         Command::Engine { action: None } => services::engine::run(&config::index_path()),
         Command::Engine { action: Some(action) } => {
             let Some(mut engine) = clients::Client::running() else {
