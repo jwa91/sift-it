@@ -51,9 +51,11 @@ else
   scripts/codesign.sh "$stage/sift-it" "$stage/sift-it-transcribe"
 fi
 
-# The archive (the binaries with the license and docs, as GoReleaser packs them) and its checksum.
+# The archive (the binaries with the license and docs, as GoReleaser packs them, and the licenses of what's built into
+# them) and its checksum.
 cp LICENSE README.md CHANGELOG.md "$stage/"
-tar -czf "dist/$archive" -C "$stage" sift-it sift-it-transcribe LICENSE README.md CHANGELOG.md
+python3 scripts/notices.py > "$stage/THIRD_PARTY_NOTICES"
+tar -czf "dist/$archive" -C "$stage" sift-it sift-it-transcribe LICENSE THIRD_PARTY_NOTICES README.md CHANGELOG.md
 (cd dist && shasum -a 256 "$archive" > checksums.txt)
 sha256="$(cut -d' ' -f1 dist/checksums.txt)"
 

@@ -329,5 +329,7 @@ The mixed-file evaluation needs a larger demo collection, which isn't part of th
   Apache License 2.0.
 
 sift-it uses the [MIT License](LICENSE). The license preserves DigUp's copyright notice alongside the sift-it copyright notice.
+Each release's archive carries THIRD_PARTY_NOTICES: everything built into `sift-it` and `sift-it-transcribe`
+(llama.cpp, FluidAudio and the Rust crates), with its license text. `scripts/notices.py` writes it after a build.
 The copied reference files also include [DigUp's original MIT notice](tests/reference/LICENSE).
 Gemma is a trademark of Google LLC.
