@@ -5,7 +5,11 @@ All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com); versions follow
 [SemVer](https://semver.org).
 
-## [Unreleased]
+## [0.4.0] — 2026-10-25
+
+Indexing in rounds: every file is found by its words within seconds of choosing the folders, and its meaning follows a
+round at a time. What's said is written down on the Neural Engine, the models are shared in the Hugging Face cache, and
+indexing takes less memory and less time throughout.
 
 ### Changed
 
@@ -71,6 +75,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com); versions follow
 - The engine's model has a context made for one query: 32 MB of compute buffers instead of 63 MB.
 - ggml's Metal residency sets are off. They kept about 330 MB wired for three minutes after every search, and a thread
   woke 174 times a second for as long as the engine ran, idle or not. Embedding is as fast without them.
+- `sift-it folders` (and `folders add`, `remove`, `include`, `exclude`) lists the folders, one a line, where it printed
+  all of config.json.
+- The release archive carries THIRD_PARTY_NOTICES: the licenses of llama.cpp, FluidAudio and the Rust crates built
+  into `sift-it` and `sift-it-transcribe`.
 
 ### Removed
 

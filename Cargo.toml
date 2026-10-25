@@ -4,7 +4,7 @@ default-members = [".", "crates/llama", "crates/protocol"]
 
 # One version for the binary and its crates: a release bumps it here.
 [workspace.package]
-version = "0.3.1"
+version = "0.4.0"
 edition = "2024"
 license = "MIT"
 
